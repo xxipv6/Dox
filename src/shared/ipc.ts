@@ -40,5 +40,9 @@ export const IpcChannels = {
   // 快捷命令片段
   snippetList: 'snippet:list',
   snippetSave: 'snippet:save',
-  snippetDelete: 'snippet:delete'
+  snippetDelete: 'snippet:delete',
+  // rz/sz（ZMODEM）
+  dialogPickDirectory: 'dialog:pickDirectory',
+  zmodemPickReadFiles: 'zmodem:pickReadFiles',
+  zmodemWriteFile: 'zmodem:writeFile'
 } as const

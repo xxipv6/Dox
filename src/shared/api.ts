@@ -12,7 +12,8 @@ import type {
   SshAuth,
   SshSessionConfig,
   TermSize,
-  TransferTask
+  TransferTask,
+  ZmodemFile
 } from './types'
 
 /** preload 通过 contextBridge 暴露给渲染进程的 API（window.api） */
@@ -73,4 +74,11 @@ export interface DoxApi {
   listSnippets(): Promise<CommandSnippet[]>
   saveSnippet(input: Omit<CommandSnippet, 'id'> & { id?: string }): Promise<CommandSnippet>
   deleteSnippet(id: string): Promise<void>
+
+  // ---- rz/sz（ZMODEM） ----
+  pickDirectory(title: string): Promise<string | null>
+  /** 弹文件选择框并读入内容（rz 上传用，单文件限 256MB） */
+  pickAndReadFiles(): Promise<ZmodemFile[]>
+  /** 把 sz 接收到的文件写入指定目录，重名自动加序号，返回最终路径 */
+  writeReceivedFile(dir: string, name: string, data: Uint8Array): Promise<string>
 }

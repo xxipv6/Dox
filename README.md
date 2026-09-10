@@ -56,9 +56,9 @@ src/
 - **M5 ✅**：electron-builder 三平台配置（`electron-builder.yml`）、应用图标生成脚本（`node scripts/generate-icon.mjs`，纯 Node 手写 PNG）、`electron-updater` 自动更新接线（GitHub Releases 渠道，需在 yml 中替换 owner/repo）
   - **Windows nsis 已验证**：`npm run pack:win` → `dist/Dox Setup 0.1.0.exe`（108MB）+ `latest.yml`
   - macOS dmg / Linux AppImage+deb 配置就绪但尚未在对应平台实测；签名公证需证书（mac `identity: null` 暂跳过签名，Windows 未配置证书则不签名，用户会看到 SmartScreen 提示）
-- **二期（进行中）**：
+- **二期（全部完成 ✅）**：
   - **跳板机 ProxyJump ✅**：会话配置挂 `jumpHostId` 指向另一条已保存会话；主进程递归建立跳板链（`forwardOut` 打通 TCP 通道，等效 `ssh -J`），最多 3 层嵌套；跳板连接与目标会话同生共死；快速连接表单可选跳板，列表用 ⛓ 标识
-  - 待做：rz/sz（ZMODEM）
+  - **rz/sz（ZMODEM）✅**：终端数据流经 zmodem.js Sentry 拦截，识别发起序列自动接管会话；sz 弹目录选择框逐块落盘（重名加序号、防路径穿越），rz 弹文件选择框经主进程读入后发送（单文件限 256MB 内存模式）；会话期间屏蔽键盘输入
   - **快捷命令片段 ✅**：侧栏管理常用命令（名称 + 多行命令），▶ 一键注入当前终端执行（多行逐行发送），⤵ 仅粘贴待编辑；持久化于 dox-config
   - **端口转发面板 ✅**：侧栏面板管理规则——本地转发（-L：本机监听 + `forwardOut` 管道）与远程转发（-R：`forwardIn` + `tcp connection` 按端口分发）；规则绑定会话，会话断开自动停止；非当前会话规则置灰显示
   - **known_hosts 指纹确认 ✅**：独立指纹库（`dox-known-hosts`），首连弹窗「信任并保存 / 仅本次 / 拒绝」，指纹变更时红色警告并对比新旧指纹；`hostVerifier` 异步挂起等用户决策（readyTimeout 60s）；跳板链每一跳同样校验

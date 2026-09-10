@@ -142,3 +142,10 @@ export interface CommandSnippet {
   /** 支持多行命令，执行时逐行发送 */
   command: string
 }
+
+/** rz/sz（ZMODEM）传输用的内存文件（主进程读取后经 IPC 传给渲染进程） */
+export interface ZmodemFile {
+  name: string
+  size: number
+  data: Uint8Array
+}

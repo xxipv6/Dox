@@ -84,7 +84,13 @@ const api: DoxApi = {
   // ---- 快捷命令片段 ----
   listSnippets: () => ipcRenderer.invoke(IpcChannels.snippetList),
   saveSnippet: (input) => ipcRenderer.invoke(IpcChannels.snippetSave, input),
-  deleteSnippet: (id) => ipcRenderer.invoke(IpcChannels.snippetDelete, id)
+  deleteSnippet: (id) => ipcRenderer.invoke(IpcChannels.snippetDelete, id),
+
+  // ---- rz/sz（ZMODEM） ----
+  pickDirectory: (title) => ipcRenderer.invoke(IpcChannels.dialogPickDirectory, title),
+  pickAndReadFiles: () => ipcRenderer.invoke(IpcChannels.zmodemPickReadFiles),
+  writeReceivedFile: (dir, name, data) =>
+    ipcRenderer.invoke(IpcChannels.zmodemWriteFile, dir, name, data)
 }
 
 contextBridge.exposeInMainWorld('api', api)

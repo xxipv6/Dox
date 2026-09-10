@@ -1,5 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import fs from 'node:fs/promises'
+import { basename, extname, join } from 'node:path'
 import { IpcChannels } from '../../shared/ipc'
 import type {
   CommandSnippet,
@@ -135,4 +137,50 @@ export function registerIpc(
     configStore.saveSnippet(input)
   )
   ipcMain.handle(IpcChannels.snippetDelete, (_event, id: string) => configStore.removeSnippet(id))
+
+  // ---- rz/sz（ZMODEM） ----
+  ipcMain.handle(IpcChannels.dialogPickDirectory, async (event, title: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const result = await dialog.showOpenDialog(win!, {
+      title,
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
+  ipcMain.handle(IpcChannels.zmodemPickReadFiles, async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const result = await dialog.showOpenDialog(win!, {
+      title: '选择要上传到远端的文件（rz）',
+      properties: ['openFile', 'multiSelections']
+    })
+    if (result.canceled) return []
+    const files = []
+    for (const p of result.filePaths) {
+      const stat = await fs.stat(p)
+      if (!stat.isFile()) continue
+      if (stat.size > 256 * 1024 * 1024) {
+        throw new Error(`文件 ${basename(p)} 超过 256MB，ZMODEM 内存传输模式不支持`)
+      }
+      files.push({ name: basename(p), size: stat.size, data: await fs.readFile(p) })
+    }
+    return files
+  })
+
+  ipcMain.handle(
+    IpcChannels.zmodemWriteFile,
+    async (_event, dir: string, name: string, data: Uint8Array) => {
+      // 防路径穿越：只取文件名部分
+      const safe = name.split(/[\\/]/).pop() || 'download.bin'
+      const ext = extname(safe)
+      const stem = basename(safe, ext)
+      let target = join(dir, safe)
+      let n = 1
+      while (existsSync(target)) {
+        target = join(dir, `${stem}-${n++}${ext}`)
+      }
+      await fs.writeFile(target, Buffer.from(data))
+      return target
+    }
+  )
 }

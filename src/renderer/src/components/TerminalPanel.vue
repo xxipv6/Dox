@@ -8,6 +8,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
 import { useSettingsStore } from '../stores/settings'
+import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
@@ -23,6 +24,7 @@ let fitAddon: FitAddon | null = null
 let searchAddon: SearchAddon | null = null
 let unsubscribeData: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
+let zmodem: ZmodemBridge | null = null
 
 // ---- 终端 cwd 跟踪（解析 cd/pushd 命令，posix 语义解析相对路径）----
 let lineBuf = ''
@@ -136,6 +138,9 @@ onMounted(() => {
 
   fitAddon.fit()
 
+  // ZMODEM：数据流先过 Sentry，识别到 rz/sz 序列时自动接管会话
+  zmodem = createZmodemBridge(props.sessionId, (data) => term?.write(data))
+
   // Ctrl+F 打开搜索框
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
@@ -151,12 +156,13 @@ onMounted(() => {
     if (sel) void navigator.clipboard.writeText(sel)
   })
 
-  // 远端输出 → xterm
+  // 远端输出 → ZMODEM Sentry → xterm（ZMODEM 会话期间数据被协议接管）
   unsubscribeData = window.api.onData((id, chunk) => {
-    if (id === props.sessionId) term?.write(chunk)
+    if (id === props.sessionId) zmodem?.consume(chunk)
   })
-  // 键盘输入 → 远端；同时跟踪 cd 命令维护 cwd
+  // 键盘输入 → 远端；ZMODEM 会话期间屏蔽用户输入，避免污染协议流
   term.onData((data) => {
+    if (zmodem?.isActive()) return
     window.api.input(props.sessionId, data)
     trackInput(data)
   })
