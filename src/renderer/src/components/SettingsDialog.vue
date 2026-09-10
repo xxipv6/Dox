@@ -112,7 +112,7 @@ onMounted(async () => {
       <div class="field">
         <label>本地终端 Shell</label>
         <select v-model="settings.localShellId">
-          <option value="">自动（Windows 下优先 cmd）</option>
+          <option value="">自动（Windows 优先 cmd，macOS/Linux 跟随 $SHELL）</option>
           <option v-for="s in shells" :key="s.id" :value="s.id">{{ s.name }}</option>
         </select>
         <p class="sub-note">

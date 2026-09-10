@@ -8,3 +8,13 @@ declare module '*.sh?raw' {
   const content: string
   export default content
 }
+
+declare module '*.zsh?raw' {
+  const content: string
+  export default content
+}
+
+declare module '*.fish?raw' {
+  const content: string
+  export default content
+}

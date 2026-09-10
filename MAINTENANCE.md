@@ -197,6 +197,12 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
 - **断言后果之前先确认前因。** 例如「父会话断开 → 容器标签变 closed」，
   得先确认父会话**真的断了**；否则命令没送进去会伪装成功能坏了。
   但反过来也别用状态点轮询去确认 —— 自动重连很快，中转态会在两次轮询之间溜走，改用**事件流**。
+- **改了真实配置就必须还原。** 验证脚本跑的是真实应用、读写的是真实
+  `%APPDATA%/dox/`——在一次设备/指纹/布局之外，**设置项**也是共享状态。
+  脚本里拨了一个开关测「关掉会怎样」，测完没拨回去，用户下次开应用功能就是关的，
+  而且毫无线索可查（实测踩过：监控条「没出现」，查到最后是上一轮测试留下的
+  `false`）。凡是会落盘的改动，脚本收尾一律恢复原状——与「远端临时文件自己删掉」
+  是同一类卫生要求，只不过这份垃圾留在本机配置里。
 
 ---
 
@@ -226,6 +232,27 @@ node scripts/generate-icon.mjs --preview   # 另出 shots/icon-sizes.png（16/32
 ---
 
 ## 6. 踩过的坑（环境相关）
+
+### npm 装完 node-pty 可能丢 spawn-helper 的执行位
+
+症状：本地终端一开就报 `posix_spawnp failed`（`LocalPtyManager.spawn` → `UnixTerminal`）。
+npm 从缓存解包时偶尔不给 `node_modules/node-pty/prebuilds/*/spawn-helper` 加执行位，
+原生模块能加载、但 fork 时 posix_spawnp 以 EACCES 失败。修复：
+
+```bash
+chmod +x node_modules/node-pty/prebuilds/*/spawn-helper
+```
+
+另外 `electron install.js` 没跑（安装脚本被禁）时 electron-vite 会报 `Electron uninstall`，
+需要 `node node_modules/electron/install.js` 手动补二进制（国内设 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`）。
+
+### POSIX shell 没有通用的 integration 入口
+
+bash 的 `--rcfile` 是 bash 专属：zsh 报 `no such option`、fish 不认。**别以为
+「$SHELL + --rcfile」能通吃 POSIX** —— 那是「本地终端打开即死」的写法。
+zsh 用 ZDOTDIR 整个换掉配置目录（换掉后 `~/.zshenv` / `~/.zprofile` / `~/.zshrc`
+zsh 都不会再自动读，要在注入的同名文件里逐个补回源）；fish 用 `-C 'source ...'`。
+新加一种 shell 支持时，先确认它的启动文件机制，再选注入点。
 
 ### Windows：`where docker` 会先给出一个 POSIX 脚本
 

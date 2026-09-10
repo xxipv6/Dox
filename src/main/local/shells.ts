@@ -5,13 +5,17 @@ import { app } from 'electron'
 import type { LocalShellInfo } from '../../shared/types'
 import psProfile from './scripts/dox-profile.ps1?raw'
 import bashrc from './scripts/dox-bashrc.sh?raw'
+import zshrc from './scripts/dox-zshrc.zsh?raw'
+import fishIntegration from './scripts/dox-fish.fish?raw'
 
 /** 探测到的 shell 记录（info 给 UI，resolve 用内部字段） */
 interface DetectedShell extends LocalShellInfo {
   command?: string
   args?: string[]
+  /** spawn 时需要额外注入的环境变量（zsh 的 ZDOTDIR） */
+  env?: Record<string, string>
   /** 注入方式 */
-  integration?: 'powershell' | 'bash' | 'cmd' | 'none'
+  integration?: 'powershell' | 'bash' | 'zsh' | 'fish' | 'cmd' | 'none'
 }
 
 /**
@@ -30,15 +34,28 @@ function scriptsDir(): string {
 /**
  * 把 integration 脚本写入 userData。
  * 用 ?raw 内联进产物，运行时再落盘 —— 打包后也能正常工作。
+ *
+ * zsh 的注入靠 ZDOTDIR：zsh 没有 bash 的 --rcfile，只能把「配置目录」整个换掉。
+ * 换了之后用户家目录下的启动文件 zsh 就不会再自动读，
+ * 所以 .zshenv / .zprofile 各补一行回源（.zshrc 的回源写在 dox-zshrc.zsh 里）。
  */
-function ensureScripts(): { ps1: string; sh: string } {
+function ensureScripts(): { ps1: string; sh: string; zdotdir: string; fish: string } {
   const dir = scriptsDir()
   mkdirSync(dir, { recursive: true })
   const ps1 = join(dir, 'dox-profile.ps1')
   const sh = join(dir, 'dox-bashrc.sh')
+  const zdotdir = join(dir, 'zdotdir')
+  mkdirSync(zdotdir, { recursive: true })
+  const fish = join(dir, 'dox.fish')
   writeFileSync(ps1, psProfile, 'utf8')
   writeFileSync(sh, bashrc, 'utf8')
-  return { ps1, sh }
+  writeFileSync(join(zdotdir, '.zshrc'), zshrc, 'utf8')
+  const passthrough = (name: string) =>
+    `# Dox：ZDOTDIR 被占用后 zsh 不再自动读 ~/${name}，在这里补回\nif [ -f "$HOME/${name}" ]; then\n  . "$HOME/${name}"\nfi\n`
+  writeFileSync(join(zdotdir, '.zshenv'), passthrough('.zshenv'), 'utf8')
+  writeFileSync(join(zdotdir, '.zprofile'), passthrough('.zprofile'), 'utf8')
+  writeFileSync(fish, fishIntegration, 'utf8')
+  return { ps1, sh, zdotdir, fish }
 }
 
 /** 在常见安装位置之外，用 PATH 兜底查找可执行文件（同步，只在路径未命中时调用） */
@@ -83,24 +100,80 @@ function listWslDistrosAsync(): Promise<string[]> {
   })
 }
 
+/** POSIX shell 种类：决定 integration 的注入方式（没有 --rcfile 这种通用入口） */
+type PosixFlavor = 'bash' | 'zsh' | 'fish' | 'unknown'
+
+function flavorOf(command: string): PosixFlavor {
+  const base = command.split('/').pop() ?? command
+  if (base === 'bash' || base === 'zsh' || base === 'fish') return base
+  return 'unknown'
+}
+
+/**
+ * 在 PATH 与几个常见安装位置里找可执行文件。
+ * 纯 existsSync 遍历目录，不起子进程 —— 探测在主进程关键路径上，
+ * 为「用户可能没装这个 shell」付一次 fork 不值。
+ */
+function findOnPathPosix(exe: string): string | undefined {
+  const dirs = (process.env['PATH'] ?? '').split(':').filter(Boolean)
+  // Homebrew（/opt/homebrew/bin）等位置不一定在 GUI 进程的 PATH 里
+  for (const dir of [...dirs, '/bin', '/usr/bin', '/usr/local/bin', '/opt/homebrew/bin']) {
+    const candidate = join(dir, exe)
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
+/**
+ * 探测 POSIX shell：$SHELL 排第一（用户默认），再补 PATH 上找到的 zsh/bash/fish。
+ * 不认识的 shell（csh/dash/…）也能开终端，只是没有 integration ——
+ * 渲染层有 trackInput 兜底解析手敲的 cd，不会坏。
+ */
+function probePosixSync(): DetectedShell[] {
+  const { sh, zdotdir, fish } = ensureScripts()
+  const list: DetectedShell[] = []
+  const seen = new Set<string>()
+
+  const add = (command: string | undefined, isDefault = false): void => {
+    if (!command || seen.has(command) || !existsSync(command)) return
+    seen.add(command)
+    const flavor = flavorOf(command)
+    const name = command.split('/').pop() ?? command
+    const entry: DetectedShell = {
+      id: command,
+      name: isDefault ? `${name}（默认）` : name,
+      integrated: flavor !== 'unknown',
+      command,
+      args: ['-i'],
+      integration: 'none'
+    }
+    if (flavor === 'bash') {
+      entry.args = ['--rcfile', sh, '-i']
+      entry.integration = 'bash'
+    } else if (flavor === 'zsh') {
+      entry.env = { ZDOTDIR: zdotdir }
+      entry.integration = 'zsh'
+    } else if (flavor === 'fish') {
+      entry.args = ['-i', '-C', `source ${fish}`]
+      entry.integration = 'fish'
+    }
+    list.push(entry)
+  }
+
+  add(process.env['SHELL'], true)
+  add(findOnPathPosix('zsh'))
+  add(findOnPathPosix('bash'))
+  add(findOnPathPosix('fish'))
+  // 极端兜底：$SHELL 未设且 PATH 上一个都没找到（精简容器/受限系统）
+  if (list.length === 0) add('/bin/sh')
+  return list
+}
+
 /** 同步探测基础 shell（不碰 WSL，避免阻塞主进程） */
 function probeBaseSync(): DetectedShell[] {
   const list: DetectedShell[] = []
 
-  if (process.platform !== 'win32') {
-    const { sh } = ensureScripts()
-    const shell = process.env['SHELL'] ?? '/bin/bash'
-    return [
-      {
-        id: 'default',
-        name: shell.split('/').pop() ?? shell,
-        integrated: true,
-        command: shell,
-        args: ['--rcfile', sh, '-i'],
-        integration: 'bash'
-      }
-    ]
-  }
+  if (process.platform !== 'win32') return probePosixSync()
 
   const { ps1, sh } = ensureScripts()
   const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files'
@@ -220,7 +293,7 @@ export interface ResolvedShell {
 
 /**
  * 解析出实际 spawn 用的命令。
- * shellId 未指定或已失效时回退到列表第一项（Windows 下是 cmd）。
+ * shellId 未指定或已失效时回退到列表第一项（Windows 下是 cmd，POSIX 下是 $SHELL）。
  */
 export function resolveShell(shellId?: string): ResolvedShell {
   const shells = detectShells()
@@ -233,6 +306,8 @@ export function resolveShell(shellId?: string): ResolvedShell {
 
   const shell = shells.find((s) => s.id === shellId) ?? shells[0]
   if (!shell?.command) throw new Error('本机未找到可用的本地 shell')
+
+  Object.assign(env, shell.env)
 
   if (shell.integration === 'cmd') {
     // 用 $P（cmd 在每次渲染提示符时求值的路径码）上报 OSC 7。

@@ -54,6 +54,8 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-transfer-cancel.mjs` | 传输取消：状态真变、远端不留半截文件 |
 | `verify-folder-cancel.mjs` | 文件夹传输的「全部取消」不再被新冒出来的任务顶上 |
 | `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |
+| `verify-posix-integration.mjs` | 校验 POSIX 侧的同一契约：zsh（ZDOTDIR 注入）/ bash（--rcfile）/ fish（-C），装了哪个测哪个 |
+| `verify-posix-local-ui.mjs` | 端到端：真实应用里新建本地终端 → 敲 `cd` → 断言标签标题跟随 cwd（守着「zsh 打开即死」那个回归） |
 | `verify-cmd-integration.mjs` | 校验 cmd 的 PROMPT 注入能否上报 cwd |
 | `verify-cmd-startup.mjs` | 隔离实验：shell 启动画面是否干净（排查「终端莫名多出内容」） |
 
@@ -88,6 +90,7 @@ src/
   - 文件夹**递归上传/下载**（入队时展开为文件级任务）、目录**递归删除**（符号链接不跟随）
   - **分屏**：标签栏 ◧/⬓ 向右/向下分屏，每 pane 一条独立 SSH 会话（Tab→Pane 二级模型），pane 聚焦/关闭
   - **主题设置**：侧栏 ⚙ 弹窗，终端配色预设 + 字体/连字/字号/本地 shell；设置存在主进程 electron-store（不是 localStorage，打包后那个源不落盘），改完实时生效
+  - **本地 shell 跨平台**：Windows 列 cmd / PowerShell / pwsh / Git Bash / WSL；POSIX 按 `$SHELL` + PATH 探测 bash / zsh / fish —— 注入方式各不相同（bash 走 `--rcfile`、zsh 走 ZDOTDIR、fish 走 `-C`），不认识的 shell（csh/dash/…）降级为无 integration 的干净终端，cwd 有 trackInput 兜底
 - **M5 ✅**：electron-builder 三平台配置（`electron-builder.yml`）、应用图标生成脚本（`node scripts/generate-icon.mjs`，纯 Node 手写 PNG）、`electron-updater` 自动更新接线（GitHub Releases 渠道，需在 yml 中替换 owner/repo）
   - **Windows nsis 已验证**：`npm run pack:win` → `dist/Dox Setup 0.1.0.exe`（108MB）+ `latest.yml`
   - macOS dmg / Linux AppImage+deb 配置就绪但尚未在对应平台实测；签名公证需证书（mac `identity: null` 暂跳过签名，Windows 未配置证书则不签名，用户会看到 SmartScreen 提示）
