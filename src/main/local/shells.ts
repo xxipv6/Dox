@@ -78,6 +78,20 @@ export function detectShells(): LocalShellInfo[] {
     const { ps1, sh } = ensureScripts()
     const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files'
 
+    // cmd.exe 放在首位 = 默认 shell：靠 PROMPT 里的 $P 发 OSC 7 上报目录，
+    // 无 PSReadLine 那套逐键重绘，行为最稳（代价是拿不到退出码）
+    const cmd = process.env['COMSPEC'] ?? onPath('cmd.exe')
+    if (cmd) {
+      list.push({
+        id: 'cmd',
+        name: '命令提示符 (cmd)',
+        integrated: false,
+        command: cmd,
+        args: [],
+        integration: 'cmd'
+      })
+    }
+
     // PowerShell 7
     const pwsh = firstExisting([
       join(programFiles, 'PowerShell', '7', 'pwsh.exe'),
@@ -107,19 +121,6 @@ export function detectShells(): LocalShellInfo[] {
         command: winPs,
         args: ['-NoLogo', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', `. '${ps1}'`],
         integration: 'powershell'
-      })
-    }
-
-    // cmd.exe：靠 PROMPT 里的 $E 发 OSC 7，拿不到退出码
-    const cmd = process.env['COMSPEC'] ?? onPath('cmd.exe')
-    if (cmd) {
-      list.push({
-        id: 'cmd',
-        name: '命令提示符 (cmd)',
-        integrated: false,
-        command: cmd,
-        args: [],
-        integration: 'cmd'
       })
     }
 
@@ -177,7 +178,7 @@ export interface ResolvedShell {
 
 /**
  * 解析出实际 spawn 用的命令。
- * shellId 未指定或已失效时回退到列表第一项（优先 pwsh）。
+ * shellId 未指定或已失效时回退到列表第一项（Windows 下是 cmd）。
  */
 export function resolveShell(shellId?: string): ResolvedShell {
   detectShells()

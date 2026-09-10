@@ -46,7 +46,21 @@ function checkScreen(lines, tag) {
   return problems.length === 0
 }
 
-async function runCase({ cols, rows, resizeTo, label, startupResize }) {
+/** 与 shells.ts 的 resolveShell 保持一致 */
+const SHELLS = {
+  pwsh: {
+    command: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    args: ['-NoLogo', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', `. '${profilePath}'`],
+    env: {}
+  },
+  cmd: {
+    command: process.env.COMSPEC ?? 'cmd.exe',
+    args: [],
+    env: { PROMPT: '$E]7;file:///$P$E\\$P$G' }
+  }
+}
+
+async function runCase({ cols, rows, resizeTo, label, startupResize, shell = 'pwsh' }) {
   const term = new Terminal({ cols, rows, scrollback: 300, allowProposedApi: true })
   const sentry = new Sentry({
     to_terminal: (o) => term.write(new Uint8Array(o)),
@@ -57,11 +71,14 @@ async function runCase({ cols, rows, resizeTo, label, startupResize }) {
   // 与 LocalPtyManager 一致：应用里 pty 总是先以 80x24 启动
   const spawnCols = startupResize ? 80 : cols
   const spawnRows = startupResize ? 24 : rows
-  const p = pty.spawn(
-    'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
-    ['-NoLogo', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', `. '${profilePath}'`],
-    { name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: homedir() }
-  )
+  const spec = SHELLS[shell]
+  const p = pty.spawn(spec.command, spec.args, {
+    name: 'xterm-256color',
+    cols: spawnCols,
+    rows: spawnRows,
+    cwd: homedir(),
+    env: { ...process.env, ...spec.env }
+  })
   p.onData((c) => sentry.consume(Buffer.from(c, 'utf8')))
 
   const wait = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -130,8 +147,15 @@ const startupCases = [
   { cols: 60, rows: 20, startupResize: true, label: '启动竞态 80x24→60x20' }
 ]
 
+// cmd 场景（当前默认 shell）：dir 代替 ls
+const cmdCases = [
+  { cols: 100, rows: 30, shell: 'cmd', label: 'cmd 100x30 常规' },
+  { cols: 80, rows: 20, shell: 'cmd', label: 'cmd 80x20 常规' },
+  { cols: 100, rows: 30, startupResize: true, shell: 'cmd', label: 'cmd 启动竞态 80x24→100x30' }
+]
+
 let allOk = true
-for (const c of [...cases, ...startupCases]) {
+for (const c of [...cases, ...startupCases, ...cmdCases]) {
   const ok = await runCase(c)
   if (!ok) allOk = false
 }
