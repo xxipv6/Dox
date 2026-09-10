@@ -43,12 +43,11 @@ linux:
     - deb
 
 # ---------- 自动更新 ----------
-# 发布渠道：GitHub Releases。
-# ⚠️ TODO(发布前必改)：owner 仍是占位符。electron-updater 按它拼更新地址，
-# 填错或留空都会让「检查更新」静默失败（用户只会看到永远没有新版本）。
-# 同时建议在 package.json 补上 repository 字段，两者保持一致。
+# 发布渠道：GitHub Releases。electron-updater 按 owner/repo 拼更新地址，
+# 与 package.json 的 repository 保持一致；两者对不上会让「检查更新」静默失败
+# （用户只会看到永远没有新版本）。
 # CI 中 electron-builder --publish always 即可推送更新。
 publish:
   provider: github
-  owner: __SET_ME__
-  repo: dox
+  owner: xxipv6
+  repo: Dox
