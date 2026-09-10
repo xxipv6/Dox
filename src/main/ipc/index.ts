@@ -138,6 +138,9 @@ export function registerIpc(
     (_event, sessionId: string, path: string, content: string, expectedMtime?: number) =>
       sftpService.writeText(sessionId, path, content, expectedMtime)
   )
+  ipcMain.handle(IpcChannels.sftpArchive, (_event, sessionId: string, paths: string[]) =>
+    sftpService.archive(sessionId, paths)
+  )
 
   // ---- 容器终端 ----
   ipcMain.handle(IpcChannels.containerList, (_event, parentSessionId: string) =>

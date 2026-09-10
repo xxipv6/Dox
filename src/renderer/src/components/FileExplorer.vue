@@ -214,6 +214,12 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
         label: many ? `下载这 ${targets.length} 项` : '下载',
         icon: 'download'
       },
+      {
+        // 就地打包：远端当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」
+        id: 'archive',
+        label: many ? `打包这 ${targets.length} 项` : '打包',
+        icon: 'box'
+      },
       // 重命名只能对一项，多选时给个禁用项比整条去掉更好读
       { id: 'rename', label: '重命名', icon: 'pencil', disabled: many },
       {
@@ -231,8 +237,25 @@ async function onMenuSelect(id: string): Promise<void> {
   closeMenu()
   if (!targets.length) return
   if (id === 'download') await downloadTargets(targets)
+  else if (id === 'archive') await archiveTargets(targets)
   else if (id === 'rename') startRename(targets[0])
   else if (id === 'delete') await removeTargets(targets)
+}
+
+/**
+ * 就地打包：远端在当前目录生成 .tar.gz，完事刷新列表让包露出来。
+ * 大目录要等远端 tar 跑完（主进程给了 5 分钟上限），期间没有进度条 ——
+ * 失败原因会落在 errorMsg 里，成功就是列表里多一个包。
+ */
+async function archiveTargets(targets: FileEntry[]): Promise<void> {
+  await guard(async () => {
+    await window.api.sftpArchive(
+      props.sessionId,
+      targets.map((t) => t.path)
+    )
+    clearSelection()
+    await load()
+  })
 }
 
 async function downloadTargets(targets: FileEntry[]): Promise<void> {

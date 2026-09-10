@@ -189,6 +189,14 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
 
 - **别用 `includes` 认标记。** 终端**会回显敲进去的命令**，命令里往往就含那个标记。
   用 `hasOutputLine`（断言标记独占一行）。
+- **macOS 上 Ctrl+点击 = 系统级右键。** Playwright 里做「多选」用 `modifiers: ['Meta']`，
+  用 `Control` 会开出上下文菜单 —— 菜单背板（.menu-backdrop）随即拦截后续所有点击，
+  表现为「莫名其妙的超时/点错行」。真实用户同理：Mac 上多选就是 Cmd，应用代码不用改。
+- **过滤行用 `hasText` 会撞上后缀名。** `rowOf('a.txt')` 同时匹配 `a.txt.tar.gz`，
+  打包/重命名这类「产物名字包含源名字」的场景里必然点错行。用
+  `filter({ has: locator('.file-name:text-is("a.txt")') })` 精确匹配。
+- **fixture 与结果校验走脚本自己的 ssh2 直连**（verify-archive.mjs），不读终端文本、
+  不依赖面板时机；UI 只驱动被测路径本身。
 - **认终端要统一口径。** 写用 Playwright 的 `:visible`、读却用 `display !== 'none'`，
   两者判定不同，读到的可能是**别的标签**的缓冲区 —— 曾经从登录 banner 的
   `172.18.0.1` 里正则抠出「1x172」当成 resize 生效了。

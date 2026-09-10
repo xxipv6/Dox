@@ -1,6 +1,8 @@
 import type { SFTPWrapper } from 'ssh2'
 import { MAX_EDITABLE_BYTES, type FileEntry, type RemoteFileContent } from '../../shared/types'
 import type { SessionManager } from '../ssh/SessionManager'
+import { execCapture } from '../ssh/remoteExec'
+import { archiveBaseName, buildArchiveCommand, withSuffix } from './archive'
 import {
   mkdirP,
   posix,
@@ -73,6 +75,51 @@ export class SftpService {
   async mkdir(sessionId: string, path: string): Promise<void> {
     const sftp = await this.sessions.sftp(sessionId)
     await mkdirP(sftp, path)
+  }
+
+  /**
+   * 打包：在远端**当前目录**把选中项打成 .tar.gz，返回包的路径。
+   *
+   * 不下载、不写本地 —— 下载有专门的入口，这里解决的是「先在远端归置成
+   * 一个包」这件事本身（比如要在远端转移、或之后再决定下不下载）。
+   *
+   * 大目录打包可能远超 execCapture 默认的 10s 上限，给 5 分钟；
+   * 期间渲染进程在 await —— 失败会把 tar 的 stderr 原文带回去。
+   */
+  async archive(sessionId: string, paths: string[]): Promise<string> {
+    if (!paths.length) throw new Error('没有选中任何项')
+    const parent = posix.dirname(paths[0])
+    const names = paths.map((p) => posix.basename(p))
+    for (const p of paths) {
+      if (posix.dirname(p) !== parent) {
+        throw new Error('只能打包同一目录下的项')
+      }
+    }
+
+    const sftp = await this.sessions.sftp(sessionId)
+    const client = this.sessions.getClient(sessionId)
+    if (!client) throw new Error('会话已断开，无法打包')
+
+    // 撞名避让：foo.tar.gz → foo-2.tar.gz → …（打包不是覆盖别人文件的理由）
+    const base = archiveBaseName(names)
+    let target = base
+    for (let n = 2; ; n++) {
+      try {
+        await statP(sftp, posix.join(parent, target))
+        target = withSuffix(base, n)
+      } catch {
+        break
+      }
+    }
+
+    await execCapture(client, buildArchiveCommand(parent, target, names), {
+      timeoutMs: 300_000
+    })
+    // 打包期间若发生重连，结果已落在旧连接那侧 —— 提示用户刷新确认，别装没事
+    if (this.sessions.getClient(sessionId) !== client) {
+      throw new Error('打包期间连接发生了变更，请刷新目录确认结果')
+    }
+    return posix.join(parent, target)
   }
 
   async rename(sessionId: string, from: string, to: string): Promise<void> {

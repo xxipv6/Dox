@@ -89,6 +89,8 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.transferDownloadDir, sessionId, remotePath),
   downloadMany: (sessionId, items) =>
     ipcRenderer.invoke(IpcChannels.transferDownloadMany, sessionId, items),
+  sftpArchive: (sessionId, paths) =>
+    ipcRenderer.invoke(IpcChannels.sftpArchive, sessionId, paths),
   listTransfers: () => ipcRenderer.invoke(IpcChannels.transferList),
   cancelTransfer: (id) => ipcRenderer.invoke(IpcChannels.transferCancel, id),
   clearFinishedTransfers: () => ipcRenderer.invoke(IpcChannels.transferClearFinished),

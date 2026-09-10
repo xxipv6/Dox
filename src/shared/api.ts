@@ -140,6 +140,11 @@ export interface DoxApi {
    * 选中十项弹十次保存框是没法用的。用户取消时返回空数组。
    */
   downloadMany(sessionId: string, items: DownloadRequest[]): Promise<TransferTask[]>
+  /**
+   * 打包：在远端当前目录把选中项 tar 成 .tar.gz（不下载），
+   * 返回生成的包路径；失败把 tar 的 stderr 原文抛回。
+   */
+  sftpArchive(sessionId: string, paths: string[]): Promise<string>
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>
   clearFinishedTransfers(): Promise<void>

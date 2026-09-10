@@ -50,6 +50,7 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-container-logs.mjs` | 容器「查看日志」：起一个持续吐日志的容器 → 右键「查看日志」→ 日志标签 connected 且流不断；重复点不堆第二个标签；结束自删容器 |
 | `verify-path-links.mjs` | 终端路径交互：`cd va<TAB>` 不带偏面板（补全回归）、正常 cd 跟随、cd 不存在目录不动、Ctrl+点击路径开编辑器 |
 | `verify-context-menu.mjs` | SFTP 右键菜单：菜单项、选区规则、Esc 关闭、多选下载只弹一次目录框且每项都落地 |
+| `verify-archive.mjs` | SFTP「打包」：archive.ts 命令构造/转义/命名纯函数单测 + 端到端（多选打包 → 面板出现包 → tar -tzf 校验成员 → 单项打包 → 撞名避让），fixtures/校验走脚本自己的 ssh2 直连，不读终端文本 |
 | `verify-dnd.mjs` | 拖拽上传：用 CDP 发**真实**拖放（不是合成 DataTransfer），一路验到远端字节 |
 | `verify-editor.mjs` | SFTP 双击 → 内置编辑器查看 / 编辑 / 保存回远端全链路 |
 | `verify-transfer-progress.mjs` | 进度条真的在走（不是静止装饰）+ 传完自动从队列消失 |
@@ -91,6 +92,7 @@ src/
   - 终端 **Ctrl+F 搜索**（增量高亮）、**选中即复制**、**右键粘贴**
   - 终端输出里的**绝对路径 Ctrl/Cmd+点击**：目录 → SFTP 面板跳过去，文件 → 内置编辑器打开（点击时才 sftpStat 落地，识别纯文本猜测，过期路径静默不点）
   - 文件夹**递归上传/下载**（入队时展开为文件级任务）、目录**递归删除**（符号链接不跟随）
+  - SFTP 右键「**打包**」：多选/单选在远端当前目录就地 tar 成 `.tar.gz`（不下载，下载走单独入口），撞名自动 `-2`/`-3` 避让
   - **分屏**：标签栏 ◧/⬓ 向右/向下分屏，每 pane 一条独立 SSH 会话（Tab→Pane 二级模型），pane 聚焦/关闭
   - **主题设置**：侧栏 ⚙ 弹窗，终端配色预设 + 字体/连字/字号/本地 shell；设置存在主进程 electron-store（不是 localStorage，打包后那个源不落盘），改完实时生效
   - **本地 shell 跨平台**：Windows 列 cmd / PowerShell / pwsh / Git Bash / WSL；POSIX 按 `$SHELL` + PATH 探测 bash / zsh / fish —— 注入方式各不相同（bash 走 `--rcfile`、zsh 走 ZDOTDIR、fish 走 `-C`），不认识的 shell（csh/dash/…）降级为无 integration 的干净终端，cwd 有 trackInput 兜底

@@ -37,6 +37,8 @@ export const IpcChannels = {
   sftpDelete: 'sftp:delete',
   sftpReadText: 'sftp:readText',
   sftpWriteText: 'sftp:writeText',
+  /** 打包：在远端当前目录把选中项 tar 成 .tar.gz（不下载），返回包路径 */
+  sftpArchive: 'sftp:archive',
   /*
    * 容器终端（Docker / Podman）。
    *
