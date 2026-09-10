@@ -15,6 +15,23 @@ export function statP(sftp: SFTPWrapper, path: string): Promise<Attributes> {
   })
 }
 
+export function readFileP(sftp: SFTPWrapper, path: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    sftp.readFile(path, (err, buf) => (err ? reject(err) : resolve(buf)))
+  })
+}
+
+/**
+ * 写入远端文件。sftp.writeFile 对已存在文件是「打开+截断」而非新建，
+ * 因此属主与权限位都会被保留 —— 编辑 /etc/nginx/nginx.conf 后不会变成
+ * 当前用户私有、也不会丢掉可执行位。
+ */
+export function writeFileP(sftp: SFTPWrapper, path: string, data: Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    sftp.writeFile(path, data, (err) => (err ? reject(err) : resolve()))
+  })
+}
+
 export function mkdirP(sftp: SFTPWrapper, path: string): Promise<void> {
   return new Promise((resolve, reject) => {
     sftp.mkdir(path, (err) => (err ? reject(err) : resolve()))

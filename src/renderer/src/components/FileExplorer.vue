@@ -3,10 +3,12 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { DroppedFile, FileEntry } from '@shared/types'
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
+import { useEditorStore } from '../stores/editor'
 import { errorText } from '../utils/errors'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
+const editor = useEditorStore()
 
 const cwd = ref('')
 const entries = ref<FileEntry[]>([])
@@ -59,7 +61,9 @@ function goUp(): void {
 }
 
 function openEntry(entry: FileEntry): void {
+  // 目录进目录；文件交给内置编辑器（二进制/超限由主编解读取时判定并报错）
   if (entry.isDir) void load(entry.path)
+  else void editor.open(props.sessionId, entry.path)
 }
 
 // ---- 新建文件夹 ----

@@ -7,6 +7,7 @@ import type {
   HostKeyDecision,
   HostKeyVerifyRequest,
   LocalShellInfo,
+  RemoteFileContent,
   SavedSession,
   SaveSessionInput,
   SessionStatusEvent,
@@ -51,6 +52,18 @@ export interface DoxApi {
   sftpMkdir(sessionId: string, path: string): Promise<void>
   sftpRename(sessionId: string, from: string, to: string): Promise<void>
   sftpDelete(sessionId: string, path: string, isDir: boolean): Promise<void>
+  /** 读取远端文本文件（内置编辑器用）；超限抛错，二进制返回 binary: true */
+  sftpReadText(sessionId: string, path: string): Promise<RemoteFileContent>
+  /**
+   * 写回远端文本文件，返回新的 mtime。
+   * 传 expectedMtime 时若远端 mtime 已变，抛错拒绝覆盖。
+   */
+  sftpWriteText(
+    sessionId: string,
+    path: string,
+    content: string,
+    expectedMtime?: number
+  ): Promise<number>
 
   // ---- 传输队列 ----
   /** 弹出本地文件选择框，选中文件上传到 remoteDir */

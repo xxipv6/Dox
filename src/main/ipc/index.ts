@@ -80,6 +80,14 @@ export function registerIpc(
     (_event, sessionId: string, path: string, isDir: boolean) =>
       sftpService.remove(sessionId, path, isDir)
   )
+  ipcMain.handle(IpcChannels.sftpReadText, (_event, sessionId: string, path: string) =>
+    sftpService.readText(sessionId, path)
+  )
+  ipcMain.handle(
+    IpcChannels.sftpWriteText,
+    (_event, sessionId: string, path: string, content: string, expectedMtime?: number) =>
+      sftpService.writeText(sessionId, path, content, expectedMtime)
+  )
 
   // ---- 传输队列 ----
   ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string) => {

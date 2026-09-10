@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref } from 'vue'
 import { useSessionStore, type SessionTab } from './stores/sessions'
+import { useEditorStore } from './stores/editor'
 import SessionSidebar from './components/SessionSidebar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
 import FileExplorer from './components/FileExplorer.vue'
+import FileEditor from './components/FileEditor.vue'
 import TransferQueue from './components/TransferQueue.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
 
 const store = useSessionStore()
+const editor = useEditorStore()
 
 // Wave 形态：应用启动即开一个本地终端标签页
 onMounted(() => {
@@ -131,7 +134,7 @@ async function toggleSftp(): Promise<void> {
       </div>
 
       <!-- 终端 + SFTP 分栏 -->
-      <div class="terminal-area">
+      <div class="terminal-area" :class="{ 'editor-open': editor.visible }">
         <div v-if="!store.tabs.length" class="welcome">
           <h2>Dox 终端</h2>
           <p>本地终端启动中… SSH 会话请从左侧连接。</p>
@@ -177,6 +180,13 @@ async function toggleSftp(): Promise<void> {
         <FileExplorer
           v-if="store.sftpVisible && store.activeTab?.kind === 'ssh' && store.activeSessionId"
           :key="store.activeSessionId"
+          :session-id="store.activeSessionId"
+        />
+
+        <!-- 双击文件后在此编辑；key 绑定会话，切会话不串内容 -->
+        <FileEditor
+          v-if="store.sftpVisible && editor.visible && store.activeSessionId"
+          :key="`ed-${store.activeSessionId}`"
           :session-id="store.activeSessionId"
         />
 
@@ -315,6 +325,21 @@ async function toggleSftp(): Promise<void> {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+/* 编辑器打开时重新分配宽度：文件列表退成窄导航条，编辑器拿到能写代码的宽度。
+   列表收窄必须同时把固定宽度的「时间」列藏掉 —— 否则尺寸+时间就占满整行，
+   文件名被挤成 0 宽（列表变成一排只有图标的空行）。 */
+.terminal-area.editor-open .terminal-stack {
+  flex: 0 1 33%;
+}
+.terminal-area.editor-open :deep(.explorer) {
+  width: 250px;
+}
+.terminal-area.editor-open :deep(.explorer .file-time) {
+  display: none;
+}
+.terminal-area.editor-open :deep(.explorer .file-size) {
+  width: 52px;
 }
 .tab-content {
   flex: 1;

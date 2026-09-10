@@ -71,6 +71,22 @@ export interface FileEntry {
   mtime: number
 }
 
+/** 内置编辑器可打开的文件大小上限（字节）。超过则只允许下载后查看 */
+export const MAX_EDITABLE_BYTES = 2 * 1024 * 1024
+
+/**
+ * 远端文本文件读取结果（内置编辑器用）。
+ * binary 为 true 时 content 必为空字符串 —— 二进制文件不进入编辑器。
+ */
+export interface RemoteFileContent {
+  path: string
+  content: string
+  size: number
+  /** 读取时的 mtime（秒），保存时回传用于检测「别人在我编辑期间改过」 */
+  mtime: number
+  binary: boolean
+}
+
 export type TransferDirection = 'upload' | 'download'
 export type TransferStatus = 'pending' | 'active' | 'done' | 'error' | 'canceled'
 

@@ -53,6 +53,9 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.sftpRename, sessionId, from, to),
   sftpDelete: (sessionId, path, isDir) =>
     ipcRenderer.invoke(IpcChannels.sftpDelete, sessionId, path, isDir),
+  sftpReadText: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpReadText, sessionId, path),
+  sftpWriteText: (sessionId, path, content, expectedMtime) =>
+    ipcRenderer.invoke(IpcChannels.sftpWriteText, sessionId, path, content, expectedMtime),
 
   // ---- 传输队列 ----
   pickUpload: (sessionId, remoteDir) =>

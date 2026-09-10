@@ -25,6 +25,8 @@ export const IpcChannels = {
   sftpMkdir: 'sftp:mkdir',
   sftpRename: 'sftp:rename',
   sftpDelete: 'sftp:delete',
+  sftpReadText: 'sftp:readText',
+  sftpWriteText: 'sftp:writeText',
   // 传输队列
   transferPickUpload: 'transfer:pickUpload',
   transferEnqueueDropped: 'transfer:enqueueDropped',
