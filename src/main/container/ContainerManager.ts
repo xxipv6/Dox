@@ -22,7 +22,9 @@ import {
   listCommand,
   localInteractiveArgs,
   localListArgs,
+  localLogsArgs,
   localShellProbeArgs,
+  logsCommand,
   parseListing,
   parseRows,
   shellProbeCommand,
@@ -299,6 +301,73 @@ export class ContainerManager {
       env: { ...(process.env as Record<string, string>), TERM: 'xterm-256color' }
     })
     return { kind: 'local', pty: proc }
+  }
+
+  /**
+   * 查看容器日志，返回 `container-` 前缀的会话 id（与 open() 同一种会话，
+   * 输入/resize/断开/父会话断开联动全部复用，渲染层不需要第二套 API）。
+   *
+   * 与 open() 的差别：logs 是守护进程读日志驱动，**不依赖容器里有 shell**，
+   * 所以跳过 resolveShell 预检 —— distroless 容器看得了日志但进不去终端。
+   * 已停止的容器 docker logs 也合法（「它刚才为什么挂了」正是高频场景）。
+   */
+  async openLogs(
+    parentSessionId: string,
+    containerName: string,
+    term: TermSize,
+    owner: WebContents
+  ): Promise<string> {
+    assertContainerTarget(containerName)
+
+    const runtime = this.runtimeByParent.get(parentSessionId)
+    if (!runtime) {
+      throw new Error('还没有探测到容器运行时，请先刷新容器列表')
+    }
+
+    let carrier: Carrier
+    if (isLocalContainerTarget(parentSessionId)) {
+      const exe = await resolveExecutable(runtime.binary)
+      carrier = {
+        kind: 'local',
+        pty: pty.spawn(exe, localLogsArgs(containerName), {
+          name: 'xterm-256color',
+          cols: term.cols,
+          rows: term.rows,
+          cwd: os.homedir(),
+          env: { ...(process.env as Record<string, string>), TERM: 'xterm-256color' }
+        })
+      }
+    } else {
+      const client = this.getClient(parentSessionId)
+      if (!client) {
+        throw new Error('父会话已断开，请先恢复 SSH 连接')
+      }
+      const channel = await this.execChannel(client, logsCommand(runtime.binary, containerName), term)
+      // 与 openRemote 同款身份校验：开通道那一刻 client 必须还是快照里的那个
+      if (this.getClient(parentSessionId) !== client) {
+        try {
+          channel.close()
+        } catch {
+          /* 已经关了 */
+        }
+        throw new Error('会话已重新连接，请重试')
+      }
+      carrier = { kind: 'ssh', channel }
+    }
+
+    const id = `${CONTAINER_ID_PREFIX}${randomUUID()}`
+    const session: ContainerSession = {
+      id,
+      parentSessionId,
+      containerName,
+      carrier,
+      owner,
+      term
+    }
+    this.sessions.set(id, session)
+    this.wire(session)
+    if (!owner.isDestroyed()) owner.send(IpcChannels.sshStatus, { id, status: 'connected' })
+    return id
   }
 
   /**

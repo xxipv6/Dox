@@ -111,6 +111,24 @@ export function interactiveExecCommand(binary: string, name: string, shell: stri
   return `${binary} exec -it ${assertContainerTarget(name)} ${shell}`
 }
 
+/**
+ * 查看日志的那条命令（远端，拼进 shell 串）。
+ *
+ * 与 interactiveExec 的关键差别：**不需要容器里有 shell** —— logs 是守护进程
+ * 读的日志驱动，distroless 容器照样能看。所以不做 shell 预检。
+ * `--tail 200` 防止把几周的全量日志一次性灌进终端；`-f` 跟随。
+ * 已停止的容器也能看（docker logs 对 stopped 合法），这对「它为什么挂了」
+ * 恰恰是最高频的场景。
+ */
+export function logsCommand(binary: string, name: string): string {
+  return `${binary} logs -f --tail 200 ${assertContainerTarget(name)}`
+}
+
+/** 本机版日志参数（不经 shell，argv 直给，与 localInteractiveArgs 同一个理由） */
+export function localLogsArgs(name: string): string[] {
+  return ['logs', '-f', '--tail', '200', assertContainerTarget(name)]
+}
+
 /** 依次尝试的候选 shell；容器里多半只有 sh，distroless 类一个都没有 */
 export const SHELL_CANDIDATES = ['bash', 'sh'] as const
 

@@ -47,6 +47,7 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-ssh-ui.mjs` | 真实 UI 里故意用错密码连一次，检查错误是否可见 |
 | `verify-reconnect.mjs` | 断线重连与会话恢复：远端 `kill -9 $PPID` 端掉自己这条会话，验重连、状态提示与迟到事件 |
 | `verify-container.mjs` | 容器终端：**本机**与 SSH 两条路都走一遍（只读探测 → 右键「进入」→ 容器内 shell）；用 `/.dockerenv` 与 `stty size` 反证「真的在容器里」且 resize 真的传进去了；末尾静态守着「不出现 docker run/cp/start 等」这条零改动约束 |
+| `verify-container-logs.mjs` | 容器「查看日志」：起一个持续吐日志的容器 → 右键「查看日志」→ 日志标签 connected 且流不断；重复点不堆第二个标签；结束自删容器 |
 | `verify-context-menu.mjs` | SFTP 右键菜单：菜单项、选区规则、Esc 关闭、多选下载只弹一次目录框且每项都落地 |
 | `verify-dnd.mjs` | 拖拽上传：用 CDP 发**真实**拖放（不是合成 DataTransfer），一路验到远端字节 |
 | `verify-editor.mjs` | SFTP 双击 → 内置编辑器查看 / 编辑 / 保存回远端全链路 |
@@ -111,7 +112,7 @@ src/
   - **标签栏**：标签从「等高矩形 + 竖线分割」改成有间距的圆角块，活动标签靠抬升的面 + 顶部高亮线 + 投影三重信号；右侧分屏/SFTP 按钮也改成圆角块 —— 它们和标签混成同一排「格子」时，分不清哪个是可切换的、哪个是动作
 - **自绘标题栏 ✅**：Windows / Linux 上 `frame: false`，最顶上那条由我们自己画 —— logo + Dox + − □ ✕，跟主题同色；macOS 保留系统红绿灯（`titleBarStyle: 'hiddenInset'`）。代价是失去「悬停最大化按钮弹出贴靠布局」，双击最大化与边缘拖拽缩放仍在
 - **应用图标重做 ✅**：`scripts/generate-icon.mjs` 生成，天蓝→草绿竖向渐变 + 白色 `>_`，3 倍超采样抗锯齿；`--preview` 出 16/32/64/128 原生并排图供肉眼核对（缩到 16px 才是真正要过的那关）。侧栏顶栏的品牌已并到标题栏，同一处不再出现两遍「Dox」
-- **容器终端 ✅**：侧栏列出 Docker / Podman 容器，右键「进入」即在新标签页里得到该容器的 shell
+- **容器终端 ✅**：侧栏列出 Docker / Podman 容器，右键「进入」即在新标签页里得到该容器的 shell；右键「查看日志」开一个 `docker logs -f --tail 200` 标签（守护进程读日志驱动，不依赖容器内有 shell，已停止的容器也能看 —— 「它刚才为什么挂了」正是高频场景）
   - **两种目标**：SSH 设备（列那台机器上的）与**本机**（本地终端标签下列本机的，Docker Desktop / Podman Desktop 都行）。上层完全一样，只有承载方式不同
   - 远端走**父 SSH 连接**上的一条 `docker exec` 通道；本机走一个 node-pty 跑 `docker exec -it`。两者共用 `container-` 前缀，所以在渲染层「容器里的一个 shell」就是一回事，不需要第二套 API
   - **零改动**：只有只读探测（`docker ps -a`）+ `docker exec` 进**已存在**的容器，不装任何东西、不启停容器、不建文件（这条约束由 `verify-container.mjs` 的静态守卫守着）

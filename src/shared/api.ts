@@ -113,6 +113,16 @@ export interface DoxApi {
     containerName: string,
     term: TermSize
   ): Promise<string>
+  /**
+   * 查看容器日志（docker logs -f），返回 `container-` 前缀会话 id。
+   * 与 connectContainer 的差别：不依赖容器里有 shell（distroless 也能看），
+   * 已停止的容器也合法。之后的输入/resize/断开同样走通用通道。
+   */
+  connectContainerLogs(
+    parentSessionId: string,
+    containerName: string,
+    term: TermSize
+  ): Promise<string>
 
   // ---- 传输队列 ----
   /** 弹出本地文件选择框，选中文件上传到 remoteDir */

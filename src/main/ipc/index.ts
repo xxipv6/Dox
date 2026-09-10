@@ -145,6 +145,11 @@ export function registerIpc(
     (event, parentSessionId: string, containerName: string, term: TermSize) =>
       containerManager.open(parentSessionId, containerName, term, event.sender)
   )
+  ipcMain.handle(
+    IpcChannels.containerLogs,
+    (event, parentSessionId: string, containerName: string, term: TermSize) =>
+      containerManager.openLogs(parentSessionId, containerName, term, event.sender)
+  )
 
   // ---- 传输队列 ----
   ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string) => {

@@ -111,14 +111,26 @@ function onRowMenu(e: MouseEvent, box: ContainerInfo): void {
 }
 
 const menuItems = computed<ContextMenuItem[]>(() => [
-  { id: 'enter', label: '进入', icon: 'terminal', disabled: !parentReady.value }
+  { id: 'enter', label: '进入', icon: 'terminal', disabled: !parentReady.value },
+  // 日志不依赖容器里有 shell，也不挑容器在不在跑 —— 它与「进入」的可点条件一致即可
+  { id: 'logs', label: '查看日志', icon: 'file', disabled: !parentReady.value }
 ])
 
 async function onMenuSelect(id: string): Promise<void> {
   const target = menu.value?.box
   const sessionId = parentSessionId.value
   menu.value = null
-  if (id !== 'enter' || !target || !sessionId) return
+  if (!target || !sessionId) return
+
+  if (id === 'logs') {
+    try {
+      await store.viewContainerLogs(sessionId, target)
+    } catch (err) {
+      alert(`查看日志失败：${errorText(err)}`)
+    }
+    return
+  }
+  if (id !== 'enter') return
 
   entering.value = target.name
   try {

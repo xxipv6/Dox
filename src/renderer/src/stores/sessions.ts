@@ -30,6 +30,8 @@ export interface ContainerTabInfo {
   parentSessionId: string
   containerName: string
   image: string
+  /** true = 日志标签（docker logs -f）；缺省/false = 容器内 shell。复用与标题都靠它区分 */
+  logs?: boolean
 }
 
 export interface SessionTab {
@@ -167,11 +169,17 @@ export const useSessionStore = defineStore('sessions', () => {
         tab.kind === 'local'
           ? await window.api.connectLocal(size, useSettingsStore().localShellId || undefined)
           : tab.kind === 'container'
-            ? await window.api.connectContainer(
-                tab.container!.parentSessionId,
-                tab.container!.containerName,
-                size
-              )
+            ? tab.container!.logs
+              ? await window.api.connectContainerLogs(
+                  tab.container!.parentSessionId,
+                  tab.container!.containerName,
+                  size
+                )
+              : await window.api.connectContainer(
+                  tab.container!.parentSessionId,
+                  tab.container!.containerName,
+                  size
+                )
             : await window.api.connect(toPlainConfig(tab.config!), size, {
                 savedSessionId: tab.savedSessionId
               })
@@ -272,6 +280,7 @@ export const useSessionStore = defineStore('sessions', () => {
     const dead = tabs.value.find(
       (t) =>
         t.kind === 'container' &&
+        !t.container?.logs &&
         t.container?.parentSessionId === parentSessionId &&
         t.container.containerName === box.name &&
         t.panes.every((p) => p.status === 'closed' || p.status === 'error')
@@ -289,6 +298,46 @@ export const useSessionStore = defineStore('sessions', () => {
       kind: 'container',
       config: null,
       container: { parentSessionId, containerName: box.name, image: box.image },
+      split: 'none',
+      panes: [pane],
+      activePaneId: pane.paneId
+    })
+    tabs.value.push(tab)
+    activeTabId.value = tab.tabId
+    await connectPane(tab, pane)
+  }
+
+  /**
+   * 查看容器日志（docker logs -f）：与「进入」共用容器会话机制，
+   * 但日志流是同一条 —— 同一个容器开第二个日志标签没有意义，
+   * 所以活着的标签直接聚焦，死掉的才复用重连。
+   */
+  async function viewContainerLogs(
+    parentSessionId: string,
+    box: Pick<ContainerInfo, 'name' | 'image'>
+  ): Promise<void> {
+    const existing = tabs.value.find(
+      (t) =>
+        t.kind === 'container' &&
+        t.container?.logs === true &&
+        t.container.parentSessionId === parentSessionId &&
+        t.container.containerName === box.name
+    )
+    if (existing) {
+      activeTabId.value = existing.tabId
+      if (existing.panes.every((p) => p.status === 'closed' || p.status === 'error')) {
+        for (const pane of existing.panes) await connectPane(existing, pane)
+      }
+      return
+    }
+
+    const pane = newPane()
+    const tab = reactive<SessionTab>({
+      tabId: `tab-${++tabSeq}`,
+      title: `日志 · ${box.name}`,
+      kind: 'container',
+      config: null,
+      container: { parentSessionId, containerName: box.name, image: box.image, logs: true },
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -439,6 +488,7 @@ export const useSessionStore = defineStore('sessions', () => {
     connect,
     connectSaved,
     enterContainer,
+    viewContainerLogs,
     connectLocal,
     restoreUnsavedTab,
     splitActive,
