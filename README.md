@@ -25,6 +25,24 @@ npm run preview      # 以生产产物启动
 npm run pack:win     # electron-builder 打包（M5 配置）
 ```
 
+## 验证工具（scripts/）
+
+终端类项目光靠类型检查远远不够——下面这些是踩坑后补的**可自动复现**的验证手段，
+每个都对应过至少一个真实 bug：
+
+| 脚本 | 用途 |
+|---|---|
+| `verify-render.mjs` | 用 @xterm/headless 把 pty 输出渲染成屏幕并断言，覆盖 14 种场景（宽窄窗、溢出滚动、放大缩小、resize 重排、启动竞态、cmd/pwsh 两种 shell） |
+| `screenshot-app.mjs` | Playwright 驱动真实 Electron 窗口截图（布局/渲染的人工核对） |
+| `verify-ui-flows.mjs` | 走通「保存设备 → 删除设备 → SSH 连接（含主机指纹确认）」全流程，并捕获渲染进程报错 |
+| `verify-ssh.mjs` | 直连测试 SSH 握手链路，区分「网络不通」与「认证失败」 |
+| `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |
+| `verify-cmd-integration.mjs` | 校验 cmd 的 PROMPT 注入能否上报 cwd |
+| `verify-cmd-startup.mjs` | 隔离实验：shell 启动画面是否干净（排查「终端莫名多出内容」） |
+
+调试本地终端原始字节流：设 `DOX_DEBUG_PTY=1` 启动，日志写到
+`%APPDATA%/dox/dox-pty-debug.log`（进/出/尺寸协商逐条记录）。
+
 ## 目录结构
 
 ```
