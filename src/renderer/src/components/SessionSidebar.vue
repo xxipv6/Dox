@@ -53,6 +53,16 @@ watch(
   }
 )
 
+// 密码解密失败（钥匙串身份变更）→ 自动打开该设备的编辑框，重输密码即自愈
+watch(
+  () => store.editSessionRequest,
+  (req) => {
+    if (!req) return
+    openEdit(req)
+    store.clearEditSessionRequest()
+  }
+)
+
 function closeDialog(): void {
   dialogVisible.value = false
   prefill.value = null

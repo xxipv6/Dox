@@ -3,6 +3,15 @@ export type SshAuth =
   | { type: 'password'; password: string }
   | { type: 'key'; privateKeyPath: string; passphrase?: string }
 
+/**
+ * safeStorage 解密失败的错误标记（嵌在 Error.message 里跨 IPC 传递）。
+ *
+ * 密文与系统钥匙串绑定：换机 / 重装 / 钥匙串重置 / dev 与打包版身份不同，
+ * 老密文就永久解不开 —— 唯一出路是用户重新输入。渲染层靠这个标记识别出
+ * 「该弹编辑框让人重输密码了」，而不是把它当普通连接错误。
+ */
+export const AUTH_DECRYPT_FAILED = '[AUTH_DECRYPT_FAILED]'
+
 /** 建立一条 SSH 会话所需的完整配置（含明文敏感信息，只在主进程内存中流转） */
 export interface SshSessionConfig {
   host: string

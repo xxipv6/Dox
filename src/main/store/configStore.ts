@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import Store from 'electron-store'
 import { safeStorage } from 'electron'
-import type {
-  CommandSnippet,
-  SavedSession,
-  SaveSessionInput,
-  SshAuth,
-  SshSessionConfig
+import {
+  AUTH_DECRYPT_FAILED,
+  type CommandSnippet,
+  type SavedSession,
+  type SaveSessionInput,
+  type SshAuth,
+  type SshSessionConfig
 } from '../../shared/types'
 
 interface StoreSchema {
@@ -136,6 +137,16 @@ export class ConfigStore {
   private decrypt(stored: string): string {
     const [scheme, payload] = stored.split(':', 2)
     const buf = Buffer.from(payload, 'base64')
-    return scheme === 'enc' ? safeStorage.decryptString(buf) : buf.toString('utf8')
+    if (scheme !== 'enc') return buf.toString('utf8')
+    try {
+      return safeStorage.decryptString(buf)
+    } catch {
+      /*
+       * 密文解不开 = 钥匙串身份变了（换机/重装/钥匙串重置/dev 与打包版不是一个
+       * keychain 项）。这份密文永久不可恢复，别再拿原文重试，直接走
+       * 「重新输入」流程 —— 渲染层认 AUTH_DECRYPT_FAILED 标记弹编辑框。
+       */
+      throw new Error(`${AUTH_DECRYPT_FAILED} 保存的密码无法解密（系统钥匙串或应用身份已变更），请重新输入一次密码`)
+    }
   }
 }

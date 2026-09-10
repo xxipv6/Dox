@@ -244,6 +244,7 @@ export function registerIpc(
   )
 
   ipcMain.handle(IpcChannels.transferList, () => transferManager.list())
+
   ipcMain.handle(IpcChannels.transferCancel, (_event, id: string) => transferManager.cancel(id))
   ipcMain.handle(IpcChannels.transferClearFinished, () => transferManager.clearFinished())
   ipcMain.handle(IpcChannels.transferCancelAll, () => transferManager.cancelAll())

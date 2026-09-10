@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
+import { AUTH_DECRYPT_FAILED } from '@shared/types'
 import type {
   ContainerInfo,
   SavedSession,
@@ -106,6 +107,17 @@ export const useSessionStore = defineStore('sessions', () => {
    * 弹窗挂在侧边栏，而触发点在终端面板，所以借 store 传一次话。
    */
   const addDevicePrefill = ref<{ host: string; port: number; username: string } | null>(null)
+
+  /** 保存的密码解密失败时，请求侧栏打开该设备的编辑框（重输密码即自愈） */
+  const editSessionRequest = ref<SavedSession | null>(null)
+
+  function requestEditSession(saved: SavedSession): void {
+    editSessionRequest.value = saved
+  }
+
+  function clearEditSessionRequest(): void {
+    editSessionRequest.value = null
+  }
 
   function requestAddDevice(prefill: { host: string; port: number; username: string }): void {
     addDevicePrefill.value = prefill
@@ -379,7 +391,11 @@ export const useSessionStore = defineStore('sessions', () => {
       await connectPane(tab, pane)
     } catch (err) {
       pane.status = 'error'
-      pane.error = errorText(err)
+      const text = errorText(err)
+      pane.error = text.replace(AUTH_DECRYPT_FAILED, '').trim()
+      // 密文解不开（钥匙串身份变更）：自动弹编辑框让用户重输密码，
+      // 重存时用当前钥匙串重新加密，连上即自愈
+      if (text.includes(AUTH_DECRYPT_FAILED)) requestEditSession(saved)
     }
   }
 
@@ -475,6 +491,9 @@ export const useSessionStore = defineStore('sessions', () => {
     addDevicePrefill,
     requestAddDevice,
     clearAddDeviceRequest,
+    editSessionRequest,
+    requestEditSession,
+    clearEditSessionRequest,
     sftpVisible,
     toggleSftp,
     followTerminal,
