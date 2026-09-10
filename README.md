@@ -15,6 +15,9 @@
 
 全工程 ESM（`"type": "module"`）。
 
+> **接手维护先看 [MAINTENANCE.md](MAINTENANCE.md)** —— 会话 id 路由、必须守住的约束
+> （远端零改动、令牌层、容器标签不重连）、验证脚本怎么跑、以及一批踩过的环境坑。
+
 ## 常用命令
 
 ```bash
@@ -36,6 +39,7 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `screenshot-app.mjs` | Playwright 驱动真实 Electron 窗口截图（布局/渲染的人工核对） |
 | `shot-theme.mjs` | 两套主题各截一张（含设置弹窗与展开后的侧栏），改配色时用来肉眼对比 |
 | `verify-theme.mjs` | **漏改检测**：亮/深两套下遍历全 DOM 计算样式，断言没有任何一处还在用旧调色板（漏改一个色值在深色下看着正常、只有亮色才露黑，人工核对 270 处不现实）；另覆盖默认主题、一键切换与联动、三选、跨重启持久化、WCAG 对比度、静态守卫 |
+| `verify-titlebar.mjs` | 自绘标题栏：拖拽区是不是 drag、按钮是不是 no-drag（忘了标的话点按钮会变成拖窗口，截图完全看不出来）、− □ ✕ 是否真的作用到窗口上 |
 | `verify-layout.mjs` | 布局持久化：真实重启还原、未保存的临时连接恢复成占位标签、设置持久化 |
 | `verify-ui-flows.mjs` | 走通「保存设备 → 删除设备 → SSH 连接（含主机指纹确认）」全流程，并捕获渲染进程报错 |
 | `verify-ui-polish.mjs` | 界面走查回归：行尾按钮不白占宽度、面包屑单斜杠、活动标签可辨、三处弹窗 Esc 可关、按钮里没有 emoji |
@@ -100,6 +104,8 @@ src/
   - **三处自带主题系统的表面各自接上**：xterm（复用既有的 `term.options.theme` watch）、**CodeMirror**（`Compartment` 就地重配，切主题不丢撤销历史）、原生控件（`nativeTheme.themeSource` + `color-scheme`，否则 `<select>` 弹出层在浅色下是深色的）
   - **不闪主题**：`html`/`body` 不刷底色，底色归 `#app`；主题落定前露出的是主进程算好的 `BrowserWindow.backgroundColor`
   - 侧栏改成只有一种标题形状（可折叠分区），原先「工具」大标题下并排三个同级小标题，四行字视觉重量相近、分不出层级
+- **自绘标题栏 ✅**：Windows / Linux 上 `frame: false`，最顶上那条由我们自己画 —— logo + Dox + − □ ✕，跟主题同色；macOS 保留系统红绿灯（`titleBarStyle: 'hiddenInset'`）。代价是失去「悬停最大化按钮弹出贴靠布局」，双击最大化与边缘拖拽缩放仍在
+- **应用图标重做 ✅**：`scripts/generate-icon.mjs` 生成，天蓝→草绿竖向渐变 + 白色 `>_`，3 倍超采样抗锯齿；`--preview` 出 16/32/64/128 原生并排图供肉眼核对（缩到 16px 才是真正要过的那关）。侧栏顶栏的品牌已并到标题栏，同一处不再出现两遍「Dox」
 - **容器终端 ✅**：侧栏列出 Docker / Podman 容器，右键「进入」即在新标签页里得到该容器的 shell
   - **两种目标**：SSH 设备（列那台机器上的）与**本机**（本地终端标签下列本机的，Docker Desktop / Podman Desktop 都行）。上层完全一样，只有承载方式不同
   - 远端走**父 SSH 连接**上的一条 `docker exec` 通道；本机走一个 node-pty 跑 `docker exec -it`。两者共用 `container-` 前缀，所以在渲染层「容器里的一个 shell」就是一回事，不需要第二套 API

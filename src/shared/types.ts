@@ -228,6 +228,11 @@ export interface CommandSnippet {
   command: string
 }
 
+/** 窗口状态。自绘标题栏要知道当前是不是最大化，好决定那枚按钮画 □ 还是 ❐ */
+export interface WindowState {
+  maximized: boolean
+}
+
 /** rz/sz（ZMODEM）传输用的内存文件（主进程读取后经 IPC 传给渲染进程） */
 export interface ZmodemFile {
   name: string

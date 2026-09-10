@@ -4,6 +4,7 @@ import { useSessionStore, type SessionTab } from './stores/sessions'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
 import SessionSidebar from './components/SessionSidebar.vue'
+import TitleBar from './components/TitleBar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
 import FileExplorer from './components/FileExplorer.vue'
 import FileEditor from './components/FileEditor.vue'
@@ -93,6 +94,8 @@ async function toggleSftp(): Promise<void> {
 
 <template>
   <div class="layout">
+    <TitleBar class="title-slot" />
+
     <SessionSidebar />
 
     <div class="main-area">
@@ -236,16 +239,33 @@ async function toggleSftp(): Promise<void> {
 </template>
 
 <style scoped>
+/*
+ * 布局 = 两行两列：
+ *   [ 标题栏（横跨两列） ]
+ *   [ 侧栏 ][ 主区       ]
+ *
+ * 用 grid 而不是「上下两个 flex 容器」：标题栏横跨侧栏和主区，
+ * 套一层 flex 就得把整个模板再包一层、缩进全动一遍；grid 只要给自己的行。
+ * 左列是 auto 而不是定宽 —— 侧栏收起时宽度会变（264 → 44），写死就对不上了。
+ */
 .layout {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto 1fr;
   width: 100vw;
   height: 100vh;
 }
+/* 标题栏铺满一整行（类名落在 TitleBar 的根元素上） */
+.title-slot {
+  grid-column: 1 / -1;
+}
 .main-area {
-  flex: 1;
   display: flex;
   flex-direction: column;
+  /* 两个 min-* 都是给网格项用的：默认 min-width/min-height: auto 会让
+     内容（终端、文件列表）把网格轨道顶大，撑破窗口而不是自己滚动 */
   min-width: 0;
+  min-height: 0;
 }
 /*
  * 标签栏做成**凹陷**的一条，活动标签用抬升的 --bg-panel。

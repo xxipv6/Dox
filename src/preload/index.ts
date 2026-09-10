@@ -10,7 +10,8 @@ import type {
   SessionStatusEvent,
   SshSessionConfig,
   TermSize,
-  TransferTask
+  TransferTask,
+  WindowState
 } from '../shared/types'
 
 const api: DoxApi = {
@@ -116,7 +117,19 @@ const api: DoxApi = {
   pickDirectory: (title) => ipcRenderer.invoke(IpcChannels.dialogPickDirectory, title),
   pickAndReadFiles: () => ipcRenderer.invoke(IpcChannels.zmodemPickReadFiles),
   writeReceivedFile: (dir, name, data) =>
-    ipcRenderer.invoke(IpcChannels.zmodemWriteFile, dir, name, data)
+    ipcRenderer.invoke(IpcChannels.zmodemWriteFile, dir, name, data),
+
+  // ---- 自绘标题栏 ----
+  platform: process.platform,
+  windowMinimize: () => ipcRenderer.send(IpcChannels.windowMinimize),
+  windowToggleMaximize: () => ipcRenderer.send(IpcChannels.windowToggleMaximize),
+  windowClose: () => ipcRenderer.send(IpcChannels.windowClose),
+  windowIsMaximized: () => ipcRenderer.invoke(IpcChannels.windowGetMaximized),
+  onWindowState: (cb) => {
+    const listener = (_e: IpcRendererEvent, state: WindowState): void => cb(state)
+    ipcRenderer.on(IpcChannels.windowState, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.windowState, listener)
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)

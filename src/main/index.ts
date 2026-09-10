@@ -1,4 +1,5 @@
 import { app, BrowserWindow, nativeTheme, powerMonitor, shell } from 'electron'
+import { existsSync } from 'node:fs'
 import { applyNativeTheme, backgroundColorFor } from './theme'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -74,7 +75,30 @@ if (process.platform === 'win32') {
 function createWindow(): void {
   // 每次建窗都重新读一次设置，不缓存：macOS 上 activate 会再走一遍这里，
   // 那时用户可能已经在设置里换过主题了
+  /*
+   * 标题栏：Windows / Linux 上完全自绘，macOS 保留系统红绿灯。
+   *
+   * Windows 上「自绘那三枚按钮」和「保留系统按钮」不能兼得：系统按钮只能由
+   * titleBarOverlay 提供，而它画出来的样子改不了（圆角、悬停、间距全是系统的）。
+   * 要自己的样式就只能 frame: false，代价是失去「悬停最大化按钮弹出贴靠布局」
+   * —— 双击最大化与边缘拖拽缩放仍由 Electron/Chromium 提供。
+   *
+   * macOS 反过来：红绿灯在左边、且用户对它的位置有肌肉记忆，
+   * 自绘得不偿失，所以用 hiddenInset 让系统继续画，我们只是把内容铺到它下面。
+   */
+  const isMac = process.platform === 'darwin'
+  /*
+   * 任务栏 / 窗口图标。
+   *
+   * 打包后 Windows 用的是写进 exe 的那份（electron-builder 生成），这个选项那时
+   * 是多余的；但开发模式下 exe 是 electron.exe，不给它就会一直显示 Electron 的
+   * 默认图标 —— 明明刚换过图标，任务栏上却还是旧的那个，很容易以为没生效。
+   * build/icon.png 在 electron-builder.yml 的 files 里，asar 内也是同一个相对路径。
+   */
+  const devIcon = join(mainDir, '../../build/icon.png')
   const win = new BrowserWindow({
+    ...(isMac ? { titleBarStyle: 'hiddenInset' as const } : { frame: false }),
+    ...(existsSync(devIcon) ? { icon: devIcon } : {}),
     width: 1440,
     height: 900,
     minWidth: 960,
@@ -92,6 +116,18 @@ function createWindow(): void {
   })
 
   win.on('ready-to-show', () => win.show())
+
+  /*
+   * 最大化状态要推给渲染层：自绘的那枚按钮得知道该画 □（还原）还是 ❐（最大化）。
+   * 事件只在状态真变时推，初值由渲染层挂载时 invoke 一次 windowGetMaximized 拿 ——
+   * 只靠事件会漏掉「启动时窗口就是最大化」这种情况（比如上次退出时是最大化）。
+   */
+  const pushWindowState = (): void => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return
+    win.webContents.send(IpcChannels.windowState, { maximized: win.isMaximized() })
+  }
+  win.on('maximize', pushWindowState)
+  win.on('unmaximize', pushWindowState)
 
   // 外部链接一律交给系统浏览器，不在应用内打开
   win.webContents.setWindowOpenHandler(({ url }) => {

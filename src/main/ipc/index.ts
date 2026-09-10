@@ -290,4 +290,29 @@ export function registerIpc(
       return target
     }
   )
+
+  /*
+   * 自绘标题栏的窗口控制。
+   *
+   * 每次都用 BrowserWindow.fromWebContents(event.sender) 反查，而不是在外面
+   * 存一个窗口引用：这样发出请求的是哪个窗口就操作哪个窗口，多窗口下天然正确，
+   * 也不会持有一个可能已经销毁的引用。
+   *
+   * 用 ipcMain.on 而不是 handle：这三件事没有返回值，也不需要调用方等回执。
+   */
+  ipcMain.on(IpcChannels.windowMinimize, (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize()
+  })
+  ipcMain.on(IpcChannels.windowToggleMaximize, (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+  })
+  ipcMain.on(IpcChannels.windowClose, (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close()
+  })
+  ipcMain.handle(IpcChannels.windowGetMaximized, (event) => {
+    return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
+  })
 }

@@ -19,6 +19,7 @@ import type {
   SshSessionConfig,
   TermSize,
   TransferTask,
+  WindowState,
   ZmodemFile
 } from './types'
 
@@ -154,4 +155,23 @@ export interface DoxApi {
   pickAndReadFiles(): Promise<ZmodemFile[]>
   /** 把 sz 接收到的文件写入指定目录，重名自动加序号，返回最终路径 */
   writeReceivedFile(dir: string, name: string, data: Uint8Array): Promise<string>
+
+  // ---- 自绘标题栏 ----
+  /**
+   * 当前平台，即 process.platform（'darwin' / 'win32' / 'linux' …）。
+   *
+   * 这里是 string 而不是 NodeJS.Platform：渲染层那份 tsconfig 不含 @types/node，
+   * 引用 NodeJS 命名空间会直接编译不过；而真正的用途只有「是不是 darwin」这一个判断。
+   */
+  readonly platform: string
+  /** 最小化窗口 */
+  windowMinimize(): void
+  /** 最大化 / 还原 */
+  windowToggleMaximize(): void
+  /** 关闭窗口 */
+  windowClose(): void
+  /** 当前是否最大化 —— 挂载时取初始值，用 onWindowState 跟后续变化 */
+  windowIsMaximized(): Promise<boolean>
+  /** 订阅最大化状态变化（图标在 □ / ❐ 之间切） */
+  onWindowState(cb: (state: WindowState) => void): () => void
 }

@@ -69,5 +69,18 @@ export const IpcChannels = {
   // rz/sz（ZMODEM）
   dialogPickDirectory: 'dialog:pickDirectory',
   zmodemPickReadFiles: 'zmodem:pickReadFiles',
-  zmodemWriteFile: 'zmodem:writeFile'
+  zmodemWriteFile: 'zmodem:writeFile',
+  /*
+   * 自绘标题栏的窗口控制。
+   *
+   * 窗口是无边框的（Windows/Linux 上 frame: false），所以最大化/最小化/关闭
+   * 这三件事系统不再代劳，必须由渲染层那三枚按钮发起。
+   */
+  windowMinimize: 'window:minimize',
+  windowToggleMaximize: 'window:toggleMaximize',
+  windowClose: 'window:close',
+  /** 问一次当前是否最大化 —— 渲染层挂载时要拿初始值，光靠事件会漏掉启动那一刻 */
+  windowGetMaximized: 'window:getMaximized',
+  /** 主进程 → 渲染进程：最大化状态变了，图标要在 □ / ❐ 之间切 */
+  windowState: 'window:state'
 } as const

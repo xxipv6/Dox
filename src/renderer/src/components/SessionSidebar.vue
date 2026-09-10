@@ -59,7 +59,12 @@ async function remove(s: SavedSession): Promise<void> {
 <template>
   <aside class="sidebar" :class="{ collapsed }">
     <div class="sidebar-header">
-      <span v-if="!collapsed" class="logo">Dox</span>
+      <!--
+        这里**不再**放标记和字标。
+        品牌已经由最上面的自绘标题栏承担（那里也有 logo + Dox），
+        两处都放就是同一个词在 47px 内出现两遍，看着像没做完。
+        这一条现在只剩右侧那排动作按钮。
+      -->
       <span class="header-actions">
         <!--
           主题一键切。图标显示的是**将要切到**的目标（当前是亮色就显示月亮），
@@ -170,7 +175,8 @@ async function remove(s: SavedSession): Promise<void> {
   padding: 0 var(--sp-2) 0 var(--sp-3);
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  /* 品牌搬去标题栏之后这里只剩动作按钮，靠右排 */
+  justify-content: flex-end;
   border-bottom: 1px solid var(--border);
 }
 .sidebar.collapsed .sidebar-header {
@@ -185,11 +191,15 @@ async function remove(s: SavedSession): Promise<void> {
   align-items: center;
   gap: 2px;
 }
-.logo {
-  font-weight: var(--fw-semibold);
-  font-size: var(--fs-lg);
-  letter-spacing: -0.01em;
-  color: var(--accent-text);
+/*
+ * 顶栏那几枚按钮给足点击区：.icon-btn 默认 padding 3px，
+ * 配 16px 图标只有约 22px，比这一排的视觉重量小、也比别处的行高小，
+ * 点起来要瞄。这里放到 28×28（图标不变，只加留白）。
+ */
+.sidebar-header .icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
 }
 /* 滚动只发生在这一层 */
 .sidebar-body {
