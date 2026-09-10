@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { IpcChannels } from '../../shared/ipc'
 import type {
+  AppSettings,
   CommandSnippet,
   DroppedFile,
   ForwardRuleInput,
@@ -14,6 +15,7 @@ import type {
   TermSize
 } from '../../shared/types'
 import type { LayoutStore } from '../store/layoutStore'
+import type { SettingsStore } from '../store/settingsStore'
 import type { SessionManager } from '../ssh/SessionManager'
 import type { LocalPtyManager } from '../local/LocalPtyManager'
 import { LOCAL_ID_PREFIX } from '../local/LocalPtyManager'
@@ -30,7 +32,8 @@ export function registerIpc(
   transferManager: TransferManager,
   forwardManager: ForwardManager,
   localPtyManager: LocalPtyManager,
-  layoutStore: LayoutStore
+  layoutStore: LayoutStore,
+  settingsStore: SettingsStore
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle(
@@ -64,6 +67,12 @@ export function registerIpc(
   )
   ipcMain.on(IpcChannels.sshHostKeyAnswer, (_event, requestId: string, decision: HostKeyDecision) =>
     sessionManager.answerHostKey(requestId, decision)
+  )
+
+  // ---- 应用设置 ----
+  ipcMain.handle(IpcChannels.settingsGet, () => settingsStore.get())
+  ipcMain.handle(IpcChannels.settingsSet, (_event, settings: AppSettings) =>
+    settingsStore.set(settings)
   )
 
   // ---- 标签布局 ----

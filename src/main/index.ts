@@ -5,6 +5,7 @@ import { SessionManager } from './ssh/SessionManager'
 import { ConfigStore } from './store/configStore'
 import { KnownHostsStore } from './store/knownHosts'
 import { LayoutStore } from './store/layoutStore'
+import { SettingsStore } from './store/settingsStore'
 import { SftpService } from './sftp/SftpService'
 import { TransferManager } from './sftp/TransferManager'
 import { ForwardManager } from './forward/ForwardManager'
@@ -19,8 +20,10 @@ const mainDir = dirname(fileURLToPath(import.meta.url))
 
 const configStore = new ConfigStore()
 const knownHosts = new KnownHostsStore()
-// 标签布局：放在主进程而非渲染进程 localStorage，见 LayoutSnapshot 的注释
+// 标签布局与应用设置都放在主进程而非渲染进程 localStorage，
+// 后者在打包后的 file:// 源下不落盘，见 LayoutSnapshot 的注释
 const layoutStore = new LayoutStore()
+const settingsStore = new SettingsStore()
 // 已保存会话解析器：id → 完整连接配置（认证信息解密不出主进程）。
 // 跳板机建链与断线重连都走它 —— 重连时重新解密，主进程不必常驻明文密码。
 const sessionManager = new SessionManager((id) => configStore.resolveConnection(id), knownHosts)
@@ -95,7 +98,8 @@ app.whenReady().then(() => {
     transferManager,
     forwardManager,
     localPtyManager,
-    layoutStore
+    layoutStore,
+    settingsStore
   )
   createWindow()
   setupAutoUpdater()

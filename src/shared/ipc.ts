@@ -21,6 +21,9 @@ export const IpcChannels = {
   configSave: 'config:save',
   configDelete: 'config:delete',
   configGetAuth: 'config:getAuth',
+  // 应用设置持久化
+  settingsGet: 'settings:get',
+  settingsSet: 'settings:set',
   // 标签布局持久化（重启后恢复会话用）
   layoutGet: 'layout:get',
   layoutSet: 'layout:set',

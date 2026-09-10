@@ -78,6 +78,21 @@ export interface FileEntry {
 }
 
 /**
+ * 应用设置（终端配色/字体/本地 shell）。
+ *
+ * 与布局一样存在主进程，不放渲染进程的 localStorage —— 打包后渲染进程从
+ * file:// 加载，往那个源写 localStorage 不会落盘，用户改完设置重启就丢。
+ */
+export interface AppSettings {
+  themeId: string
+  fontSize: number
+  fontId: string
+  /** 连字需要 DOM 渲染器（WebGL 逐字形绘制，无法做字形替换） */
+  ligatures: boolean
+  localShellId: string
+}
+
+/**
  * 标签布局快照，重启后据此重建会话。
  *
  * ⚠️ 存在主进程（electron-store）而不是渲染进程的 localStorage：

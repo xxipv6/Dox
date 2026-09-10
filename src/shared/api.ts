@@ -1,4 +1,5 @@
 import type {
+  AppSettings,
   CommandSnippet,
   DroppedFile,
   FileEntry,
@@ -49,6 +50,11 @@ export interface DoxApi {
   onHostKeyVerify(cb: (req: HostKeyVerifyRequest) => void): () => void
   /** 回答指纹确认：信任并保存 / 仅本次 / 拒绝 */
   answerHostKey(requestId: string, decision: HostKeyDecision): void
+
+  /** 读取应用设置；从未保存过则返回 null */
+  getSettings(): Promise<AppSettings | null>
+  /** 覆盖保存应用设置 */
+  setSettings(settings: AppSettings): Promise<void>
 
   /** 读取上次退出时的标签布局；没有则返回 null */
   getLayout(): Promise<LayoutSnapshot | null>

@@ -42,6 +42,10 @@ const api: DoxApi = {
   answerHostKey: (requestId, decision) =>
     ipcRenderer.send(IpcChannels.sshHostKeyAnswer, requestId, decision),
 
+  // ---- 应用设置 ----
+  getSettings: () => ipcRenderer.invoke(IpcChannels.settingsGet),
+  setSettings: (settings) => ipcRenderer.invoke(IpcChannels.settingsSet, settings),
+
   // ---- 标签布局 ----
   getLayout: () => ipcRenderer.invoke(IpcChannels.layoutGet),
   setLayout: (snapshot) => ipcRenderer.invoke(IpcChannels.layoutSet, snapshot),

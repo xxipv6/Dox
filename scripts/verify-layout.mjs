@@ -6,6 +6,8 @@
  * B. 未保存的临时连接：经 IPC 注入快照（这条路径没法用真实操作造出来 ——
  *    临时连接需要有效密码，测试机上我们不该存密码）。
  *    断言恢复成占位标签、点击后弹窗被正确预填、且不会自作主张去连接。
+ * C. 设置持久化：改字号 → 重启 → 值仍在，且界面确实用上了它。
+ *    回归的是「打包后渲染进程跑在 file:// 源上，localStorage 不落盘」。
  *
  * 用法：node scripts/verify-layout.mjs
  * 前置：npm run build
@@ -173,6 +175,48 @@ check('弹窗预填了端口', form.port === '2222', form.port)
 check('弹窗预填了用户名', form.username === 'deploy', form.username)
 check('密码栏为空（绝不从快照回填）', form.password === '', JSON.stringify(form.password))
 await win.screenshot({ path: 'shots/52-prefilled-dialog.png' })
+
+// ---------- C. 设置持久化（回归：打包后 localStorage 不落盘导致设置每次重启都丢）----------
+console.log('\nC. 设置持久化')
+const originalSettings = await win.evaluate(() => window.api.getSettings())
+
+await win.evaluate(async (orig) => {
+  const cur = (await window.api.getSettings()) ?? orig ?? {}
+  await window.api.setSettings({ ...cur, fontSize: 19 })
+}, originalSettings)
+await win.waitForTimeout(500)
+await app.close()
+
+;({ app, win } = await boot())
+await win.waitForTimeout(2500)
+
+const afterRestart = await win.evaluate(() => window.api.getSettings())
+check('重启后设置仍然存在', afterRestart?.fontSize === 19, JSON.stringify(afterRestart))
+
+// 光存住还不够 —— 界面必须真的用上了这个值（否则就是「存了但没读」）
+await win.locator('button[title="设置"]').click()
+await win.waitForTimeout(500)
+const sliderValue = await win.evaluate(
+  () => document.querySelector('.dialog input[type="range"]')?.value ?? null
+)
+check('界面加载时应用了持久化的设置（无默认值覆盖）', sliderValue === '19', String(sliderValue))
+await win.screenshot({ path: 'shots/53-settings-persisted.png' })
+await win.locator('.dialog .close-btn').click()
+
+// 还原为测试而改的设置，别留在用户机器上。
+// 原来写成「orig 存在才还原」，可这套存储首次使用时 orig 就是 null，
+// 于是测试值被永久留下 —— 必须显式回落成默认值。
+await win.evaluate(async (orig) => {
+  await window.api.setSettings(
+    orig ?? {
+      themeId: 'tokyo-night',
+      fontSize: 14,
+      fontId: 'default',
+      ligatures: false,
+      localShellId: ''
+    }
+  )
+}, originalSettings)
 
 // 收尾：清掉测试快照，别影响后续使用
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))

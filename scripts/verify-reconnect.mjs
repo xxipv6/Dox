@@ -88,11 +88,13 @@ await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
   { timeout: 10000 }
 )
-await win.evaluate(() => {
-  const cur = JSON.parse(localStorage.getItem('dox-settings') || '{}')
-  localStorage.setItem('dox-settings', JSON.stringify({ ...cur, ligatures: true }))
+// 设置现在存在主进程，改完要等它落盘再 reload，否则会读到旧值
+const originalSettings = await win.evaluate(() => window.api.getSettings())
+await win.evaluate(async () => {
+  const cur = (await window.api.getSettings()) ?? {}
+  await window.api.setSettings({ ...cur, ligatures: true })
   // 布局会持久化，上一个脚本留下的标签会被恢复出来，干扰「本次操作的终端是哪个」
-  void window.api.setLayout({ tabs: [] })
+  await window.api.setLayout({ tabs: [] })
 })
 await win.reload()
 await win.waitForLoadState('domcontentloaded')
@@ -256,6 +258,11 @@ check(
   (await win.locator('.tab-placeholder').filter({ hasText: '连接失败' }).count()) > 0,
   (await win.locator('.tab-placeholder').last().textContent().catch(() => '')) ?? ''
 )
+
+// 还原为测试而打开的设置，别把它留在用户机器上
+await win.evaluate(async (orig) => {
+  if (orig) await window.api.setSettings(orig)
+}, originalSettings)
 
 console.log('\n渲染进程报错:', errors.length ? errors.slice(0, 5) : '无')
 console.log(process.exitCode ? '\n结论: 存在失败项' : '\n结论: 全部通过')
