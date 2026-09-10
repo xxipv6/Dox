@@ -574,11 +574,16 @@ const sources = stripComments(
     .join('\n')
 )
 
-// docker/podman 的子命令里，只有 ps / exec 是这一期允许出现的
-for (const sub of ['run', 'cp', 'build', 'pull', 'create', 'start', 'stop', 'rm']) {
+// docker/podman 的子命令里，ps / exec / logs 加生命周期四个（start/stop/unpause/rm，
+// 经 CONTROL_VERBS 白名单，用户显式触发）是允许的；建容器/装东西/拷文件仍是红线
+for (const sub of ['run', 'cp', 'build', 'pull', 'create']) {
   const hit = new RegExp(`\\b(docker|podman)\\s+${sub}\\b`).test(sources)
-  check(`不出现 docker/podman ${sub}（两侧都零改动）`, !hit)
+  check(`不出现 docker/podman ${sub}（不建容器、不装东西、不拷文件）`, !hit)
 }
+check(
+  '生命周期动作经 CONTROL_VERBS 白名单（渲染层字符串不直接进命令）',
+  /CONTROL_VERBS\s*=\s*\{\s*start/.test(readFileSync('src/main/container/runtime.ts', 'utf8'))
+)
 check(
   '探测一律不开 pty（否则 stderr 会被并进 stdout，错误分类就瞎了）',
   !/pty:\s*true/.test(sources)

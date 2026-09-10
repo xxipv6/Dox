@@ -1,4 +1,4 @@
-import type { ContainerInfo, ContainerProbeReason } from '../../shared/types'
+import type { ContainerControlAction, ContainerInfo, ContainerProbeReason } from '../../shared/types'
 
 /**
  * 容器 runtime 的命令构造、输出解析与错误分类。
@@ -129,6 +129,23 @@ export function localLogsArgs(name: string): string[] {
   return ['logs', '-f', '--tail', '200', assertContainerTarget(name)]
 }
 
+/*
+ * 容器生命周期操作的白名单：只允许这四个动作，且只能经这张表换成动词。
+ * 「不建容器（run/create/pull）、不拷文件（cp）、不构建（build）」仍是红线 ——
+ * 守卫词表在 verify-container.mjs，调整它前先想清楚。
+ */
+const CONTROL_VERBS = { start: 'start', stop: 'stop', unpause: 'unpause', remove: 'rm' } as const
+
+/** 远端生命周期命令（binary 是探测回传的绝对路径，name 过字符集校验） */
+export function controlCommand(binary: string, name: string, action: ContainerControlAction): string {
+  return `${binary} ${CONTROL_VERBS[action]} ${assertContainerTarget(name)}`
+}
+
+/** 本机生命周期参数（argv 直给，不经 shell） */
+export function localControlArgs(name: string, action: ContainerControlAction): string[] {
+  return [CONTROL_VERBS[action], assertContainerTarget(name)]
+}
+
 /** 依次尝试的候选 shell；容器里多半只有 sh，distroless 类一个都没有 */
 export const SHELL_CANDIDATES = ['bash', 'sh'] as const
 
@@ -179,9 +196,15 @@ export function parseRows(
     if (info) all.push(info)
   }
 
-  // 一行坏数据不该让整块面板空掉，所以畸形行由 parseRow 返回 null 跳过
-  const containers = all.filter((c) => c.state === 'running' || c.state === 'paused')
-  return { containers, stoppedCount: all.length - containers.length }
+  /*
+   * 全部状态都进列表（running / paused / exited），排序：在跑 > 暂停 > 已停。
+   * 已停止的不再是「另有 N 个未列出」的数字 —— 启动和删除按钮就在它们身上。
+   * stoppedCount 保留给「一个都没有」时的文案。
+   */
+  const rank = (c: ContainerInfo): number =>
+    c.state === 'running' ? 0 : c.state === 'paused' ? 1 : 2
+  const containers = all.sort((a, b) => rank(a) - rank(b))
+  return { containers, stoppedCount: all.length - all.filter((c) => rank(c) < 2).length }
 }
 
 function splitLines(stdout: string): string[] {

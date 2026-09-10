@@ -88,13 +88,20 @@ src/
 
 这几条不是风格偏好，破了会出真问题。
 
-### 3.1 远端必须「无感」：不装、不建、不启停
+### 3.1 远端必须「无感」：不装 agent、不建文件、不留痕迹
 
-**只在远端跑只读探测 + `docker exec` 进已存在的容器。** 不安装任何东西、不启停容器、
-不在远端建文件（测试脚本除外，且只允许建临时文件并自己删掉）。
+红线的本义（项目负责人原话）：**不要一连上就往远端装 agent 之类的东西**。
+具体到容器功能：
+
+- **允许**：只读探测（`docker ps`）、`docker exec` 进已存在的容器、`docker logs`、
+  以及用户**显式触发**的容器生命周期操作（start / stop / unpause / rm，
+  经 `runtime.ts` 的 `CONTROL_VERBS` 白名单，渲染层字符串不直接进命令）。
+- **禁止**：安装任何东西、建容器（run/create/pull）、拷贝文件进容器（cp）、
+  在远端建文件（测试脚本除外，且只允许建临时文件并自己删掉）。
 
 这条由 `verify-container.mjs` 的阶段 5 静态守着（扫 `src/main/container/` 有没有出现
-`docker run/cp/build/pull/create/start/stop/rm`）。**看到那条守卫红了就去改代码，不要去改守卫。**
+`docker run/cp/build/pull/create`，外加 CONTROL_VERBS 白名单检查）。
+**看到那条守卫红了就去改代码，不要去改守卫。**
 
 同类约束：容器内**不做**文件浏览。VS Code Dev Containers 那条路要往容器里塞一个 server，
 直接违反这一条。

@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   CommandSnippet,
+  ContainerControlAction,
   ContainerProbeResult,
   DownloadRequest,
   DroppedFile,
@@ -125,6 +126,15 @@ export interface DoxApi {
     containerName: string,
     term: TermSize
   ): Promise<string>
+  /**
+   * 容器生命周期操作（启动/停止/恢复/删除，白名单见 shared/types.ts）。
+   * 由用户显式触发；不建容器、不装东西 —— 「远端零改动」红线指的是后者。
+   */
+  controlContainer(
+    parentSessionId: string,
+    containerName: string,
+    action: ContainerControlAction
+  ): Promise<void>
 
   // ---- 传输队列 ----
   /** 弹出本地文件选择框，选中文件上传到 remoteDir */

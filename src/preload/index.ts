@@ -77,6 +77,8 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.containerConnect, parentSessionId, containerName, term),
   connectContainerLogs: (parentSessionId, containerName, term) =>
     ipcRenderer.invoke(IpcChannels.containerLogs, parentSessionId, containerName, term),
+  controlContainer: (parentSessionId, containerName, action) =>
+    ipcRenderer.invoke(IpcChannels.containerControl, parentSessionId, containerName, action),
 
   // ---- 传输队列 ----
   pickUpload: (sessionId, remoteDir) =>

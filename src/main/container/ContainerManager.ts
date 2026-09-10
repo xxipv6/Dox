@@ -11,15 +11,17 @@ import {
   isLocalContainerTarget,
   LOCAL_CONTAINER_TARGET
 } from '../../shared/sessionId'
-import type { ContainerInfo, ContainerProbeResult, TermSize } from '../../shared/types'
+import type { ContainerControlAction, ContainerInfo, ContainerProbeResult, TermSize } from '../../shared/types'
 import { execCapture } from '../ssh/remoteExec'
 import { CommandError, outputsOf } from '../execError'
 import { isNotFound, runLocal } from './localRun'
 import {
   assertContainerTarget,
   classifyFailure,
+  controlCommand,
   interactiveExecCommand,
   listCommand,
+  localControlArgs,
   localInteractiveArgs,
   localListArgs,
   localLogsArgs,
@@ -251,6 +253,45 @@ export class ContainerManager {
     this.wire(session)
     if (!owner.isDestroyed()) owner.send(IpcChannels.sshStatus, { id, status: 'connected' })
     return id
+  }
+
+  /**
+   * 容器生命周期操作（start / stop / unpause / remove，白名单见 runtime.ts）。
+   *
+   * 这不是「远端零改动」的倒退：红线的本义是**不装 agent、不建文件、不留痕迹**，
+   * 而这些是用户显式触发的 docker 子命令，跑完什么都不留下。
+   * 动作只能经 CONTROL_VERBS 表换成动词，渲染层传过来的字符串永远不直接进命令。
+   */
+  async control(
+    parentSessionId: string,
+    containerName: string,
+    action: ContainerControlAction
+  ): Promise<void> {
+    assertContainerTarget(containerName)
+
+    const runtime = this.runtimeByParent.get(parentSessionId)
+    if (!runtime) {
+      throw new Error('还没有探测到容器运行时，请先刷新容器列表')
+    }
+
+    try {
+      if (isLocalContainerTarget(parentSessionId)) {
+        // stop 默认有 10s 优雅期，超时放宽到 15s
+        await runLocal(runtime.binary, localControlArgs(containerName, action), { timeoutMs: 15000 })
+      } else {
+        const client = this.getClient(parentSessionId)
+        if (!client) throw new Error('父会话已断开，请先恢复 SSH 连接')
+        await execCapture(client, controlCommand(runtime.binary, containerName, action), {
+          timeoutMs: 15000
+        })
+      }
+    } catch (err) {
+      const { stdout, stderr } = outputsOf(err)
+      throw new Error(firstLine([stderr, stdout].filter(Boolean).join('\n')) || textOf(err))
+    }
+
+    // 容器状态变了（甚至删了重建），shell 缓存不再可信
+    this.shellByTarget.delete(`${parentSessionId} ${containerName}`)
   }
 
   /** 远端：父 SSH 连接上的 exec 通道 */

@@ -49,6 +49,8 @@ export const IpcChannels = {
   containerConnect: 'container:connect',
   /** 查看容器日志（docker logs -f）；与进入容器共用 container- 前缀路由 */
   containerLogs: 'container:logs',
+  /** 容器生命周期：start / stop / unpause / remove（白名单动作，用户显式触发） */
+  containerControl: 'container:control',
   // 传输队列
   transferPickUpload: 'transfer:pickUpload',
   transferEnqueueDropped: 'transfer:enqueueDropped',

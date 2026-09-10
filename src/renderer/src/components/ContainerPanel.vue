@@ -22,6 +22,8 @@ const store = useSessionStore()
 const result = ref<ContainerProbeResult | null>(null)
 const loading = ref(false)
 const entering = ref<string | null>(null)
+/** 正在做生命周期操作的容器名（启动/停止/恢复/删除） */
+const controlling = ref<string | null>(null)
 const menu = ref<{ x: number; y: number; box: ContainerInfo } | null>(null)
 
 /**
@@ -73,7 +75,6 @@ const blockedHint = computed(() =>
 )
 
 const containers = computed(() => (result.value?.ok ? result.value.list.containers : []))
-const stoppedCount = computed(() => (result.value?.ok ? result.value.list.stoppedCount : 0))
 const runtimeLabel = computed(() =>
   result.value?.ok ? (result.value.list.runtime === 'podman' ? 'Podman' : 'Docker') : ''
 )
@@ -110,11 +111,46 @@ function onRowMenu(e: MouseEvent, box: ContainerInfo): void {
   menu.value = { x: e.clientX, y: e.clientY, box }
 }
 
-const menuItems = computed<ContextMenuItem[]>(() => [
-  { id: 'enter', label: '进入', icon: 'terminal', disabled: !parentReady.value },
-  // 日志不依赖容器里有 shell，也不挑容器在不在跑 —— 它与「进入」的可点条件一致即可
-  { id: 'logs', label: '查看日志', icon: 'file', disabled: !parentReady.value }
-])
+/**
+ * 按容器状态出菜单：
+ * - running：进得去、日志在看、可以停
+ * - paused：先恢复再说（docker 对 paused 容器 stop/rm 都会报错）
+ * - exited：启动、看日志（看它为什么挂）、删除
+ * 生命周期操作是用户显式触发的 docker 子命令，与「不装 agent 不建文件」
+ * 的远端零改动红线不冲突；stop/remove 落手前弹确认。
+ */
+const menuItems = computed<ContextMenuItem[]>(() => {
+  const box = menu.value?.box
+  if (!box) return []
+  const ready = parentReady.value
+  const busy = controlling.value === box.name
+  const items: ContextMenuItem[] = []
+  if (box.state === 'running') {
+    items.push(
+      { id: 'enter', label: '进入', icon: 'terminal', disabled: !ready || busy },
+      { id: 'logs', label: '查看日志', icon: 'file', disabled: !ready || busy },
+      { id: 'stop', label: '停止', icon: 'square', disabled: !ready || busy }
+    )
+  } else if (box.state === 'paused') {
+    items.push(
+      { id: 'unpause', label: '恢复', icon: 'play', disabled: !ready || busy },
+      { id: 'logs', label: '查看日志', icon: 'file', disabled: !ready || busy }
+    )
+  } else {
+    items.push(
+      { id: 'start', label: '启动', icon: 'play', disabled: !ready || busy },
+      { id: 'logs', label: '查看日志', icon: 'file', disabled: !ready || busy },
+      { id: 'remove', label: '删除', icon: 'trash', danger: true, disabled: !ready || busy }
+    )
+  }
+  return items
+})
+
+/** 停止/删除的确认文案（原生 confirm，走 Playwright 也能捕获的那条 dialog 通道） */
+const CONFIRMS: Record<string, (name: string) => string> = {
+  stop: (n) => `停止容器「${n}」？其中运行的服务会中断。`,
+  remove: (n) => `删除容器「${n}」？此操作不可恢复（镜像与数据卷不受影响）。`
+}
 
 async function onMenuSelect(id: string): Promise<void> {
   const target = menu.value?.box
@@ -130,17 +166,35 @@ async function onMenuSelect(id: string): Promise<void> {
     }
     return
   }
-  if (id !== 'enter') return
 
-  entering.value = target.name
+  if (id === 'enter') {
+    entering.value = target.name
+    try {
+      // 失败原因（容器已停止 / 没有可用 shell / 被 seccomp 拒绝）由主进程写好，
+      // 这里如实抛出来给用户看，不要吞成一句「失败了」
+      await store.enterContainer(sessionId, target)
+    } catch (err) {
+      alert(`进入容器失败：${errorText(err)}`)
+    } finally {
+      entering.value = null
+    }
+    return
+  }
+
+  // start / stop / unpause / remove
+  const ask = CONFIRMS[id]
+  if (ask && !confirm(ask(target.name))) return
+  controlling.value = target.name
   try {
-    // 失败原因（容器已停止 / 没有可用 shell / 被 seccomp 拒绝）由主进程写好，
-    // 这里如实抛出来给用户看，不要吞成一句「失败了」
-    await store.enterContainer(sessionId, target)
+    await api.controlContainer(sessionId, target.name, id as 'start' | 'stop' | 'unpause' | 'remove')
+    // 状态变化是异步体现在 docker ps 里的，稍等再刷，否则列表可能还是旧状态
+    await new Promise((r) => setTimeout(r, 600))
+    await refresh()
   } catch (err) {
-    alert(`进入容器失败：${errorText(err)}`)
+    alert(`操作失败：${errorText(err)}`)
+    await refresh()
   } finally {
-    entering.value = null
+    controlling.value = null
   }
 }
 </script>
@@ -173,7 +227,7 @@ async function onMenuSelect(id: string): Promise<void> {
   </div>
 
   <div v-else-if="!containers.length" class="empty-hint">
-    没有运行中的容器<template v-if="stoppedCount">（另有 {{ stoppedCount }} 个已停止）</template>
+    没有任何容器
   </div>
 
   <template v-else>
@@ -186,6 +240,7 @@ async function onMenuSelect(id: string): Promise<void> {
         v-for="box in containers"
         :key="box.id"
         class="container"
+        :class="{ stopped: box.state !== 'running' && box.state !== 'paused' }"
         :title="`${box.name}\n${box.image}\n${box.status}\n${box.id}`"
         @contextmenu.prevent="onRowMenu($event, box)"
       >
@@ -195,10 +250,8 @@ async function onMenuSelect(id: string): Promise<void> {
           <span class="container-meta">{{ box.image }} · {{ box.status }}</span>
         </span>
         <span v-if="entering === box.name" class="entering">进入中…</span>
+        <span v-else-if="controlling === box.name" class="entering">处理中…</span>
       </div>
-    </div>
-    <div v-if="stoppedCount" class="empty-hint">
-      另有 {{ stoppedCount }} 个已停止的容器未列出
     </div>
     <div v-if="!parentReady" class="empty-hint">{{ blockedHint }}</div>
   </template>
@@ -239,6 +292,10 @@ async function onMenuSelect(id: string): Promise<void> {
 }
 .container-list.stale {
   opacity: 0.5;
+}
+/* 已停止的容器淡一档：还在列表里（能启动/删除），但视觉上不和在跑的抢 */
+.container.stopped {
+  opacity: 0.62;
 }
 .container {
   position: relative;

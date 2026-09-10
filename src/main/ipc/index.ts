@@ -6,6 +6,7 @@ import { IpcChannels } from '../../shared/ipc'
 import type {
   AppSettings,
   CommandSnippet,
+  ContainerControlAction,
   DownloadRequest,
   DroppedFile,
   ForwardRuleInput,
@@ -155,6 +156,11 @@ export function registerIpc(
     IpcChannels.containerLogs,
     (event, parentSessionId: string, containerName: string, term: TermSize) =>
       containerManager.openLogs(parentSessionId, containerName, term, event.sender)
+  )
+  ipcMain.handle(
+    IpcChannels.containerControl,
+    (_event, parentSessionId: string, containerName: string, action: ContainerControlAction) =>
+      containerManager.control(parentSessionId, containerName, action)
   )
 
   // ---- 传输队列 ----

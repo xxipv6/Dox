@@ -259,6 +259,9 @@ export interface ContainerInfo {
   health?: 'healthy' | 'unhealthy' | 'starting'
 }
 
+/** 容器生命周期操作（白名单之外的动作在主进程不存在入口） */
+export type ContainerControlAction = 'start' | 'stop' | 'unpause' | 'remove'
+
 /** 一次容器列表探测的结果 */
 export interface ContainerList {
   runtime: 'docker' | 'podman'
