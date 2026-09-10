@@ -11,7 +11,8 @@ import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
 import { setupAutoUpdater } from './updater'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
+// 注意：不能命名为 __dirname，electron-vite dev 模式会注入同名 polyfill 导致重复声明
+const mainDir = dirname(fileURLToPath(import.meta.url))
 
 const configStore = new ConfigStore()
 const knownHosts = new KnownHostsStore()
@@ -53,7 +54,7 @@ function createWindow(): void {
     autoHideMenuBar: true,
     backgroundColor: '#1a1b26',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
+      preload: join(mainDir, '../preload/index.mjs'),
       contextIsolation: true,
       // ESM preload 要求关闭 sandbox；安全边界由 contextIsolation 保证
       sandbox: false,
@@ -72,7 +73,7 @@ function createWindow(): void {
   if (process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(mainDir, '../renderer/index.html'))
   }
 }
 

@@ -1,5 +1,8 @@
 import { app } from 'electron'
-import { autoUpdater } from 'electron-updater'
+// electron-updater 是 CJS 包，ESM 下需默认导入后解构
+import updaterPkg from 'electron-updater'
+
+const { autoUpdater } = updaterPkg
 
 /**
  * 自动更新：从 electron-builder.yml 的 publish 渠道（GitHub Releases）检查更新。
