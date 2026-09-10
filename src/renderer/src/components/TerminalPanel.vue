@@ -27,10 +27,38 @@ let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let searchAddon: SearchAddon | null = null
 let unsubscribeData: (() => void) | null = null
+let unsubscribeStatus: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
 let zmodem: ZmodemBridge | null = null
 /** 卸载后禁止再往已销毁的终端写入（ZMODEM 看门狗可能在卸载后触发） */
 let disposed = false
+
+// ---- 断线重连（状态由主进程推送，这里只负责呈现与恢复）----
+const reconnect = ref<{ attempt: number; reason: string } | null>(null)
+
+/**
+ * 往终端里插一条分隔行。
+ * 断线前的输出一律保留 —— 断线时正在跑的命令往往已经把线索打在屏幕上了，
+ * 清掉就再也找不回来。
+ */
+function separator(text: string, color = '33'): void {
+  if (disposed || !term) return
+  term.write(`\r\n\x1b[${color}m━━━━ ${text} ━━━━\x1b[0m\r\n`)
+}
+
+/** 单引号包裹 + 转义，路径里有空格/引号也不会把命令拆坏 */
+function quoteShellPath(p: string): string {
+  return `'${p.replace(/'/g, `'\\''`)}'`
+}
+
+function stopReconnect(): void {
+  window.api.reconnectControl(props.sessionId, 'stop')
+  reconnect.value = null
+}
+
+function retryNow(): void {
+  window.api.reconnectControl(props.sessionId, 'now')
+}
 
 /**
  * 安全 fit：容器不可见（v-show 隐藏的标签、分屏/面板切换的中间态、挂载瞬间
@@ -286,6 +314,41 @@ onMounted(() => {
   unsubscribeData = window.api.onData((id, chunk) => {
     if (id === props.sessionId) zmodem?.consume(chunk)
   })
+
+  // 会话状态：断线 / 重连中 / 重连成功都往终端里留痕，并驱动顶部状态条
+  unsubscribeStatus = window.api.onStatus((e) => {
+    if (e.id !== props.sessionId || disposed) return
+
+    if (e.status === 'reconnecting') {
+      const attempt = e.attempt ?? 1
+      // e.error 里是断线原因（主进程记下的错误原文），不是「连接已断开」这句话本身
+      const reason = e.error || '网络中断'
+      reconnect.value = { attempt, reason }
+      separator(`连接已断开 · ${reason} · 正在重连（第 ${attempt} 次）`)
+      return
+    }
+
+    if (e.status === 'connected') {
+      reconnect.value = null
+      if (!e.reconnected) return
+      // 尽力回到断线前的目录。cwd 只来自本地跟踪（OSC 7 或解析用户敲的 cd），
+      // 也就是说全程不依赖远端装任何东西。
+      const cwd = store.cwdBySession[props.sessionId]
+      if (cwd) {
+        separator(`已重新连接 · 回到 ${cwd}`, '36')
+        window.api.input(props.sessionId, `cd ${quoteShellPath(cwd)}\r`)
+      } else {
+        separator('已重新连接', '36')
+      }
+      return
+    }
+
+    // closed / error：重连已停止，把原因留在屏幕上
+    if (reconnect.value) {
+      reconnect.value = null
+      if (e.error) separator(`重连已停止（${e.error}）`, '31')
+    }
+  })
   // 键盘输入 → 远端；ZMODEM 会话期间屏蔽输入（Esc 中断由上面的 key handler 处理）
   term.onData((data) => {
     if (zmodem?.isActive()) return
@@ -316,6 +379,7 @@ onBeforeUnmount(() => {
   zmodem?.abort() // 清掉看门狗定时器，避免卸载后触发
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
+  unsubscribeStatus?.()
   resizeObserver?.disconnect()
   term?.dispose()
 })
@@ -344,6 +408,15 @@ defineExpose({ refitAndFocus })
 <template>
   <div class="terminal-wrap">
     <div ref="container" class="terminal-container" @contextmenu.prevent="openMenu"></div>
+
+    <!-- 断线重连状态条：重连期间一直挂着，随时可以停下 -->
+    <div v-if="reconnect" class="reconnect-bar">
+      <span class="pulse"></span>
+      <span class="reconnect-text">连接已断开 · {{ reconnect.reason }} · 第 {{ reconnect.attempt }} 次重试</span>
+      <span class="spacer"></span>
+      <button title="立刻再试一次" @click="retryNow">立即重试</button>
+      <button title="停止自动重连" @click="stopReconnect">停止</button>
+    </div>
 
     <!-- Ctrl+F 搜索框 -->
     <div v-show="searchVisible" class="search-bar" @keydown.esc="toggleSearch">
@@ -386,9 +459,61 @@ defineExpose({ refitAndFocus })
   padding: 4px 0 0 8px;
   box-sizing: border-box;
 }
+.reconnect-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: #e0af68;
+  background: rgba(224, 175, 104, 0.12);
+  border-bottom: 1px solid rgba(224, 175, 104, 0.35);
+}
+.reconnect-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reconnect-bar .spacer {
+  flex: 1;
+}
+.reconnect-bar button {
+  background: none;
+  border: 1px solid rgba(224, 175, 104, 0.5);
+  border-radius: 4px;
+  color: #e0af68;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 8px;
+  flex-shrink: 0;
+}
+.reconnect-bar button:hover {
+  background: rgba(224, 175, 104, 0.18);
+}
+.pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e0af68;
+  flex-shrink: 0;
+  animation: reconnect-pulse 1s infinite alternate;
+}
+@keyframes reconnect-pulse {
+  from {
+    opacity: 0.3;
+  }
+  to {
+    opacity: 1;
+  }
+}
 .search-bar {
   position: absolute;
-  top: 8px;
+  top: 36px;
   right: 12px;
   display: flex;
   gap: 4px;

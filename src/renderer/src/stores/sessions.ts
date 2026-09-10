@@ -27,6 +27,11 @@ export interface SessionTab {
   kind: 'ssh' | 'local'
   /** SSH 标签页的连接配置，分屏时用于克隆出新会话；本地标签页为 null */
   config: SshSessionConfig | null
+  /**
+   * 该标签对应的已保存设备 id（临时连接为 undefined）。
+   * 主进程凭它重新解密凭证做断线重连；布局快照也靠它判断重启后能否自动连接。
+   */
+  savedSessionId?: string
   split: SplitDirection
   panes: PaneState[]
   activePaneId: string
@@ -129,7 +134,9 @@ export const useSessionStore = defineStore('sessions', () => {
       const sessionId =
         tab.kind === 'local'
           ? await window.api.connectLocal(size, useSettingsStore().localShellId || undefined)
-          : await window.api.connect(toPlainConfig(tab.config!), size)
+          : await window.api.connect(toPlainConfig(tab.config!), size, {
+              savedSessionId: tab.savedSessionId
+            })
 
       // 连接在途时用户可能已经关掉了标签/窗格：此时会话已建立但无人认领，
       // 必须立刻断开，否则 ssh 连接（含整条跳板机链路）或本地 shell 进程
@@ -197,6 +204,7 @@ export const useSessionStore = defineStore('sessions', () => {
       title: saved.name || `${saved.username}@${saved.host}`,
       kind: 'ssh',
       config: null,
+      savedSessionId: saved.id,
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId

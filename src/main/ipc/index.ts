@@ -30,8 +30,10 @@ export function registerIpc(
   localPtyManager: LocalPtyManager
 ): void {
   // ---- SSH 会话 ----
-  ipcMain.handle(IpcChannels.sshConnect, (event, config: SshSessionConfig, term: TermSize) =>
-    sessionManager.connect(config, event.sender, term)
+  ipcMain.handle(
+    IpcChannels.sshConnect,
+    (event, config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
+      sessionManager.connect(config, event.sender, term, opts)
   )
   // ---- 本地终端 ----
   ipcMain.handle(IpcChannels.localConnect, (event, term: TermSize, shellId?: string) =>
@@ -49,6 +51,13 @@ export function registerIpc(
   )
   ipcMain.on(IpcChannels.sshDisconnect, (_event, id: string) =>
     id.startsWith(LOCAL_ID_PREFIX) ? localPtyManager.kill(id) : sessionManager.disconnect(id)
+  )
+  // 本地终端没有重连概念，只对 SSH 会话生效
+  ipcMain.on(
+    IpcChannels.sshReconnectControl,
+    (_event, id: string, action: 'stop' | 'now') => {
+      if (!id.startsWith(LOCAL_ID_PREFIX)) sessionManager.reconnectControl(id, action)
+    }
   )
   ipcMain.on(IpcChannels.sshHostKeyAnswer, (_event, requestId: string, decision: HostKeyDecision) =>
     sessionManager.answerHostKey(requestId, decision)

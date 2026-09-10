@@ -10,6 +10,11 @@ interface InternalRule extends ForwardRule {
   sockets?: Set<net.Socket>
   /** 远程转发在 client 上注册的 tcp connection 处理器 */
   tcpHandler?: (info: TcpConnectionDetails, accept: () => ClientChannel) => void
+  /**
+   * 正在进行中的停止操作。重连后要重新监听同一端口，必须先等旧监听真正关闭，
+   * 否则会撞 EADDRINUSE —— 断线重连只要够快（1s 退避）就会踩到。
+   */
+  stopPromise?: Promise<void>
 }
 
 /**
@@ -69,14 +74,49 @@ export class ForwardManager {
       if (rule.sessionId === sessionId && rule.status === 'active') {
         // 必须先 await 停止再改状态：否则监听端口可能仍在 listen，
         // 同端口重新添加必然 EADDRINUSE，只有重启应用才能恢复
-        void this.stop(rule).then(() => {
+        const promise = this.stop(rule).then(() => {
           rule.status = 'stopped'
           this.emit()
         })
+        rule.stopPromise = promise
+        void promise
         changed = true
       }
     }
     if (changed) this.emit()
+  }
+
+  /**
+   * 会话重连成功后，把它的转发规则按原参数重新建立。
+   * 断开时 stopBySession 只把状态置成 stopped、记录一直保留着，
+   * 这里直接复用 —— 隧道必须自己恢复，否则用户以为它还开着。
+   */
+  async restartBySession(sessionId: string): Promise<void> {
+    const client = this.getClient(sessionId)
+    if (!client) return
+
+    const pending = [...this.rules.values()].filter(
+      (rule) => rule.sessionId === sessionId && rule.status !== 'active'
+    )
+    if (pending.length === 0) return
+
+    for (const rule of pending) {
+      // 等旧监听彻底关闭，否则同一端口重新 listen 会 EADDRINUSE
+      if (rule.stopPromise) {
+        await rule.stopPromise.catch(() => undefined)
+        rule.stopPromise = undefined
+      }
+      rule.error = undefined
+      try {
+        if (rule.type === 'local') await this.startLocal(rule, client)
+        else await this.startRemote(rule, client)
+        rule.status = 'active'
+      } catch (err) {
+        rule.status = 'error'
+        rule.error = (err as Error).message
+      }
+    }
+    this.emit()
   }
 
   /** 本地转发：net.createServer → forwardOut 管道 */

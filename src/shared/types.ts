@@ -13,13 +13,19 @@ export interface SshSessionConfig {
   jumpHostId?: string
 }
 
-export type SessionStatus = 'connecting' | 'connected' | 'closed' | 'error'
+export type SessionStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error'
 
 /** 渲染进程可见的会话状态（不含任何敏感信息） */
 export interface SessionStatusEvent {
   id: string
   status: SessionStatus
   error?: string
+  /** status = reconnecting 时的第几次尝试（从 1 开始） */
+  attempt?: number
+  /** 本次退避时长，用于界面提示「N 秒后重试」 */
+  delayMs?: number
+  /** status = connected 且是重连成功后发出（不是首次连接） */
+  reconnected?: boolean
 }
 
 /** 持久化到本地的会话配置（敏感字段经 safeStorage 加密，base64 存储） */

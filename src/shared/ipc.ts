@@ -5,6 +5,8 @@ export const IpcChannels = {
   sshInput: 'ssh:input',
   sshResize: 'ssh:resize',
   sshDisconnect: 'ssh:disconnect',
+  /** 断线重连控制：action = stop（停止重试）/ now（立即重试） */
+  sshReconnectControl: 'ssh:reconnectControl',
   // 本地终端（id 带 local- 前缀，input/resize/disconnect 共用上方通道按前缀路由）
   localConnect: 'local:connect',
   localListShells: 'local:listShells',

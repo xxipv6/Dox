@@ -261,7 +261,8 @@ async function toggleSftp(): Promise<void> {
   border-radius: 50%;
   background: #565f89;
 }
-.status-dot.connecting {
+.status-dot.connecting,
+.status-dot.reconnecting {
   background: #e0af68;
   animation: pulse 1s infinite alternate;
 }

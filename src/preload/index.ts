@@ -13,14 +13,16 @@ import type {
 } from '../shared/types'
 
 const api: DoxApi = {
-  connect: (config: SshSessionConfig, term: TermSize) =>
-    ipcRenderer.invoke(IpcChannels.sshConnect, config, term),
+  connect: (config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
+    ipcRenderer.invoke(IpcChannels.sshConnect, config, term, opts),
   connectLocal: (term: TermSize, shellId?: string) =>
     ipcRenderer.invoke(IpcChannels.localConnect, term, shellId),
   listLocalShells: () => ipcRenderer.invoke(IpcChannels.localListShells),
   input: (id, data) => ipcRenderer.send(IpcChannels.sshInput, id, data),
   resize: (id, cols, rows) => ipcRenderer.send(IpcChannels.sshResize, id, cols, rows),
   disconnect: (id) => ipcRenderer.send(IpcChannels.sshDisconnect, id),
+  reconnectControl: (id, action) =>
+    ipcRenderer.send(IpcChannels.sshReconnectControl, id, action),
 
   onData: (cb) => {
     const listener = (_e: IpcRendererEvent, id: string, chunk: Uint8Array): void => cb(id, chunk)

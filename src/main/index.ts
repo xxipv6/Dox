@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, powerMonitor, shell } from 'electron'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { SessionManager } from './ssh/SessionManager'
@@ -18,7 +18,8 @@ const mainDir = dirname(fileURLToPath(import.meta.url))
 
 const configStore = new ConfigStore()
 const knownHosts = new KnownHostsStore()
-// 跳板机解析器：jumpHostId → 完整连接配置（认证信息解密不出主进程）
+// 已保存会话解析器：id → 完整连接配置（认证信息解密不出主进程）。
+// 跳板机建链与断线重连都走它 —— 重连时重新解密，主进程不必常驻明文密码。
 const sessionManager = new SessionManager((id) => configStore.resolveConnection(id), knownHosts)
 const sftpService = new SftpService(sessionManager)
 const transferManager = new TransferManager(
@@ -38,8 +39,11 @@ const forwardManager = new ForwardManager(
     }
   }
 )
-// 会话断开时自动停止其转发规则
+// 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped）
 sessionManager.onClosed = (id) => forwardManager.stopBySession(id)
+// 重连成功后按原参数把该会话的转发规则重新建立起来，
+// 否则隧道会无声死掉，用户还以为它开着
+sessionManager.onReconnected = (id) => void forwardManager.restartBySession(id)
 const localPtyManager = new LocalPtyManager()
 
 // Windows 通知 / 任务栏跳转列表所需
@@ -91,6 +95,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+
+  // 笔记本合盖再打开后，所有长连接其实已经断了。让正在重连的会话立刻重试，
+  // 不必再等满退避。已在 §resumeAfterSuspend 说明：未检测到死亡的连接仍靠 keepalive。
+  powerMonitor.on('resume', () => sessionManager.resumeAfterSuspend())
 })
 
 app.on('window-all-closed', () => {

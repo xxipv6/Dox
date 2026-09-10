@@ -20,8 +20,15 @@ import type {
 
 /** preload 通过 contextBridge 暴露给渲染进程的 API（window.api） */
 export interface DoxApi {
-  /** 建立 SSH 连接并打开 shell，返回会话 id */
-  connect(config: SshSessionConfig, term: TermSize): Promise<string>
+  /**
+   * 建立 SSH 连接并打开 shell，返回会话 id。
+   * 传 savedSessionId 时主进程不会常驻明文凭证 —— 断线重连时按该 id 重新解密。
+   */
+  connect(
+    config: SshSessionConfig,
+    term: TermSize,
+    opts?: { savedSessionId?: string }
+  ): Promise<string>
   /** 打开本地终端，返回 local- 前缀的会话 id；shellId 不传则用设置里的默认值 */
   connectLocal(term: TermSize, shellId?: string): Promise<string>
   /** 列出本机可用的本地 shell */
@@ -31,6 +38,8 @@ export interface DoxApi {
   /** 终端尺寸变化（cols × rows） */
   resize(id: string, cols: number, rows: number): void
   disconnect(id: string): void
+  /** 断线重连控制：停止自动重试 / 立即重试一次 */
+  reconnectControl(id: string, action: 'stop' | 'now'): void
   /** 订阅远端输出，返回取消订阅函数 */
   onData(cb: (id: string, chunk: Uint8Array) => void): () => void
   /** 订阅会话状态变化（connected / closed / error） */

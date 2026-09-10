@@ -8,24 +8,114 @@ import type { KnownHostsStore } from '../store/knownHosts'
 
 interface ActiveSession {
   id: string
-  client: Client
+  /** 断开重连期间为 null；换连接时整体替换 */
+  client: Client | null
   shell: ClientChannel | null
   sftpClient: SFTPWrapper | null
   /** 跳板机连接链（目标会话存活期间必须保持） */
   jumps: Client[]
   owner: WebContents
+  /** 最后一次已知的终端尺寸：重连时用它开新 shell，否则会退回 80x24 */
+  term: TermSize
+  /** 已保存设备才有：重连时凭它重新解密凭证，不必在主进程常驻明文密码 */
+  savedSessionId?: string
+  /** 仅临时连接（未保存）需要暂存；会话被销毁时必须随对象一起释放 */
+  config?: SshSessionConfig
+  /** 用户主动断开 / 应用退出 —— 之后不再重连 */
+  disposed: boolean
+  /** 用户点了「停止」，或重连遇到不可恢复的错误 */
+  stopped: boolean
+  /** 已尝试的重连次数，成功后归零 */
+  attempt: number
+  timer: NodeJS.Timeout | null
+  /**
+   * 最近一次连接级错误的原文。
+   * 'close' 事件本身不带原因，想给用户一个像样的断线说明就得靠 'error' 先记下来。
+   */
+  lastError?: string
 }
 
-/** 由跳板机 id 解析出完整连接配置（含解密后的认证信息） */
-export type JumpResolver = (id: string) => SshSessionConfig
+/** 由已保存会话 id 解析出完整连接配置（含解密后的认证信息）。跳板机与断线重连共用。 */
+export type SavedSessionResolver = (id: string) => SshSessionConfig
 
 const MAX_JUMP_DEPTH = 3
 /** 指纹确认弹窗的最长等待时间：超时按拒绝处理，避免挂起的连接与待决记录泄漏 */
 const HOST_KEY_TIMEOUT_MS = 120_000
+/** shell 通道建立的整体超时（readyTimeout 覆盖不到 shell 阶段） */
+const SHELL_TIMEOUT_MS = 30_000
+/** 重连退避：1→2→4→8→16→30s 封顶 */
+const RECONNECT_BASE_MS = 1000
+const RECONNECT_MAX_MS = 30_000
+
+/** 重试不会改变结果的错误（本地配置问题）——不要拿它去撞服务器 */
+class FatalConnectError extends Error {}
+
+/** 网络类错误的 errno，命中即认为「值得重连」 */
+const NETWORK_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENETDOWN',
+  'ENOTFOUND',
+  'EAI_AGAIN'
+])
+
+function backoffMs(attempt: number): number {
+  // 用 min 卡住指数，避免大 attempt 时 2**n 溢出成 Infinity
+  return Math.min(RECONNECT_BASE_MS * 2 ** Math.min(attempt - 1, 10), RECONNECT_MAX_MS)
+}
+
+type FailureKind = 'retryable' | 'auth' | 'hostkey' | 'fatal'
+
+/**
+ * 判断一次连接失败该不该重试。
+ *
+ * 底线：**认证失败绝不重试**。反复用错误的密码撞服务器会触发 fail2ban /
+ * 账户锁定，把「重连功能」变成「封号功能」。指纹失败同理（用户已经拒绝过）。
+ *
+ * 认不出来的错误一律归为可重连：网络中断的报错文案千奇百怪，漏判的代价是
+ * 「永远不重连」，用户要的功能直接失效。真正危险的类别已在上面单独拦掉。
+ */
+function classifyFailure(err: unknown): FailureKind {
+  if (err instanceof FatalConnectError) return 'fatal'
+
+  const e = err as { level?: string; code?: string; message?: string }
+  const msg = e.message ?? String(err)
+
+  // ssh2 用 level 区分阶段：认证失败是 'client-authentication'
+  if (e.level === 'client-authentication') return 'auth'
+  if (/all configured authentication methods failed|authentication failure|permission denied/i.test(msg)) {
+    return 'auth'
+  }
+  if (/host verification failed|host key verification/i.test(msg)) return 'hostkey'
+
+  if (e.level === 'client-socket' || e.level === 'client-dns' || e.level === 'client-timeout') {
+    return 'retryable'
+  }
+  if (e.code && NETWORK_CODES.has(e.code)) return 'retryable'
+  if (/timed out|keepalive|connection lost|socket hang up|连接超时/i.test(msg)) return 'retryable'
+
+  return 'retryable'
+}
+
+const NAVIGATION_ERROR: Record<FailureKind, string> = {
+  auth: '认证失败，已停止重连（重复尝试错误密码会导致账户被锁定）',
+  hostkey: '主机密钥未被信任，已停止重连',
+  fatal: '重连配置有误，已停止',
+  retryable: ''
+}
 
 /**
  * SSH 会话池：所有 ssh2 Client 由主进程持有，
  * 渲染进程刷新 / 切换页面都不会断连，密钥也永不出主进程。
+ *
+ * 会话 id 在整条生命周期内**保持稳定**（重连不重新分配）：渲染进程的
+ * TerminalPanel 在挂载时就把 sessionId 捕获进各个闭包，换 id 会让输出被
+ * 静默丢弃、输入打到已死的连接上。稳定 id 让重连对渲染进程几乎透明。
  */
 export class SessionManager {
   private sessions = new Map<string, ActiveSession>()
@@ -33,13 +123,159 @@ export class SessionManager {
   private pendingVerify = new Map<string, (decision: HostKeyDecision) => void>()
 
   constructor(
-    private readonly resolveJump?: JumpResolver,
+    private readonly resolveSavedSession?: SavedSessionResolver,
     private readonly knownHosts?: KnownHostsStore
   ) {}
 
-  /** 建立连接并打开交互式 shell，返回会话 id（失败抛错） */
-  async connect(config: SshSessionConfig, owner: WebContents, term: TermSize): Promise<string> {
+  /**
+   * 建立连接并打开交互式 shell，返回会话 id（失败抛错）。
+   * 传入 savedSessionId 时不会常驻明文凭证 —— 重连时按 id 重新解密。
+   */
+  async connect(
+    config: SshSessionConfig,
+    owner: WebContents,
+    term: TermSize,
+    opts?: { savedSessionId?: string }
+  ): Promise<string> {
     const id = randomUUID()
+    const { client, shell, jumps } = await this.openShell(config, owner, term)
+
+    const session: ActiveSession = {
+      id,
+      client,
+      shell,
+      sftpClient: null,
+      jumps,
+      owner,
+      term,
+      savedSessionId: opts?.savedSessionId,
+      config: opts?.savedSessionId ? undefined : config,
+      disposed: false,
+      stopped: false,
+      attempt: 0,
+      timer: null
+    }
+    this.sessions.set(id, session)
+    this.wireSession(session, client, shell)
+    this.notifyStatus(session, 'connected')
+    return id
+  }
+
+  /** 键盘输入 → 远端 shell */
+  write(id: string, data: string | Uint8Array): void {
+    this.sessions.get(id)?.shell?.write(data)
+  }
+
+  /** 终端行列变化必须同步给远端，否则 vim / top 等全屏程序会错乱 */
+  resize(id: string, cols: number, rows: number): void {
+    const session = this.sessions.get(id)
+    if (!session) return
+    // 记住尺寸：重连时要按它开新 shell
+    session.term = { cols, rows }
+    session.shell?.setWindow(rows, cols, 0, 0)
+  }
+
+  disconnect(id: string): void {
+    const session = this.sessions.get(id)
+    if (!session) return
+    session.disposed = true
+    this.clearTimer(session)
+    // 先出表：client.end() 触发的 'close' 走 handleClosed 时会查不到而直接返回，
+    // 这正是我们想要的 —— 主动断开不产生任何重连
+    this.sessions.delete(id)
+    session.client?.end()
+    this.finalize(session)
+  }
+
+  /** 应用退出前清理全部连接 */
+  disconnectAll(): void {
+    for (const id of [...this.sessions.keys()]) this.disconnect(id)
+  }
+
+  /**
+   * 重连控制（渲染进程的「停止」/「立即重试」按钮）。
+   * stop：停在这里，会话留在表里以便界面展示与手动恢复
+   * now ：清掉退避立刻再来一轮
+   */
+  reconnectControl(id: string, action: 'stop' | 'now'): void {
+    const session = this.sessions.get(id)
+    if (!session || session.disposed) return
+
+    if (action === 'stop') {
+      this.clearTimer(session)
+      session.stopped = true
+      this.notifyStatus(session, 'closed', '已停止重连')
+      return
+    }
+
+    this.clearTimer(session)
+    session.stopped = false
+    session.attempt = 0
+    if (!this.hasCredentials(session)) {
+      this.notifyStatus(session, 'error', '该会话未保存凭证，无法自动重连')
+      session.stopped = true
+      return
+    }
+    this.scheduleReconnect(session, '手动重试')
+  }
+
+  /**
+   * 系统从休眠恢复：断了的连接不必再等满退避。
+   * 注意这里只加速「已经在重连」的会话 —— ssh2 没有暴露存活探测，
+   * 尚未被检测到已死的连接仍由 keepalive 超时（约 30s）发现。
+   */
+  resumeAfterSuspend(): void {
+    for (const session of this.sessions.values()) {
+      if (session.disposed || session.stopped || !session.timer) continue
+      this.clearTimer(session)
+      session.attempt = 0
+      this.scheduleReconnect(session, '系统从休眠恢复')
+    }
+  }
+
+  /** 暴露底层 ssh2 Client（端口转发等高级功能使用） */
+  getClient(id: string): Client | undefined {
+    return this.sessions.get(id)?.client ?? undefined
+  }
+
+  /** 会话结束回调（ForwardManager 借此停止关联规则）；每次断开都会触发 */
+  onClosed: ((id: string) => void) | null = null
+
+  /** 重连成功回调（ForwardManager 借此把转发规则重新建立起来） */
+  onReconnected: ((id: string) => void) | null = null
+
+  /**
+   * 获取（或按需建立）该会话的 SFTP 通道。
+   * SFTP 与 shell 复用同一条 SSH 连接，不额外握手。
+   * 断线期间底层连接为空，这里必须显式拒绝而不是抛空指针。
+   */
+  async sftp(id: string): Promise<SFTPWrapper> {
+    const session = this.sessions.get(id)
+    if (!session?.client) throw new Error('会话不存在或已断开')
+    if (session.sftpClient) return session.sftpClient
+    const client = session.client
+    return new Promise<SFTPWrapper>((resolve, reject) => {
+      client.sftp((err, sftp) => {
+        if (err) return reject(err)
+        // 等待期间可能又断线重连了，此时旧通道已失效，丢弃
+        if (session.client !== client) return reject(new Error('会话已重新连接，请重试'))
+        session.sftpClient = sftp
+        resolve(sftp)
+      })
+    })
+  }
+
+  // ---- 内部实现 ----
+
+  /**
+   * 建立一条完整的 SSH 连接（含跳板机链）并打开 shell。
+   * connect 与断线重连共用这一条路径。
+   */
+  private async openShell(
+    config: SshSessionConfig,
+    owner: WebContents,
+    term: TermSize
+  ): Promise<{ client: Client; shell: ClientChannel; jumps: Client[] }> {
     const client = new Client()
     const { cfg: connectConfig, jumps } = await this.buildConnectConfig(config, 0, owner)
 
@@ -47,7 +283,7 @@ export class SessionManager {
       for (const jump of jumps) jump.end()
     }
 
-    return new Promise<string>((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       let settled = false
       // shell 通道可能一直不响应（远端 MaxSessions 打满等），readyTimeout 覆盖不到，
       // 这里加整体超时，避免 UI 永远停在「正在连接」
@@ -57,7 +293,7 @@ export class SessionManager {
         cleanupJumps()
         client.end()
         reject(new Error('连接超时：SSH 已建立但未能在 30 秒内打开 shell 通道'))
-      }, 30_000)
+      }, SHELL_TIMEOUT_MS)
 
       client.on('ready', () => {
         client.shell(
@@ -74,68 +310,194 @@ export class SessionManager {
               return
             }
             clearTimeout(timer)
-
-            const session: ActiveSession = { id, client, shell: stream, sftpClient: null, jumps, owner }
-            this.sessions.set(id, session)
-
-            stream.on('data', (chunk: Buffer) => {
-              if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, chunk)
-            })
-            stream.stderr.on('data', (chunk: Buffer) => {
-              if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, chunk)
-            })
-            stream.on('close', () => this.handleClosed(id))
-
-            this.notifyStatus(session, 'connected')
             settled = true
-            resolve(id)
+            resolve({ client, shell: stream, jumps })
           }
         )
       })
 
-      client.on('error', (err) => {
-        const session = this.sessions.get(id)
-        if (session) this.notifyStatus(session, 'error', err.message)
+      // 必须持久监听：settle 之后到 wireSession 接管之前，
+      // 以及会话中途的 error，都需要有监听者，否则 Node 会直接抛出打崩主进程
+      client.on('error', (err: Error) => {
         if (!settled) {
           settled = true
           clearTimeout(timer)
           cleanupJumps()
           reject(err)
         }
-        // 已 settled 时说明是会话中途出错：'close' 随后会到，由 cleanupSession 收尾
       })
-
-      client.on('close', () => this.handleClosed(id))
 
       client.connect(connectConfig)
     })
   }
 
-  /** 键盘输入 → 远端 shell */
-  write(id: string, data: string | Uint8Array): void {
-    this.sessions.get(id)?.shell?.write(data)
+  /**
+   * 把一条已建立的连接接到会话上。
+   * 断开重连时会用新的 client/shell 再调一次，因此所有监听都必须重新挂。
+   */
+  private wireSession(session: ActiveSession, client: Client, shell: ClientChannel): void {
+    const { id, owner } = session
+    // 远端进程自己退出时 ssh2 会发 'exit'；连接被掐断时不会有这个事件。
+    // 这是区分「用户敲了 exit」和「网络断了」的唯一可靠依据。
+    const ctx = { shellExited: false }
+
+    shell.on('data', (chunk: Buffer) => {
+      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, chunk)
+    })
+    shell.stderr.on('data', (chunk: Buffer) => {
+      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, chunk)
+    })
+    shell.on('exit', () => {
+      ctx.shellExited = true
+    })
+    shell.on('close', () => this.handleClosed(id, client, ctx.shellExited))
+
+    client.on('error', (err: Error) => {
+      // 会话中途出错：'close' 随后会到，统一由 handleClosed 收尾。
+      // 先记下原文，好让断线提示能说清原因（'close' 自己不带原因）
+      const current = this.sessions.get(id)
+      if (current?.client === client) {
+        current.lastError = err.message
+        console.warn(`[ssh] 会话出错: ${err.message}`)
+      }
+    })
+    client.on('close', () => this.handleClosed(id, client, ctx.shellExited))
   }
 
-  /** 终端行列变化必须同步给远端，否则 vim / top 等全屏程序会错乱 */
-  resize(id: string, cols: number, rows: number): void {
-    this.sessions.get(id)?.shell?.setWindow(rows, cols, 0, 0)
-  }
-
-  disconnect(id: string): void {
+  /**
+   * client 'close' 与 shell channel 'close' 的统一收口点。
+   *
+   * source 用于识别迟到的旧连接事件：重连成功后再收到旧连接的 close，
+   * 绝不能当成「又断了」——那样会陷入无限重连。
+   */
+  private handleClosed(id: string, source?: Client, shellExited = false): void {
     const session = this.sessions.get(id)
     if (!session) return
-    this.sessions.delete(id)
-    session.client.end()
-    this.cleanupSession(session)
+    if (source && session.client && session.client !== source) return
+
+    session.client = null
+    session.shell = null
+    session.sftpClient = null
+    this.finalize(session)
+
+    if (session.disposed) {
+      this.sessions.delete(id)
+      this.notifyStatus(session, 'closed')
+      return
+    }
+
+    if (shellExited) {
+      // 用户自己敲了 exit —— 会话是他主动结束的。
+      // 这里若也去重连，用户就永远退不出这个终端了。
+      this.sessions.delete(id)
+      this.notifyStatus(session, 'closed')
+      return
+    }
+
+    // 有真实错误就报真实原因，否则给一句中性的
+    const reason = session.lastError || '网络中断'
+
+    if (session.stopped || !this.hasCredentials(session)) {
+      // 留在 sessions 表里：界面还要展示这个标签，用户也可能手动恢复
+      this.notifyStatus(session, 'closed', reason)
+      return
+    }
+
+    this.scheduleReconnect(session, reason)
+  }
+
+  private hasCredentials(session: ActiveSession): boolean {
+    return !!(session.savedSessionId || session.config)
+  }
+
+  private credentialsFor(session: ActiveSession): SshSessionConfig {
+    if (session.savedSessionId) {
+      if (!this.resolveSavedSession) throw new FatalConnectError('当前环境无法解析已保存的会话')
+      // 每次重连都重新解密：用户改了密码能立刻用上，也不必常驻明文
+      return this.resolveSavedSession(session.savedSessionId)
+    }
+    if (session.config) return session.config
+    throw new FatalConnectError('该会话未保存凭证，无法自动重连')
+  }
+
+  private scheduleReconnect(session: ActiveSession, reason: string): void {
+    if (session.disposed || session.stopped || session.timer) return
+    if (!this.hasCredentials(session)) return
+
+    session.attempt += 1
+    const delayMs = backoffMs(session.attempt)
+    this.notifyStatus(session, 'reconnecting', reason, { attempt: session.attempt, delayMs })
+
+    session.timer = setTimeout(() => {
+      session.timer = null
+      void this.attemptReconnect(session)
+    }, delayMs)
+    session.timer.unref?.()
+  }
+
+  private async attemptReconnect(session: ActiveSession): Promise<void> {
+    if (session.disposed || session.stopped) return
+
+    let config: SshSessionConfig
+    try {
+      config = this.credentialsFor(session)
+    } catch (err) {
+      this.giveUp(session, err instanceof Error ? err.message : String(err))
+      return
+    }
+
+    try {
+      const { client, shell, jumps } = await this.openShell(config, session.owner, session.term)
+
+      // 重连期间用户关掉了标签：新连接已经没人认领，立刻拆掉
+      if (session.disposed) {
+        client.end()
+        for (const jump of jumps) jump.end()
+        return
+      }
+
+      session.client = client
+      session.shell = shell
+      session.jumps = jumps
+      // 旧 SFTP 通道已随旧连接失效，置空让下次 sftp() 惰性重建
+      session.sftpClient = null
+      session.attempt = 0
+      session.lastError = undefined
+      this.wireSession(session, client, shell)
+
+      this.notifyStatus(session, 'connected', undefined, { reconnected: true })
+      this.onReconnected?.(session.id)
+    } catch (err) {
+      const kind = classifyFailure(err)
+      if (kind !== 'retryable') {
+        this.giveUp(session, NAVIGATION_ERROR[kind] || (err as Error).message)
+        return
+      }
+      this.scheduleReconnect(session, (err as Error).message || '重连失败')
+    }
+  }
+
+  /** 停止重连并把原因告诉用户；会话记录保留，界面仍能看到这个标签 */
+  private giveUp(session: ActiveSession, error: string): void {
+    this.clearTimer(session)
+    session.stopped = true
+    this.notifyStatus(session, 'error', error)
+  }
+
+  private clearTimer(session: ActiveSession): void {
+    if (session.timer) {
+      clearTimeout(session.timer)
+      session.timer = null
+    }
   }
 
   /**
    * 会话收尾：关闭跳板机连接链并通知外部。
    * 掉线（'close' 事件）与主动 disconnect 都必须走这里 —— 跳板机的
    * forwardOut 通道会随 client.end() 关闭，但跳板机那条已认证的 SSH
-   * 会话本身不会，必须显式 end，否则每掉线一次就泄漏一个跳板机登录。
+   * 会话本身不会，必须显式 end，否则每次掉线都泄漏一个跳板机登录。
    */
-  private cleanupSession(session: ActiveSession): void {
+  private finalize(session: ActiveSession): void {
     for (const jump of session.jumps) jump.end()
     session.jumps = []
     this.onClosed?.(session.id)
@@ -196,48 +558,14 @@ export class SessionManager {
     pending(decision)
   }
 
-  /** 应用退出前清理全部连接 */
-  disconnectAll(): void {
-    for (const id of [...this.sessions.keys()]) this.disconnect(id)
-  }
-
-  /** 暴露底层 ssh2 Client（端口转发等高级功能使用） */
-  getClient(id: string): Client | undefined {
-    return this.sessions.get(id)?.client
-  }
-
-  /** 会话结束回调（ForwardManager 借此停止关联规则）；disconnect / 远端断开都会触发且仅一次 */
-  onClosed: ((id: string) => void) | null = null
-
-  /**
-   * 获取（或按需建立）该会话的 SFTP 通道。
-   * SFTP 与 shell 复用同一条 SSH 连接，不额外握手。
-   */
-  async sftp(id: string): Promise<SFTPWrapper> {
-    const session = this.sessions.get(id)
-    if (!session) throw new Error('会话不存在或已断开')
-    if (session.sftpClient) return session.sftpClient
-    return new Promise<SFTPWrapper>((resolve, reject) => {
-      session.client.sftp((err, sftp) => {
-        if (err) return reject(err)
-        session.sftpClient = sftp
-        resolve(sftp)
-      })
-    })
-  }
-
-  private handleClosed(id: string): void {
-    const session = this.sessions.get(id)
-    if (!session) return
-    this.sessions.delete(id)
-    this.notifyStatus(session, 'closed')
-    this.cleanupSession(session)
-  }
-
-  private notifyStatus(session: ActiveSession, status: SessionStatus, error?: string): void {
-    if (!session.owner.isDestroyed()) {
-      session.owner.send(IpcChannels.sshStatus, { id: session.id, status, error })
-    }
+  private notifyStatus(
+    session: ActiveSession,
+    status: SessionStatus,
+    error?: string,
+    extra?: { attempt?: number; delayMs?: number; reconnected?: boolean }
+  ): void {
+    if (session.owner.isDestroyed()) return
+    session.owner.send(IpcChannels.sshStatus, { id: session.id, status, error, ...extra })
   }
 
   /**
@@ -252,11 +580,13 @@ export class SessionManager {
     const base = await this.buildAuthConfig(config, owner)
 
     if (!config.jumpHostId) return { cfg: base, jumps: [] }
-    if (depth >= MAX_JUMP_DEPTH) throw new Error(`跳板机层级超过 ${MAX_JUMP_DEPTH} 层，已中止`)
-    if (!this.resolveJump) throw new Error('当前环境不支持跳板机')
+    if (depth >= MAX_JUMP_DEPTH) {
+      throw new FatalConnectError(`跳板机层级超过 ${MAX_JUMP_DEPTH} 层，已中止`)
+    }
+    if (!this.resolveSavedSession) throw new FatalConnectError('当前环境不支持跳板机')
 
     // 1. 递归建立跳板连接（jumpHostId 指向的会话自身也可以再挂跳板）
-    const jumpConfig = this.resolveJump(config.jumpHostId)
+    const jumpConfig = this.resolveSavedSession(config.jumpHostId)
     const jump = new Client()
     const { cfg: jumpCfg, jumps: upstreamJumps } = await this.buildConnectConfig(
       jumpConfig,
@@ -320,7 +650,12 @@ export class SessionManager {
     }
 
     // OpenSSH 新格式与 PEM 均由 ssh2 直接支持；PuTTY 的 .ppk 需用户先转换
-    const privateKey = await readFile(config.auth.privateKeyPath)
+    let privateKey: Buffer
+    try {
+      privateKey = await readFile(config.auth.privateKeyPath)
+    } catch {
+      throw new FatalConnectError(`无法读取私钥文件：${config.auth.privateKeyPath}`)
+    }
     return {
       ...base,
       privateKey,
