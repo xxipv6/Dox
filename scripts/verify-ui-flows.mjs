@@ -1,0 +1,100 @@
+/**
+ * 用真实 UI 验证关键流程：保存设备 → 删除设备 → SSH 连接（含主机指纹确认）。
+ * 通过 Playwright 捕获渲染进程的 dialog/alert 与 console 报错。
+ * 用法：node scripts/verify-ui-flows.mjs [host] [port] [user]
+ */
+import { _electron as electron } from 'playwright'
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+
+const host = process.argv[2] ?? 'example.com'
+const port = process.argv[3] ?? '22'
+const user = process.argv[4] ?? 'root'
+mkdirSync('shots', { recursive: true })
+
+const app = await electron.launch({ args: ['.'] })
+const win = await app.firstWindow()
+
+// 捕获渲染进程报错与原生 confirm
+const consoleErrors = []
+win.on('console', (m) => {
+  if (m.type() === 'error') consoleErrors.push(m.text())
+})
+win.on('pageerror', (e) => consoleErrors.push(`PAGEERROR ${e.message}`))
+win.on('dialog', async (d) => {
+  console.log(`  [原生对话框] ${d.type()}: ${d.message().slice(0, 80)}`)
+  await d.accept()
+})
+
+await win.waitForLoadState('domcontentloaded')
+await win.waitForFunction(
+  () => (document.querySelector('.terminal-container')?.clientWidth ?? 0) > 200,
+  { timeout: 10000 }
+)
+
+const devices = () =>
+  win.evaluate(() =>
+    [...document.querySelectorAll('.device .device-name')].map((e) => e.textContent.trim())
+  )
+
+console.log('初始设备:', JSON.stringify(await devices()))
+
+// ---------- 1. 保存一个设备 ----------
+await win.locator('.add-btn').click()
+await win.waitForTimeout(400)
+await win.locator('input[placeholder^="192.168"]').fill(host)
+await win.locator('input[placeholder="root"]').fill(user)
+await win.locator('input[placeholder="登录密码"]').fill('test-password-for-ui-flow')
+await win.locator('button:has-text("保存")').first().click()
+await win.waitForTimeout(900)
+console.log('保存后设备:', JSON.stringify(await devices()))
+
+// ---------- 2. 删除刚保存的设备 ----------
+const before = await devices()
+if (before.length) {
+  await win.locator('.device').last().hover()
+  await win.locator('.device').last().locator('button[title="删除"]').click()
+  await win.waitForTimeout(1200)
+  const after = await devices()
+  console.log('删除后设备:', JSON.stringify(after))
+  console.log(after.length < before.length ? '  => 删除成功' : '  => 删除失败（设备仍在）')
+} else {
+  console.log('  => 没有设备可删，跳过')
+}
+
+// ---------- 3. SSH 连接（假密码，验证错误可见） ----------
+await win.locator('.add-btn').click()
+await win.waitForTimeout(400)
+await win.locator('input[placeholder^="192.168"]').fill(host)
+await win.locator('input[placeholder="root"]').fill(user)
+await win.locator('input[placeholder="登录密码"]').fill('__wrong_password__')
+await win.locator('button:has-text("仅连接")').click()
+
+for (let i = 0; i < 6; i++) {
+  await win.waitForTimeout(1500)
+  const state = await win.evaluate(() => {
+    const hk = [...document.querySelectorAll('.dialog-header')]
+      .map((e) => e.textContent.trim())
+      .find((t) => t.includes('主机'))
+    return {
+      hostKey: hk ?? null,
+      tabCount: document.querySelectorAll('.tab').length,
+      placeholder: document.querySelector('.tab-placeholder')?.textContent?.trim() ?? null,
+      dialogOpen: !!document.querySelector('.overlay')
+    }
+  })
+  console.log(`[${(i + 1) * 1.5}s] ${JSON.stringify(state)}`)
+  if (state.hostKey) {
+    await win.screenshot({ path: join('shots', '20-hostkey.png') })
+    await win.locator('button:has-text("信任并保存")').click()
+    console.log('  → 已点「信任并保存」')
+    await win.waitForTimeout(2500)
+    break
+  }
+  if (state.placeholder) break
+}
+
+await win.screenshot({ path: join('shots', '21-ssh-result.png') })
+console.log('\n渲染进程报错:', consoleErrors.length ? consoleErrors.slice(0, 5) : '无')
+
+await app.close()

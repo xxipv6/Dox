@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { appendFileSync } from 'node:fs'
 import os from 'node:os'
+import { join } from 'node:path'
 import * as pty from 'node-pty'
 import type { IPty } from 'node-pty'
-import type { WebContents } from 'electron'
+import { app, type WebContents } from 'electron'
 import { IpcChannels } from '../../shared/ipc'
 import type { LocalShellInfo, TermSize } from '../../shared/types'
 import { detectShells, resolveShell } from './shells'
@@ -50,6 +52,7 @@ export class LocalPtyManager {
     proc.onData((chunk) => {
       // 必须发字节而不是字符串：渲染侧的 ZMODEM Sentry 会把非 Array 输入
       // 转成 Uint8Array，而 new Uint8Array(原始字符串) 恒为空数组，会吞掉全部输出
+      if (process.env['DOX_DEBUG_PTY']) this.debugLog(`OUT ${JSON.stringify(chunk.slice(0, 300))}`)
       if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, Buffer.from(chunk, 'utf8'))
     })
     proc.onExit(({ exitCode }) => {
@@ -69,8 +72,22 @@ export class LocalPtyManager {
     return id
   }
 
+  /** 临时诊断：把 pty 的进/出字节落盘，用于定位「终端莫名多出内容」这类问题 */
+  private debugLog(line: string): void {
+    try {
+      const path = join(app.getPath('userData'), 'dox-pty-debug.log')
+      appendFileSync(path, `${new Date().toISOString()} ${line}\n`)
+    } catch {
+      /* 诊断日志失败不影响功能 */
+    }
+  }
+
   write(id: string, data: string | Uint8Array): void {
     const proc = this.sessions.get(id)?.pty
+    if (process.env['DOX_DEBUG_PTY']) {
+      const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
+      this.debugLog(`IN  ${JSON.stringify(text.slice(0, 200))}`)
+    }
     if (!proc) return
     // node-pty 只接受字符串；本地终端不会出现 ZMODEM 二进制流，按 utf8 转换
     try {
@@ -81,6 +98,7 @@ export class LocalPtyManager {
   }
 
   resize(id: string, cols: number, rows: number): void {
+    if (process.env['DOX_DEBUG_PTY']) this.debugLog(`RESIZE -> ${cols}x${rows}`)
     try {
       this.sessions.get(id)?.pty.resize(cols, rows)
     } catch {

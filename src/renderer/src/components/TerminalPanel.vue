@@ -30,6 +30,24 @@ let unsubscribeData: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
 let zmodem: ZmodemBridge | null = null
 
+/**
+ * 安全 fit：容器不可见（v-show 隐藏的标签、分屏/面板切换的中间态、挂载瞬间
+ * 布局未稳定）时容器尺寸接近 0，fit() 会算出极小的行列数（实测 11x5）并
+ * 通过 onResize 把 pty 也缩成那样 —— 之后任何程序按 11 列输出都会渲染成
+ * 交织错乱的文本。这里加下限保护，退化尺寸一律不下发给 pty。
+ */
+const MIN_CONTAINER_WIDTH = 120
+const MIN_CONTAINER_HEIGHT = 60
+/** 下发给 pty 的最小行列数，低于此值视为退化尺寸 */
+const MIN_COLUMNS = 20
+const MIN_ROWS = 5
+
+function safeFit(): void {
+  const el = container.value
+  if (!el || el.clientWidth < MIN_CONTAINER_WIDTH || el.clientHeight < MIN_CONTAINER_HEIGHT) return
+  fitAddon?.fit()
+}
+
 // ---- 终端 cwd 跟踪 ----
 // 优先用 shell integration 上报（OSC 7，精确）；没有的 shell 退回解析 cd 命令
 let lineBuf = ''
@@ -180,7 +198,17 @@ onMounted(() => {
     }
   }
 
-  fitAddon.fit()
+  // 必须在 fit() 之前注册：否则首次 fit 造成的尺寸变化事件会被丢掉，
+  // pty 会一直停在创建时的 80x24，而 xterm 已是真实尺寸 —— conpty 按
+  // 80x24 发屏幕差量，xterm 在更大的屏上重放，会渲染出交织错位的文本
+  term.onResize(({ cols, rows }) => window.api.resize(props.sessionId, cols, rows))
+
+  safeFit()
+  // 再显式同步一次：fit() 的首次变化可能早于上面注册（xterm 初始也是 80x24，
+  // 若恰好相等则不会触发事件，pty 就永远收不到真实尺寸）
+  if (term.cols > MIN_COLUMNS && term.rows > MIN_ROWS) {
+    window.api.resize(props.sessionId, term.cols, term.rows)
+  }
 
   // ZMODEM：数据流先过 Sentry，识别到 rz/sz 序列时自动接管会话
   zmodem = createZmodemBridge(props.sessionId, (data) => term?.write(data))
@@ -239,10 +267,8 @@ onMounted(() => {
     window.api.input(props.sessionId, data)
     if (!cwdFromIntegration) trackInput(data)
   })
-  // 尺寸变化 → 远端 PTY（vim/top 依赖正确的行列数）
-  term.onResize(({ cols, rows }) => window.api.resize(props.sessionId, cols, rows))
 
-  resizeObserver = new ResizeObserver(() => fitAddon?.fit())
+  resizeObserver = new ResizeObserver(() => safeFit())
   resizeObserver.observe(container.value!)
 
   // SSH 会话：主动取一次 home 作为相对路径基准；本地终端不需要
@@ -275,13 +301,13 @@ watch(
     term.options.theme = settings.currentPreset.theme
     term.options.fontSize = settings.fontSize
     term.options.fontFamily = settings.fontFamily
-    fitAddon?.fit()
+    safeFit()
   }
 )
 
 /** 标签页重新激活时父组件调用：隐藏期间尺寸可能已变化 */
 function refitAndFocus(): void {
-  fitAddon?.fit()
+  safeFit()
   term?.focus()
 }
 

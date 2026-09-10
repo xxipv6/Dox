@@ -90,6 +90,8 @@ async function toggleSftp(): Promise<void> {
             <span class="tab-title">{{ tabLabel(tab) }}</span>
             <button class="tab-close" title="关闭" @click.stop="store.closeTab(tab)">×</button>
           </div>
+
+          <button class="tab-new" title="新建本地终端" @click="store.connectLocal()">＋</button>
         </div>
 
         <template v-if="store.activePane?.sessionId">
@@ -265,6 +267,21 @@ async function toggleSftp(): Promise<void> {
 }
 .tab-close:hover {
   color: #f7768e;
+}
+.tab-new {
+  border: none;
+  border-right: 1px solid #2a2b3d;
+  background: none;
+  color: #565f89;
+  font-size: 15px;
+  padding: 0 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.tab-new:hover {
+  color: #7aa2f7;
+  background: #1f2335;
 }
 .terminal-area {
   flex: 1;
