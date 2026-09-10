@@ -23,6 +23,17 @@ function setPanelRef(sessionId: string, el: InstanceType<typeof TerminalPanel> |
   else delete panelRefs.value[sessionId]
 }
 
+/** 标签标题：本地终端显示当前目录（shell integration 上报） */
+function tabLabel(tab: SessionTab): string {
+  const sessionId = tab.panes.find((p) => p.paneId === tab.activePaneId)?.sessionId
+  const cwd = sessionId ? store.cwdBySession[sessionId] : undefined
+  if (tab.kind === 'local' && cwd) {
+    const name = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
+    return name ? `本地 · ${name}` : '本地终端'
+  }
+  return tab.title
+}
+
 async function activate(tab: SessionTab): Promise<void> {
   store.activeTabId = tab.tabId
   await nextTick()
@@ -76,7 +87,7 @@ async function toggleSftp(): Promise<void> {
               class="status-dot"
               :class="tab.panes.find((p) => p.paneId === tab.activePaneId)?.status"
             ></span>
-            <span class="tab-title">{{ tab.title }}</span>
+            <span class="tab-title">{{ tabLabel(tab) }}</span>
             <button class="tab-close" title="关闭" @click.stop="store.closeTab(tab)">×</button>
           </div>
         </div>

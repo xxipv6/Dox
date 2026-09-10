@@ -149,3 +149,17 @@ export interface ZmodemFile {
   size: number
   data: Uint8Array
 }
+
+/** 本地终端可用的 shell */
+export interface LocalShellInfo {
+  id: string
+  name: string
+  /** 是否支持 shell integration（cwd / 退出码上报） */
+  integrated: boolean
+}
+
+/** 创建本地终端的参数（cols/rows 复用 TermSize） */
+export interface LocalTermOptions extends TermSize {
+  /** 不传则用设置里的默认 shell */
+  shellId?: string
+}

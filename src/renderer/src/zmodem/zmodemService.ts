@@ -8,7 +8,7 @@ import { Sentry, type ZDetection, type ZSession } from 'zmodem.js'
  */
 
 export interface ZmodemBridge {
-  consume(chunk: Uint8Array): void
+  consume(chunk: Uint8Array | ArrayBuffer | string): void
   isActive(): boolean
 }
 
@@ -32,6 +32,12 @@ export function createZmodemBridge(
 
   const print = (msg: string): void =>
     writeToTerm(encoder.encode(`\r\n\x1b[36m[zmodem]\x1b[0m ${msg}\r\n`))
+
+  /** Sentry 只接受字节序列，字符串会被静默转成空数组并吞掉输出，这里做兜底 */
+  const toBytes = (chunk: Uint8Array | ArrayBuffer | string): Uint8Array => {
+    if (typeof chunk === 'string') return encoder.encode(chunk)
+    return chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+  }
 
   /** 远端 sz → 本机接收 */
   async function handleReceive(zsession: ZSession): Promise<void> {
@@ -134,7 +140,7 @@ export function createZmodemBridge(
   })
 
   return {
-    consume: (chunk) => sentry.consume(chunk),
+    consume: (chunk) => sentry.consume(toBytes(chunk)),
     isActive: () => active
   }
 }

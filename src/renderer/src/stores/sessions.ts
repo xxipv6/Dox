@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import type { SavedSession, SessionStatus, SshSessionConfig } from '@shared/types'
+import { useSettingsStore } from './settings'
 
 export interface PaneState {
   paneId: string
@@ -44,6 +45,8 @@ export const useSessionStore = defineStore('sessions', () => {
   const cwdBySession = reactive<Record<string, string>>({})
   /** sessionId → 远端 home 目录 */
   const homeBySession = reactive<Record<string, string>>({})
+  /** sessionId → 上一条命令的退出码（shell integration，OSC 133） */
+  const exitCodeBySession = reactive<Record<string, number>>({})
 
   const activeTab = computed(() => tabs.value.find((t) => t.tabId === activeTabId.value) ?? null)
   const activePane = computed(
@@ -75,7 +78,7 @@ export const useSessionStore = defineStore('sessions', () => {
       const size = { cols: 80, rows: 24 }
       pane.sessionId =
         tab.kind === 'local'
-          ? await window.api.connectLocal(size)
+          ? await window.api.connectLocal(size, useSettingsStore().localShellId || undefined)
           : await window.api.connect(tab.config!, size)
       pane.status = 'connected'
     } catch (err) {
@@ -192,6 +195,10 @@ export const useSessionStore = defineStore('sessions', () => {
     homeBySession[sessionId] = path
   }
 
+  function setLastExitCode(sessionId: string, code: number): void {
+    exitCodeBySession[sessionId] = code
+  }
+
   return {
     tabs,
     activeTabId,
@@ -205,8 +212,10 @@ export const useSessionStore = defineStore('sessions', () => {
     toggleFollowTerminal,
     cwdBySession,
     homeBySession,
+    exitCodeBySession,
     setCwd,
     setHome,
+    setLastExitCode,
     connect,
     connectSaved,
     connectLocal,

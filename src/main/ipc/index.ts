@@ -34,9 +34,10 @@ export function registerIpc(
     sessionManager.connect(config, event.sender, term)
   )
   // ---- 本地终端 ----
-  ipcMain.handle(IpcChannels.localConnect, (event, term: TermSize) =>
-    localPtyManager.spawn(event.sender, term)
+  ipcMain.handle(IpcChannels.localConnect, (event, term: TermSize, shellId?: string) =>
+    localPtyManager.spawn(event.sender, term, shellId)
   )
+  ipcMain.handle(IpcChannels.localListShells, () => localPtyManager.listShells())
   // 输入 / resize / 断开按 id 前缀路由到本地或 SSH（高频消息用 send/on）
   ipcMain.on(IpcChannels.sshInput, (_event, id: string, data: string | Uint8Array) =>
     id.startsWith(LOCAL_ID_PREFIX) ? localPtyManager.write(id, data) : sessionManager.write(id, data)

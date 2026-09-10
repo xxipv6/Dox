@@ -15,7 +15,9 @@ import type {
 const api: DoxApi = {
   connect: (config: SshSessionConfig, term: TermSize) =>
     ipcRenderer.invoke(IpcChannels.sshConnect, config, term),
-  connectLocal: (term: TermSize) => ipcRenderer.invoke(IpcChannels.localConnect, term),
+  connectLocal: (term: TermSize, shellId?: string) =>
+    ipcRenderer.invoke(IpcChannels.localConnect, term, shellId),
+  listLocalShells: () => ipcRenderer.invoke(IpcChannels.localListShells),
   input: (id, data) => ipcRenderer.send(IpcChannels.sshInput, id, data),
   resize: (id, cols, rows) => ipcRenderer.send(IpcChannels.sshResize, id, cols, rows),
   disconnect: (id) => ipcRenderer.send(IpcChannels.sshDisconnect, id),

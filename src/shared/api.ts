@@ -6,6 +6,7 @@ import type {
   ForwardRuleInput,
   HostKeyDecision,
   HostKeyVerifyRequest,
+  LocalShellInfo,
   SavedSession,
   SaveSessionInput,
   SessionStatusEvent,
@@ -20,8 +21,10 @@ import type {
 export interface DoxApi {
   /** 建立 SSH 连接并打开 shell，返回会话 id */
   connect(config: SshSessionConfig, term: TermSize): Promise<string>
-  /** 打开本地终端（PowerShell / $SHELL），返回 local- 前缀的会话 id */
-  connectLocal(term: TermSize): Promise<string>
+  /** 打开本地终端，返回 local- 前缀的会话 id；shellId 不传则用设置里的默认值 */
+  connectLocal(term: TermSize, shellId?: string): Promise<string>
+  /** 列出本机可用的本地 shell */
+  listLocalShells(): Promise<LocalShellInfo[]>
   /** 键盘输入 → SSH（高频，send 不等待回执） */
   input(id: string, data: string | Uint8Array): void
   /** 终端尺寸变化（cols × rows） */
