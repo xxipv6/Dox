@@ -1,0 +1,51 @@
+appId: com.dox.terminal
+productName: Dox
+copyright: Copyright © 2026
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+
+asar: true
+
+# ---------- Windows ----------
+win:
+  icon: build/icon.png
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: Dox
+
+# ---------- macOS ----------
+mac:
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  # 签名与公证需要 Apple 开发者证书，配置 CSC_LINK / APPLE_API_KEY 等环境变量后自动启用
+  identity: null
+
+# ---------- Linux ----------
+linux:
+  icon: build/icon.png
+  category: Development
+  target:
+    - AppImage
+    - deb
+
+# ---------- 自动更新 ----------
+# 发布渠道：GitHub Releases。替换为你自己的 owner/repo 后，
+# CI 中 electron-builder --publish always 即可推送更新
+publish:
+  provider: github
+  owner: YOUR_GITHUB_OWNER
+  repo: dox
