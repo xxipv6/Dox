@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ILink } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -9,12 +9,14 @@ import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
 import { isPlainSshId } from '@shared/sessionId'
 import { useSettingsStore } from '../stores/settings'
+import { useEditorStore } from '../stores/editor'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
 const settings = useSettingsStore()
+const editor = useEditorStore()
 
 const container = ref<HTMLDivElement>()
 const searchInput = ref<HTMLInputElement>()
@@ -51,6 +53,62 @@ function separator(text: string, color = '33'): void {
 /** 单引号包裹 + 转义，路径里有空格/引号也不会把命令拆坏 */
 function quoteShellPath(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * 终端输出里的绝对路径 → Ctrl/Cmd+点击分发：
+ * 目录 → SFTP 面板跳过去；文件 → 内置编辑器打开。
+ *
+ * 只在 SSH 会话注册（本地/容器会话没有对应的 SFTP 视图）。
+ * 识别是纯文本猜测（没动远端），点的时候才用 sftpStat 落一次地 ——
+ * 终端里的路径可能早就过期了，stat 不到就静默不点。
+ */
+const PATH_RE = /\/(?:[\w@%+\-=.,~]+\/)*[\w@%+\-=.,~]+/g
+
+async function openRemotePath(path: string): Promise<void> {
+  try {
+    const stat = await window.api.sftpStat(props.sessionId, path)
+    if (!stat) return
+    // 编辑器与面板都挂在 sftpVisible 之下，两个分支都要先把它拉出来
+    if (!store.sftpVisible) store.toggleSftp()
+    if (stat.isDir) {
+      // 目录跳转走既有的「终端↔SFTP 跟随」通道：面板导航本来就会写 cwd 记录
+      if (!store.followTerminal) store.toggleFollowTerminal()
+      // 等面板挂载完再写 cwd，否则 watcher（非 immediate）收不到这次变化
+      await nextTick()
+      store.setCwd(props.sessionId, path)
+      return
+    }
+    await editor.open(props.sessionId, path)
+  } catch {
+    // 会话断开等场景：点不动就不动，不弹错误
+  }
+}
+
+/** 给 SSH 终端注册绝对路径链接（与 WebLinksAddon 并存：URL 归它，路径归这里） */
+function registerPathLinks(t: Terminal): void {
+  t.registerLinkProvider({
+    provideLinks(y, callback) {
+      const line = t.buffer.active.getLine(y - 1)
+      if (!line) return callback(undefined)
+      const text = line.translateToString(true)
+      const links: ILink[] = []
+      for (const m of text.matchAll(PATH_RE)) {
+        // 削掉句读尾巴：「见 /etc/hosts.」里的句点不是路径的一部分
+        const path = m[0].replace(/[.,:;!?]+$/, '')
+        if (path.length < 3) continue
+        links.push({
+          text: path,
+          range: { start: { x: m.index + 1, y }, end: { x: m.index + path.length, y } },
+          // 只有按住 Ctrl/Cmd 才激活 —— 单击留给文本选择（与 VS Code 一致）
+          activate: (event) => {
+            if (event.ctrlKey || event.metaKey) void openRemotePath(path)
+          }
+        })
+      }
+      callback(links.length ? links : undefined)
+    }
+  })
 }
 
 function stopReconnect(): void {
@@ -114,39 +172,122 @@ function pathFromOsc7(uri: string): string | null {
   return raw
 }
 
-function handleCommand(line: string): void {
-  const m = /^\s*(?:cd|pushd)\s*(.*)$/.exec(line)
-  if (!m) return
-  let arg = (m[1] ?? '').trim().split(/\s*(?:&&|\|\||[;|])\s*/)[0]?.trim() ?? ''
-  arg = arg.replace(/^["']|["']$/g, '')
-  if (arg === '-') return
+/** cd 目标验证的代际：连敲几条 cd 时，只认最后一条的 stat 结果 */
+let cdVerifySeq = 0
 
+/** 从命令行里取出 cd/pushd 的参数（不是 cd 命令则 null） */
+function cdArgOf(line: string): string | null {
+  const m = /^\s*(?:cd|pushd)\s*(.*)$/.exec(line)
+  if (!m) return null
+  const arg = (m[1] ?? '').trim().split(/\s*(?:&&|\|\||[;|])\s*/)[0]?.trim() ?? ''
+  return arg.replace(/^["']|["']$/g, '')
+}
+
+/** 把 cd 参数解析成绝对路径（解析不出来返回 null） */
+function resolveCdTarget(arg: string): string | null {
+  if (arg === '-') return null
   const home = store.homeBySession[props.sessionId]
   const cur = store.cwdBySession[props.sessionId] ?? home ?? '/'
-  let next: string
-  if (!arg || arg === '~') {
-    if (!home) return
-    next = home
-  } else if (arg.startsWith('/')) {
-    next = normalizePosix(arg)
-  } else if (arg.startsWith('~/')) {
-    if (!home) return
-    next = normalizePosix(home + arg.slice(1))
-  } else {
-    next = normalizePosix(cur + '/' + arg)
-  }
-  store.setCwd(props.sessionId, next)
+  if (!arg || arg === '~') return home ?? null
+  if (arg.startsWith('/')) return normalizePosix(arg)
+  if (arg.startsWith('~/')) return home ? normalizePosix(home + arg.slice(1)) : null
+  return normalizePosix(cur + '/' + arg)
 }
+
+/**
+ * 算出目标目录后先落一次地（sftpStat）再更新面板 ——
+ * 「cd 失败」（目录不存在、没权限）时面板不该跟着走。
+ * 仅 SSH 会话：本地/容器没有对应的 SFTP 通道，维持原来的直接信任。
+ */
+function applyCwd(next: string): void {
+  if (!isPlainSshId(props.sessionId)) {
+    store.setCwd(props.sessionId, next)
+    return
+  }
+  const seq = ++cdVerifySeq
+  window.api
+    .sftpStat(props.sessionId, next)
+    .then((stat) => {
+      if (seq !== cdVerifySeq) return // 期间又敲了别的 cd，这趟结果作废
+      if (stat?.isDir) store.setCwd(props.sessionId, next)
+    })
+    .catch(() => {
+      /* 会话断开等：不更新也不打扰 */
+    })
+}
+
+function handleCommand(line: string): void {
+  const arg = cdArgOf(line)
+  if (arg === null) return
+  const next = resolveCdTarget(arg)
+  if (next) applyCwd(next)
+}
+
+/**
+ * 不可信命令（用过 Tab/方向键）的补救：把参数当**前缀**去远端父目录里补全 ——
+ * 「cd /va<TAB>」补成 /var 是 shell 干的，本地看不到补全结果，但拿 va 去 /
+ * 下列一圈，唯一匹配一个目录时就是它。多义或零匹配都放弃：宁可不跳，也不跳错。
+ * applyCwd 里还有一层 stat 复核兜底。
+ */
+function followCompletedCd(line: string): void {
+  if (!isPlainSshId(props.sessionId)) return
+  const arg = cdArgOf(line)
+  if (!arg || arg === '-' || arg === '~') return
+  const home = store.homeBySession[props.sessionId]
+  const cur = store.cwdBySession[props.sessionId] ?? home ?? '/'
+  let full: string
+  if (arg.startsWith('~/')) {
+    if (!home) return
+    full = home + arg.slice(1)
+  } else if (arg.startsWith('/')) {
+    full = arg
+  } else {
+    full = `${cur}/${arg}`
+  }
+  const idx = full.lastIndexOf('/')
+  const parent = idx <= 0 ? '/' : full.slice(0, idx)
+  const prefix = full.slice(idx + 1)
+  if (!prefix) return
+
+  const seq = ++cdVerifySeq
+  window.api
+    .sftpList(props.sessionId, parent)
+    .then((entries) => {
+      if (seq !== cdVerifySeq) return
+      const hits = entries.filter((e) => e.isDir && e.name.startsWith(prefix))
+      if (hits.length !== 1) return
+      applyCwd(hits[0].path)
+    })
+    .catch(() => {
+      /* 列目录失败：放弃跟随 */
+    })
+}
+
+/**
+ * 本地解析击键重建命令行，只在 shell integration（OSC 7）缺席时启用。
+ *
+ * Tab 补全与方向键历史召回会让缓冲失真 —— 「cd va<TAB>」补成「cd var/」
+ * 是 shell 干的，我们看得到的只有补全前的文本。这类命令标记为不可信，
+ * 回车时走 followCompletedCd 的前缀补全而不是按字面跳
+ * （实测踩过：按字面跳 /va → no such file）。
+ */
+let lineUnreliable = false
 
 function trackInput(data: string): void {
   for (const ch of data) {
     if (ch === '\r') {
-      handleCommand(lineBuf)
+      if (lineUnreliable) followCompletedCd(lineBuf)
+      else handleCommand(lineBuf)
       lineBuf = ''
+      lineUnreliable = false
     } else if (ch === '\x7f') {
       lineBuf = lineBuf.slice(0, -1)
     } else if (ch === '\x03' || ch === '\x0c') {
       lineBuf = ''
+      lineUnreliable = false
+    } else if (ch === '\t' || ch === '\x1b') {
+      // \x1b 是方向键/功能键转义序列的开头（历史召回、光标移动同样失真）
+      lineUnreliable = true
     } else if (ch >= ' ') {
       lineBuf += ch
     }
@@ -226,6 +367,8 @@ onMounted(() => {
   term.loadAddon(fitAddon)
   term.loadAddon(searchAddon)
   term.loadAddon(new WebLinksAddon())
+  // 绝对路径链接仅对 SSH 会话有意义（本地/容器没有对应的 SFTP 视图）
+  if (isPlainSshId(props.sessionId)) registerPathLinks(term)
   term.open(container.value!)
 
   // 连字需要浏览器做字形替换，只有 DOM 渲染器支持；否则用 WebGL（大数据量不卡）

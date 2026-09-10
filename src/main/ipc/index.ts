@@ -116,6 +116,9 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.sftpRealpath, (_event, sessionId: string, path: string) =>
     sftpService.realpath(sessionId, path)
   )
+  ipcMain.handle(IpcChannels.sftpStat, (_event, sessionId: string, path: string) =>
+    sftpService.stat(sessionId, path)
+  )
   ipcMain.handle(IpcChannels.sftpMkdir, (_event, sessionId: string, path: string) =>
     sftpService.mkdir(sessionId, path)
   )

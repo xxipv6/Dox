@@ -48,6 +48,7 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-reconnect.mjs` | 断线重连与会话恢复：远端 `kill -9 $PPID` 端掉自己这条会话，验重连、状态提示与迟到事件 |
 | `verify-container.mjs` | 容器终端：**本机**与 SSH 两条路都走一遍（只读探测 → 右键「进入」→ 容器内 shell）；用 `/.dockerenv` 与 `stty size` 反证「真的在容器里」且 resize 真的传进去了；末尾静态守着「不出现 docker run/cp/start 等」这条零改动约束 |
 | `verify-container-logs.mjs` | 容器「查看日志」：起一个持续吐日志的容器 → 右键「查看日志」→ 日志标签 connected 且流不断；重复点不堆第二个标签；结束自删容器 |
+| `verify-path-links.mjs` | 终端路径交互：`cd va<TAB>` 不带偏面板（补全回归）、正常 cd 跟随、cd 不存在目录不动、Ctrl+点击路径开编辑器 |
 | `verify-context-menu.mjs` | SFTP 右键菜单：菜单项、选区规则、Esc 关闭、多选下载只弹一次目录框且每项都落地 |
 | `verify-dnd.mjs` | 拖拽上传：用 CDP 发**真实**拖放（不是合成 DataTransfer），一路验到远端字节 |
 | `verify-editor.mjs` | SFTP 双击 → 内置编辑器查看 / 编辑 / 保存回远端全链路 |
@@ -88,6 +89,7 @@ src/
 - **M4 ✅**：
   - 终端 ↔ SFTP **双向目录联动**：终端里 `cd` 面板自动跟随（⇄ 开关），面板点 ⌨ 让终端 `cd` 到当前目录
   - 终端 **Ctrl+F 搜索**（增量高亮）、**选中即复制**、**右键粘贴**
+  - 终端输出里的**绝对路径 Ctrl/Cmd+点击**：目录 → SFTP 面板跳过去，文件 → 内置编辑器打开（点击时才 sftpStat 落地，识别纯文本猜测，过期路径静默不点）
   - 文件夹**递归上传/下载**（入队时展开为文件级任务）、目录**递归删除**（符号链接不跟随）
   - **分屏**：标签栏 ◧/⬓ 向右/向下分屏，每 pane 一条独立 SSH 会话（Tab→Pane 二级模型），pane 聚焦/关闭
   - **主题设置**：侧栏 ⚙ 弹窗，终端配色预设 + 字体/连字/字号/本地 shell；设置存在主进程 electron-store（不是 localStorage，打包后那个源不落盘），改完实时生效
@@ -128,5 +130,5 @@ src/
 
 - 连接建立到 TerminalPanel 挂载之间存在毫秒级窗口，首屏 banner 有极小概率丢失（渲染侧缓冲解决）
 - Linux 无 Secret Service 时 safeStorage 退化为 base64，产品层面需提示
-- cwd 跟踪基于本地输入解析：`cd` 失败、`cd -`、远程命令改目录（如脚本内 cd）会导致面板与终端不一致，点 ⟳ 或关跟随即可
+- cwd 跟踪基于本地输入解析（远端无 OSC 7 时）：`cd -`、远程命令改目录（如脚本内 cd）会导致面板与终端不一致，点 ⟳ 或关跟随即可。`cd` 失败有 sftpStat 落地校验不会误跳；Tab 补全/方向键历史过的命令会拿前缀去远端补全，唯一匹配才跟随
 - 符号链接文件/目录暂不参与递归传输与删除（按设计跳过，防跟链风险）

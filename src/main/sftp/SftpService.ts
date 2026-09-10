@@ -55,6 +55,21 @@ export class SftpService {
     })
   }
 
+  /**
+   * 探一下路径是文件还是目录（终端里 Ctrl+点击路径的「智能分发」用）。
+   * 不存在 / 不可读 / 已断开都返回 null —— 终端输出里的路径可能只是长得像，
+   * 点开没有结果不算错误，不值得抛给用户。
+   */
+  async stat(sessionId: string, path: string): Promise<{ isDir: boolean } | null> {
+    try {
+      const sftp = await this.sessions.sftp(sessionId)
+      const attrs = await statP(sftp, path)
+      return { isDir: attrs.isDirectory() }
+    } catch {
+      return null
+    }
+  }
+
   async mkdir(sessionId: string, path: string): Promise<void> {
     const sftp = await this.sessions.sftp(sessionId)
     await mkdirP(sftp, path)

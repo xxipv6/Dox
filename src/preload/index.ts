@@ -60,6 +60,7 @@ const api: DoxApi = {
   // ---- SFTP ----
   sftpList: (sessionId, dir) => ipcRenderer.invoke(IpcChannels.sftpList, sessionId, dir),
   sftpRealpath: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpRealpath, sessionId, path),
+  sftpStat: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpStat, sessionId, path),
   sftpMkdir: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpMkdir, sessionId, path),
   sftpRename: (sessionId, from, to) =>
     ipcRenderer.invoke(IpcChannels.sftpRename, sessionId, from, to),

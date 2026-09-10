@@ -30,6 +30,8 @@ export const IpcChannels = {
   // SFTP 文件操作
   sftpList: 'sftp:list',
   sftpRealpath: 'sftp:realpath',
+  /** 探路径类型（终端 Ctrl+点击路径的分发依据）；不存在返回 null 不抛错 */
+  sftpStat: 'sftp:stat',
   sftpMkdir: 'sftp:mkdir',
   sftpRename: 'sftp:rename',
   sftpDelete: 'sftp:delete',

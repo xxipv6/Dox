@@ -233,6 +233,13 @@ node scripts/generate-icon.mjs --preview   # 另出 shots/icon-sizes.png（16/32
 
 ## 6. 踩过的坑（环境相关）
 
+### dev 模式下改了 preload 的 API 面要重启
+
+electron-vite 的 HMR 只覆盖渲染层源码。给 `window.api` 加了新方法而 dev 实例没重启时，
+运行中的窗口用的还是启动那一刻构建的 preload —— 渲染层热更新成新代码后一调新方法
+就是 `window.api.xxx is not a function`，而且是从 xterm 的事件回调里炸出来，看着像
+终端崩了。**改 preload/shared 的 API 面之后重启 dev**，别信热更新。
+
 ### npm 装完 node-pty 可能丢 spawn-helper 的执行位
 
 症状：本地终端一开就报 `posix_spawnp failed`（`LocalPtyManager.spawn` → `UnixTerminal`）。
