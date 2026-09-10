@@ -21,6 +21,9 @@ export const IpcChannels = {
   configSave: 'config:save',
   configDelete: 'config:delete',
   configGetAuth: 'config:getAuth',
+  // 标签布局持久化（重启后恢复会话用）
+  layoutGet: 'layout:get',
+  layoutSet: 'layout:set',
   // SFTP 文件操作
   sftpList: 'sftp:list',
   sftpRealpath: 'sftp:realpath',

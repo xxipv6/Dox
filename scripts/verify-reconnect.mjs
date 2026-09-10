@@ -85,17 +85,19 @@ function tail(text, n = 8) {
 // ---------- 准备：切到 DOM 渲染器 + 挂状态记录器 ----------
 await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
-  () => (document.querySelector('.terminal-container')?.clientWidth ?? 0) > 200,
+  () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
   { timeout: 10000 }
 )
 await win.evaluate(() => {
   const cur = JSON.parse(localStorage.getItem('dox-settings') || '{}')
   localStorage.setItem('dox-settings', JSON.stringify({ ...cur, ligatures: true }))
+  // 布局会持久化，上一个脚本留下的标签会被恢复出来，干扰「本次操作的终端是哪个」
+  void window.api.setLayout({ tabs: [] })
 })
 await win.reload()
 await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
-  () => (document.querySelector('.terminal-container')?.clientWidth ?? 0) > 200,
+  () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
   { timeout: 10000 }
 )
 

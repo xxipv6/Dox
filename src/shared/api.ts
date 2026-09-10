@@ -6,6 +6,7 @@ import type {
   ForwardRuleInput,
   HostKeyDecision,
   HostKeyVerifyRequest,
+  LayoutSnapshot,
   LocalShellInfo,
   RemoteFileContent,
   SavedSession,
@@ -48,6 +49,11 @@ export interface DoxApi {
   onHostKeyVerify(cb: (req: HostKeyVerifyRequest) => void): () => void
   /** 回答指纹确认：信任并保存 / 仅本次 / 拒绝 */
   answerHostKey(requestId: string, decision: HostKeyDecision): void
+
+  /** 读取上次退出时的标签布局；没有则返回 null */
+  getLayout(): Promise<LayoutSnapshot | null>
+  /** 覆盖保存标签布局（只含地址与设备 id，不含任何密码） */
+  setLayout(snapshot: LayoutSnapshot): Promise<void>
 
   listSessions(): Promise<SavedSession[]>
   saveSession(input: SaveSessionInput): Promise<SavedSession>

@@ -32,6 +32,11 @@ export interface SessionTab {
    * 主进程凭它重新解密凭证做断线重连；布局快照也靠它判断重启后能否自动连接。
    */
   savedSessionId?: string
+  /**
+   * 未保存的临时连接被恢复到界面后留下的地址信息。
+   * 用户点「重新连接」时用它预填认证表单 —— 密码不在其中，必须重新输入。
+   */
+  pendingPrefill?: { host: string; port: number; username: string }
   split: SplitDirection
   panes: PaneState[]
   activePaneId: string
@@ -80,6 +85,19 @@ export const useSessionStore = defineStore('sessions', () => {
   const homeBySession = reactive<Record<string, string>>({})
   /** sessionId → 上一条命令的退出码（shell integration，OSC 133） */
   const exitCodeBySession = reactive<Record<string, number>>({})
+  /**
+   * 请求打开「添加设备」弹窗并预填地址（未保存会话的重新连接用）。
+   * 弹窗挂在侧边栏，而触发点在终端面板，所以借 store 传一次话。
+   */
+  const addDevicePrefill = ref<{ host: string; port: number; username: string } | null>(null)
+
+  function requestAddDevice(prefill: { host: string; port: number; username: string }): void {
+    addDevicePrefill.value = prefill
+  }
+
+  function clearAddDeviceRequest(): void {
+    addDevicePrefill.value = null
+  }
 
   const activeTab = computed(() => tabs.value.find((t) => t.tabId === activeTabId.value) ?? null)
   const activePane = computed(
@@ -173,6 +191,35 @@ export const useSessionStore = defineStore('sessions', () => {
     tabs.value.push(tab)
     activeTabId.value = tab.tabId
     await connectPane(tab, pane)
+  }
+
+  /**
+   * 恢复一个「未保存的临时连接」标签（重启后回到上次布局）。
+   *
+   * 这类会话当初就没存密码，重启后无从自动登录，所以只把标签和地址还原出来，
+   * 状态置为已断开；用户点一下再用表单里的地址重新认证。
+   * 绝不会替用户去连 —— 没有凭证就是没有。
+   */
+  function restoreUnsavedTab(snap: {
+    title: string
+    host: string
+    port: number
+    username: string
+  }): void {
+    const pane = newPane()
+    pane.status = 'closed'
+    const tab = reactive<SessionTab>({
+      tabId: `tab-${++tabSeq}`,
+      title: snap.title,
+      kind: 'ssh',
+      config: null,
+      pendingPrefill: { host: snap.host, port: snap.port, username: snap.username },
+      split: 'none',
+      panes: [pane],
+      activePaneId: pane.paneId
+    })
+    tabs.value.push(tab)
+    activeTabId.value = tab.tabId
   }
 
   /** 打开本地终端标签页（Wave 形态：应用启动的默认视图） */
@@ -314,6 +361,9 @@ export const useSessionStore = defineStore('sessions', () => {
     activePane,
     activeSessionId,
     savedSessions,
+    addDevicePrefill,
+    requestAddDevice,
+    clearAddDeviceRequest,
     sftpVisible,
     toggleSftp,
     followTerminal,
@@ -327,6 +377,7 @@ export const useSessionStore = defineStore('sessions', () => {
     connect,
     connectSaved,
     connectLocal,
+    restoreUnsavedTab,
     splitActive,
     setActivePane,
     closePane,

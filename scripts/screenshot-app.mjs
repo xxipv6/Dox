@@ -18,7 +18,7 @@ await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(2000)
 try {
   await win.waitForFunction(
-    () => (document.querySelector('.terminal-container')?.clientWidth ?? 0) > 200,
+    () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
     { timeout: 8000 }
   )
 } catch {

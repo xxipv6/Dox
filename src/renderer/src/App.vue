@@ -2,6 +2,7 @@
 import { nextTick, onMounted, ref } from 'vue'
 import { useSessionStore, type SessionTab } from './stores/sessions'
 import { useEditorStore } from './stores/editor'
+import { useLayoutStore } from './stores/layout'
 import SessionSidebar from './components/SessionSidebar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
 import FileExplorer from './components/FileExplorer.vue'
@@ -12,10 +13,21 @@ import HostKeyDialog from './components/HostKeyDialog.vue'
 
 const store = useSessionStore()
 const editor = useEditorStore()
+const layout = useLayoutStore()
 
-// Wave 形态：应用启动即开一个本地终端标签页
-onMounted(() => {
-  if (store.tabs.length === 0) void store.connectLocal()
+// Wave 形态：应用启动即开一个本地终端标签页。
+// 若上次退出时还有布局，则先按布局恢复；只有恢复不出东西时才开默认本地终端。
+onMounted(async () => {
+  let restored = false
+  try {
+    restored = await layout.restore()
+  } catch (err) {
+    // 恢复失败也必须让用户落在一个能用的界面上，而不是空白窗口
+    console.error('[layout] 恢复上次布局失败，回退到默认本地终端', err)
+  }
+  if (!restored && store.tabs.length === 0) void store.connectLocal()
+  // 恢复期间不写快照，否则重建的中间态会把布局一步步覆盖坏
+  layout.startAutoSave()
 })
 
 /** sessionId → TerminalPanel 实例，用于标签页/分屏切换后 refit + focus */
@@ -166,6 +178,16 @@ async function toggleSftp(): Promise<void> {
               <div v-else class="tab-placeholder">
                 <template v-if="pane.status === 'connecting'">正在连接 {{ tab.title }} …</template>
                 <template v-else-if="pane.status === 'error'">连接失败：{{ pane.error }}</template>
+                <!-- 重启后恢复出来的临时连接：没有凭证，必须用户重新认证 -->
+                <template v-else-if="tab.pendingPrefill">
+                  <div class="resume-hint">
+                    <p>这是上次未保存的会话（密码未存储）</p>
+                    <button class="resume-btn" @click="store.requestAddDevice(tab.pendingPrefill!)">
+                      重新连接 {{ tab.pendingPrefill.username }}@{{ tab.pendingPrefill.host }}
+                    </button>
+                  </div>
+                </template>
+                <template v-else>已断开</template>
               </div>
               <button
                 v-if="tab.panes.length > 1"
@@ -403,5 +425,30 @@ async function toggleSftp(): Promise<void> {
   justify-content: center;
   color: #565f89;
   font-size: 14px;
+}
+.resume-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  text-align: center;
+}
+.resume-hint p {
+  margin: 0;
+  font-size: 13px;
+}
+.resume-btn {
+  background: none;
+  border: 1px dashed #565f89;
+  border-radius: 6px;
+  color: #7aa2f7;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 14px;
+}
+.resume-btn:hover {
+  border-color: #7aa2f7;
+  background: #1f2335;
 }
 </style>

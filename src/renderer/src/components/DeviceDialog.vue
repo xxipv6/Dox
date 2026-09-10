@@ -10,6 +10,8 @@ const props = defineProps<{
   visible: boolean
   /** 传入则是编辑模式 */
   editing?: SavedSession | null
+  /** 只预填地址（未保存会话的「重新连接」用）。密码永远要用户重新输入 */
+  prefill?: { host: string; port: number; username: string } | null
 }>()
 
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -33,15 +35,16 @@ const isEdit = computed(() => !!props.editing)
 const isJumpTarget = (s: SavedSession): boolean => s.id === props.editing?.id
 
 watch(
-  () => [props.visible, props.editing] as const,
+  () => [props.visible, props.editing, props.prefill] as const,
   ([visible]) => {
     if (!visible) return
     errorMsg.value = ''
     const e = props.editing
+    const p = props.prefill
     form.name = e?.name ?? ''
-    form.host = e?.host ?? ''
-    form.port = e?.port ?? 22
-    form.username = e?.username ?? 'root'
+    form.host = e?.host ?? p?.host ?? ''
+    form.port = e?.port ?? p?.port ?? 22
+    form.username = e?.username ?? p?.username ?? 'root'
     form.authType = e?.authType ?? 'password'
     form.password = ''
     form.privateKeyPath = e?.privateKeyPath ?? ''

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useSessionStore } from '../stores/sessions'
 import { useSettingsStore } from '../stores/settings'
 import DeviceDialog from './DeviceDialog.vue'
@@ -18,13 +18,34 @@ const showTools = ref(false)
 
 onMounted(() => store.refreshSaved())
 
+/** 未保存会话的「重新连接」：把地址预填进添加设备弹窗，密码仍需用户输入 */
+const prefill = ref<{ host: string; port: number; username: string } | null>(null)
+
+watch(
+  () => store.addDevicePrefill,
+  (req) => {
+    if (!req) return
+    editing.value = null
+    prefill.value = req
+    dialogVisible.value = true
+    store.clearAddDeviceRequest()
+  }
+)
+
+function closeDialog(): void {
+  dialogVisible.value = false
+  prefill.value = null
+}
+
 function openAdd(): void {
   editing.value = null
+  prefill.value = null
   dialogVisible.value = true
 }
 
 function openEdit(s: SavedSession): void {
   editing.value = s
+  prefill.value = null
   dialogVisible.value = true
 }
 
@@ -92,7 +113,12 @@ async function remove(s: SavedSession): Promise<void> {
       </template>
     </template>
 
-    <DeviceDialog :visible="dialogVisible" :editing="editing" @close="dialogVisible = false" />
+    <DeviceDialog
+      :visible="dialogVisible"
+      :editing="editing"
+      :prefill="prefill"
+      @close="closeDialog"
+    />
   </aside>
 </template>
 

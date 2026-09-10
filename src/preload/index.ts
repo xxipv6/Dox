@@ -42,6 +42,10 @@ const api: DoxApi = {
   answerHostKey: (requestId, decision) =>
     ipcRenderer.send(IpcChannels.sshHostKeyAnswer, requestId, decision),
 
+  // ---- 标签布局 ----
+  getLayout: () => ipcRenderer.invoke(IpcChannels.layoutGet),
+  setLayout: (snapshot) => ipcRenderer.invoke(IpcChannels.layoutSet, snapshot),
+
   listSessions: () => ipcRenderer.invoke(IpcChannels.configList),
   saveSession: (input: SaveSessionInput) => ipcRenderer.invoke(IpcChannels.configSave, input),
   deleteSession: (id: string) => ipcRenderer.invoke(IpcChannels.configDelete, id),

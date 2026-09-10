@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { SessionManager } from './ssh/SessionManager'
 import { ConfigStore } from './store/configStore'
 import { KnownHostsStore } from './store/knownHosts'
+import { LayoutStore } from './store/layoutStore'
 import { SftpService } from './sftp/SftpService'
 import { TransferManager } from './sftp/TransferManager'
 import { ForwardManager } from './forward/ForwardManager'
@@ -18,6 +19,8 @@ const mainDir = dirname(fileURLToPath(import.meta.url))
 
 const configStore = new ConfigStore()
 const knownHosts = new KnownHostsStore()
+// 标签布局：放在主进程而非渲染进程 localStorage，见 LayoutSnapshot 的注释
+const layoutStore = new LayoutStore()
 // 已保存会话解析器：id → 完整连接配置（认证信息解密不出主进程）。
 // 跳板机建链与断线重连都走它 —— 重连时重新解密，主进程不必常驻明文密码。
 const sessionManager = new SessionManager((id) => configStore.resolveConnection(id), knownHosts)
@@ -85,7 +88,15 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  registerIpc(sessionManager, configStore, sftpService, transferManager, forwardManager, localPtyManager)
+  registerIpc(
+    sessionManager,
+    configStore,
+    sftpService,
+    transferManager,
+    forwardManager,
+    localPtyManager,
+    layoutStore
+  )
   createWindow()
   setupAutoUpdater()
   // 异步预热 shell 列表（含 WSL）——wsl.exe 首次调用可能耗时数秒，

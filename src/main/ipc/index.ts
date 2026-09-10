@@ -8,10 +8,12 @@ import type {
   DroppedFile,
   ForwardRuleInput,
   HostKeyDecision,
+  LayoutSnapshot,
   SaveSessionInput,
   SshSessionConfig,
   TermSize
 } from '../../shared/types'
+import type { LayoutStore } from '../store/layoutStore'
 import type { SessionManager } from '../ssh/SessionManager'
 import type { LocalPtyManager } from '../local/LocalPtyManager'
 import { LOCAL_ID_PREFIX } from '../local/LocalPtyManager'
@@ -27,7 +29,8 @@ export function registerIpc(
   sftpService: SftpService,
   transferManager: TransferManager,
   forwardManager: ForwardManager,
-  localPtyManager: LocalPtyManager
+  localPtyManager: LocalPtyManager,
+  layoutStore: LayoutStore
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle(
@@ -61,6 +64,12 @@ export function registerIpc(
   )
   ipcMain.on(IpcChannels.sshHostKeyAnswer, (_event, requestId: string, decision: HostKeyDecision) =>
     sessionManager.answerHostKey(requestId, decision)
+  )
+
+  // ---- 标签布局 ----
+  ipcMain.handle(IpcChannels.layoutGet, () => layoutStore.get())
+  ipcMain.handle(IpcChannels.layoutSet, (_event, snapshot: LayoutSnapshot) =>
+    layoutStore.set(snapshot)
   )
 
   // ---- 会话配置 ----

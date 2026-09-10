@@ -29,7 +29,17 @@ win.on('dialog', (d) => d.accept())
 
 await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
-  () => (document.querySelector('.terminal-container')?.clientWidth ?? 0) > 200,
+  () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
+  { timeout: 10000 }
+)
+
+// 布局是会持久化的：上一个脚本留下的标签会被自动恢复出来，导致这里的
+// 「可见终端」未必是本次要操作的那个。开跑前清空，保证从干净状态开始。
+await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+await win.reload()
+await win.waitForLoadState('domcontentloaded')
+await win.waitForFunction(
+  () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
   { timeout: 10000 }
 )
 

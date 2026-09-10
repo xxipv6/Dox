@@ -77,6 +77,34 @@ export interface FileEntry {
   mtime: number
 }
 
+/**
+ * 标签布局快照，重启后据此重建会话。
+ *
+ * ⚠️ 存在主进程（electron-store）而不是渲染进程的 localStorage：
+ * 打包后渲染进程从 file:// 加载，Chromium 视其为不透明源，localStorage
+ * 写入不落盘（已实测：整个 userData 里没有任何 file:// 源记录）。
+ * 换成自定义协议 dox:// 同样不落盘，故一律走主进程存储。
+ *
+ * 只存地址与设备 id，**绝不存密码**。
+ */
+export interface LayoutTabSnapshot {
+  kind: 'ssh' | 'local'
+  title: string
+  split: 'none' | 'row' | 'column'
+  paneCount: number
+  active: boolean
+  /** 有它才能重启后自动重连 */
+  savedSessionId?: string
+  /** 未保存的 SSH 会话：重启后没凭证，恢复成占位标签，用它预填认证表单 */
+  host?: string
+  port?: number
+  username?: string
+}
+
+export interface LayoutSnapshot {
+  tabs: LayoutTabSnapshot[]
+}
+
 /** 内置编辑器可打开的文件大小上限（字节）。超过则只允许下载后查看 */
 export const MAX_EDITABLE_BYTES = 2 * 1024 * 1024
 

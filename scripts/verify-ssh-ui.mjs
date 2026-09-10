@@ -17,7 +17,7 @@ const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
-  () => (document.querySelector('.terminal-container')?.clientWidth ?? 0) > 200,
+  () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
   { timeout: 10000 }
 )
 
