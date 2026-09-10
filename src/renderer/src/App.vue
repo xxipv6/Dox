@@ -274,8 +274,22 @@ async function toggleSftp(): Promise<void> {
  * 连到内容上」，这是标签页最容易被一眼读懂的形状。反过来（浅栏+深色活动标签）
  * 也分得清，但读起来像"选中的那块被按下去了"，语义是反的。
  */
+/*
+ * 标签栏。
+ *
+ * 高度与侧栏顶栏一致（48px）：两者都在标题栏正下方、左右并排，
+ * 中间那条分隔线对不齐会非常明显。
+ *
+ * 标签做成有间距的圆角块，而不是原先「等高、靠 border-right 切开」的矩形 ——
+ * 后者每个标签都被两条竖线夹着，整条看上去是一排格子；前者靠形状分组，
+ * 哪几个是一组、哪个是当前，一眼就分得出来。
+ */
 .tab-bar {
   display: flex;
+  align-items: center;
+  height: 48px;
+  padding: 0 var(--sp-2);
+  gap: var(--sp-2);
   background: var(--bg-sunken);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -283,6 +297,8 @@ async function toggleSftp(): Promise<void> {
 .tabs-scroll {
   flex: 1;
   display: flex;
+  align-items: center;
+  gap: 3px;
   overflow-x: auto;
   min-width: 0;
 }
@@ -294,13 +310,15 @@ async function toggleSftp(): Promise<void> {
    * 定高 + 居中，而不是靠上下 padding 撑出来：图标、标题、关闭按钮三者的
    * 垂直中线这样才对得齐。也顺带让标签栏高度不随内容（比如退出码徽标）跳动。
    */
-  height: 38px;
-  padding: 0 var(--sp-3);
+  height: 32px;
+  padding: 0 var(--sp-2) 0 var(--sp-3);
   font-size: var(--fs-md);
   color: var(--fg-secondary);
   cursor: pointer;
-  border-right: 1px solid var(--border);
+  border-radius: var(--r-md);
   white-space: nowrap;
+  /* 标签多了要能横向滚，但不能被 flex 压扁成一个点 */
+  flex-shrink: 0;
   transition:
     background-color var(--dur-base) var(--ease-out),
     color var(--dur-base) var(--ease-out);
@@ -316,8 +334,12 @@ async function toggleSftp(): Promise<void> {
  */
 .tab.active {
   color: var(--fg);
+  font-weight: var(--fw-medium);
   background: var(--bg-panel);
-  box-shadow: inset 0 2px 0 var(--accent);
+  /* 两个信号一起给：抬升的面 + 顶部高亮线，再加一点投影把圆角块从底槽上托起来 */
+  box-shadow:
+    inset 0 2px 0 var(--accent),
+    var(--shadow-sm);
 }
 .tab.active:hover {
   background: var(--bg-panel);
@@ -326,6 +348,11 @@ async function toggleSftp(): Promise<void> {
   background: var(--bg-hover);
   color: var(--fg-secondary);
 }
+/*
+ * 右侧那排动作按钮（分屏 / SFTP）。
+ * 和标签一样是圆角块，不再用 border-left 划竖线 —— 竖线会把它们和标签
+ * 混成同一排「格子」，它们是**动作**，不是可切换的标签。
+ */
 .bar-btn {
   transition:
     background-color var(--dur-fast) var(--ease-out),
@@ -333,14 +360,16 @@ async function toggleSftp(): Promise<void> {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  height: 30px;
   border: none;
-  border-left: 1px solid var(--border);
+  border-radius: var(--r-sm);
   background: none;
   color: var(--fg-muted);
   font-size: var(--fs-md);
-  padding: 0 12px;
+  padding: 0 10px;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .bar-btn:hover {
   color: var(--fg);
@@ -401,11 +430,14 @@ async function toggleSftp(): Promise<void> {
 .tab-new {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   border: none;
-  border-right: 1px solid var(--border);
+  border-radius: var(--r-sm);
   background: none;
   color: var(--fg-muted);
-  padding: 0 var(--sp-4);
+  width: 28px;
+  height: 28px;
+  margin-left: 3px;
   cursor: pointer;
   flex-shrink: 0;
   transition:

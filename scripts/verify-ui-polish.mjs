@@ -60,7 +60,13 @@ check(
   `${tabColors.active} vs ${tabColors.bar}，差 ${delta}`
 )
 check('活动标签另有顶部高亮线', (tabColors.shadow ?? '').includes('inset'), tabColors.shadow ?? '')
-await win.screenshot({ path: join(outDir, '10-tab-active.png'), clip: { x: 260, y: 0, width: 560, height: 46 } })
+// 截图区域按元素实际位置取，不写死坐标：标题栏插进来之后，
+// 原来写死的 y:0 截到的已经不是标签栏了（这行本身没报错，只是悄悄截错地方）
+const tabBarBox = await win.locator('.tab-bar').boundingBox()
+await win.screenshot({
+  path: join(outDir, '10-tab-active.png'),
+  clip: tabBarBox ?? { x: 260, y: 36, width: 560, height: 48 }
+})
 
 // ---------- E. 图标统一为 SVG ----------
 console.log('\nE. 图标')
@@ -340,6 +346,91 @@ check('文件行有过渡', hasMotion(motion.row), JSON.stringify(motion.row))
 check('标签有过渡', hasMotion(motion.tab), JSON.stringify(motion.tab))
 check('设备行有过渡', hasMotion(motion.device), JSON.stringify(motion.device))
 check('图标按钮有过渡', hasMotion(motion.icon), JSON.stringify(motion.icon))
+
+// ---------- H. 设备搜索 ----------
+/*
+ * 这里用注入的假设备跑，不动用户真实保存的那些：
+ * 真机上可能只有一台设备，删掉再建来验过滤太伤，而「只有一台」也验不出
+ * 「筛掉一部分」这个关键行为。
+ */
+console.log('\nH. 设备搜索')
+const devices = () =>
+  win.evaluate(() =>
+    [...document.querySelectorAll('.device .device-name')].map((e) => e.textContent?.trim() ?? '')
+  )
+const hintText = () =>
+  win.evaluate(
+    () => document.querySelector('.device-list .empty-hint')?.textContent?.trim() ?? ''
+  )
+
+const restore = await win.evaluate(() => window.api.listSessions())
+const fake = [
+  { name: '生产机 A', host: '10.0.0.5', port: 22, username: 'root', authType: 'password' },
+  { name: '测试机 B', host: 'example.com', port: 2222, username: 'deploy', authType: 'password' }
+]
+for (const s of fake) await win.evaluate((x) => window.api.saveSession(x), s)
+await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+await win.reload()
+await win.waitForLoadState('domcontentloaded')
+await win.waitForTimeout(2500)
+
+const all = await devices()
+check('起点：假设备都在', all.length >= 2, all.join(' | '))
+
+const type = async (t) => {
+  await win.locator('.search-input').fill(t)
+  await win.waitForTimeout(400)
+}
+
+await type('测试')
+let shown = await devices()
+check(
+  '按名称过滤',
+  shown.length === 1 && shown[0].includes('测试'),
+  shown.join(' | ')
+)
+
+await type('10.0.0.5')
+shown = await devices()
+check(
+  '按地址过滤（只匹配名称的话，记得 IP 的人会觉得搜索是坏的）',
+  shown.length === 1 && shown[0].includes('生产'),
+  shown.join(' | ')
+)
+
+await type('deploy')
+shown = await devices()
+check('按登录名过滤', shown.length === 1 && shown[0].includes('测试'), shown.join(' | '))
+
+await type('2222')
+shown = await devices()
+check('按端口过滤', shown.length === 1 && shown[0].includes('测试'), shown.join(' | '))
+
+await type('zzz-不存在')
+shown = await devices()
+check('无匹配时列表为空', shown.length === 0, shown.join(' | '))
+check(
+  '无匹配的文案与「一台设备都没有」是两句话',
+  (await hintText()).includes('没有匹配'),
+  await hintText()
+)
+
+await win.locator('.search-clear').click()
+await win.waitForTimeout(400)
+check('点清空恢复全部', (await devices()).length === all.length, (await devices()).join(' | '))
+
+// 收尾：把注入的假设备删掉，别留在用户配置里
+for (const s of await win.evaluate(() => window.api.listSessions())) {
+  if (fake.some((f) => f.name === s.name)) {
+    await win.evaluate((id) => window.api.deleteSession(id), s.id)
+  }
+}
+const left = await win.evaluate(() => window.api.listSessions())
+check(
+  '清理干净（假设备已删除，真实设备未受影响）',
+  left.length === restore.length,
+  `原有 ${restore.length} / 现在 ${left.length}`
+)
 
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 console.log(process.exitCode ? '\n结论: 存在失败项' : '\n结论: 全部通过')

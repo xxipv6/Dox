@@ -19,6 +19,7 @@ export type IconName =
   | 'key' | 'alert' | 'settings' | 'sun' | 'moon' | 'box' | 'zap'
   // 自绘标题栏的窗口按钮（macOS 用系统红绿灯，不会用到这两个）
   | 'square' | 'restore'
+  | 'search'
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 14 })
 
@@ -103,7 +104,10 @@ const PATHS: Record<IconName, string[]> = {
 
   // 窗口按钮：□ 最大化 / ❐ 还原（两个错位的方框）
   square: ['M5.5 5.5h13v13h-13z'],
-  restore: ['M8.5 8.5V6a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-2.5', 'M5.5 8.5h9.5v9.5h-9.5z']
+  restore: ['M8.5 8.5V6a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-2.5', 'M5.5 8.5h9.5v9.5h-9.5z'],
+
+  // 搜索：放大镜
+  search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'M21 21l-4.35-4.35']
 }
 
 const paths = computed(() => PATHS[props.name] ?? [])

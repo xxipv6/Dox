@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useSessionStore } from '../stores/sessions'
 import { useSettingsStore } from '../stores/settings'
 import DeviceDialog from './DeviceDialog.vue'
@@ -16,6 +16,26 @@ const settings = useSettingsStore()
 const collapsed = ref(false)
 const dialogVisible = ref(false)
 const editing = ref<SavedSession | null>(null)
+
+/** 设备过滤词。只看这一处，不落盘 —— 重启后回到「全部可见」才是可预期的 */
+const filter = ref('')
+
+/**
+ * 按过滤词筛过的设备。
+ *
+ * 四个字段一起匹配，因为「记不住自己当初怎么命名的」是常态：
+ * 有人记得叫「测试机」，有人记得是那台 10.0.0.5，有人记得登录名。
+ * 只匹配名称的话，后两种人会觉得搜索是坏的。
+ *
+ * 不 trim 到「空则不过滤」以外的程度：输入过程中的空格不该让列表突然全空。
+ */
+const filteredSessions = computed(() => {
+  const q = filter.value.trim().toLowerCase()
+  if (!q) return store.savedSessions
+  return store.savedSessions.filter((s) =>
+    [s.name, s.host, s.username, String(s.port)].some((v) => v.toLowerCase().includes(q))
+  )
+})
 
 onMounted(() => store.refreshSaved())
 
@@ -60,11 +80,31 @@ async function remove(s: SavedSession): Promise<void> {
   <aside class="sidebar" :class="{ collapsed }">
     <div class="sidebar-header">
       <!--
-        这里**不再**放标记和字标。
-        品牌已经由最上面的自绘标题栏承担（那里也有 logo + Dox），
-        两处都放就是同一个词在 47px 内出现两遍，看着像没做完。
-        这一条现在只剩右侧那排动作按钮。
+        这里**不再**放标记和字标 —— 品牌已经由最上面的自绘标题栏承担
+        （那里也有 logo + Dox），两处都放就是同一个词在 47px 内出现两遍。
+        空出来的位置给设备过滤：设备一多，这个比一个重复的标题有用得多。
       -->
+      <label v-if="!collapsed" class="header-search">
+        <Icon class="search-icon" name="search" :size="14" />
+        <input
+          v-model="filter"
+          class="search-input"
+          type="text"
+          placeholder="搜索设备"
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <button
+          v-if="filter"
+          class="icon-btn search-clear"
+          type="button"
+          title="清空"
+          @click.prevent="filter = ''"
+        >
+          <Icon name="x" :size="12" />
+        </button>
+      </label>
+
       <span class="header-actions">
         <!--
           主题一键切。图标显示的是**将要切到**的目标（当前是亮色就显示月亮），
@@ -103,8 +143,12 @@ async function remove(s: SavedSession): Promise<void> {
           <div v-if="!store.savedSessions.length" class="empty-hint">
             还没有设备，点右侧 ＋ 添加
           </div>
+          <!-- 「一台都没有」和「都被过滤掉了」是两回事，文案不能共用 -->
+          <div v-else-if="!filteredSessions.length" class="empty-hint">
+            没有匹配「{{ filter.trim() }}」的设备
+          </div>
           <div
-            v-for="s in store.savedSessions"
+            v-for="s in filteredSessions"
             :key="s.id"
             class="device"
             :title="`${s.username}@${s.host}:${s.port} — 双击连接`"
@@ -175,7 +219,8 @@ async function remove(s: SavedSession): Promise<void> {
   padding: 0 var(--sp-2) 0 var(--sp-3);
   display: flex;
   align-items: center;
-  /* 品牌搬去标题栏之后这里只剩动作按钮，靠右排 */
+  gap: var(--sp-2);
+  /* 过滤框占满剩余宽度，动作按钮靠右收尾 */
   justify-content: flex-end;
   border-bottom: 1px solid var(--border);
 }
@@ -190,6 +235,57 @@ async function remove(s: SavedSession): Promise<void> {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex-shrink: 0;
+}
+
+/*
+ * 设备过滤框。
+ *
+ * 底色用 --bg 而不是 --bg-panel：这一条本身就在 --bg-panel 上，
+ * 输入框要比它「凹进去」一点才像个可输入的槽。
+ * 聚焦时边框转主色 —— 界面上唯一会亮起来的主色信号，不会认错。
+ */
+.header-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 var(--sp-2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+.header-search:focus-within {
+  border-color: var(--accent);
+  background: var(--bg-panel);
+}
+.search-icon {
+  color: var(--fg-muted);
+}
+.search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+}
+.search-input::placeholder {
+  color: var(--fg-muted);
+}
+/* 28px 的槽里塞不下 22px 的按钮再留左右内边距，清空按钮自己收窄 */
+.search-clear {
+  width: 18px;
+  height: 18px;
+  padding: 0;
 }
 /*
  * 顶栏那几枚按钮给足点击区：.icon-btn 默认 padding 3px，
