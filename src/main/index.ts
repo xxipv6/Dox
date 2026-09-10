@@ -10,6 +10,7 @@ import { SftpService } from './sftp/SftpService'
 import { TransferManager } from './sftp/TransferManager'
 import { ForwardManager } from './forward/ForwardManager'
 import { LocalPtyManager } from './local/LocalPtyManager'
+import { clearDragOutDir } from './sftp/dragOut'
 import { prewarmShells } from './local/shells'
 import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
@@ -125,4 +126,6 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   sessionManager.disconnectAll()
   localPtyManager.killAll()
+  // 拖出下载留下的临时文件；不清的话会一直待在用户临时目录里
+  void clearDragOutDir()
 })

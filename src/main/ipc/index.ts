@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron'
 import { existsSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
@@ -21,6 +21,7 @@ import type { LocalPtyManager } from '../local/LocalPtyManager'
 import { LOCAL_ID_PREFIX } from '../local/LocalPtyManager'
 import type { ConfigStore } from '../store/configStore'
 import type { SftpService } from '../sftp/SftpService'
+import { dragOutDir } from '../sftp/dragOut'
 import type { TransferManager } from '../sftp/TransferManager'
 import type { ForwardManager } from '../forward/ForwardManager'
 
@@ -35,6 +36,15 @@ export function registerIpc(
   layoutStore: LayoutStore,
   settingsStore: SettingsStore
 ): void {
+  // 拖拽图标。开发时是仓库根目录下的 build/icon.png；打包后它在 asar 里，
+  // 用 nativeImage 读（能穿 asar）。electron-builder 的 files 里已包含它，
+  // 万一还是取不到就退回空图 —— 拖拽照常可用，只是没有自定义图标。
+  const dragIcon = (() => {
+    const p = join(app.getAppPath(), 'build', 'icon.png')
+    const img = existsSync(p) ? nativeImage.createFromPath(p) : nativeImage.createEmpty()
+    return img.isEmpty() ? nativeImage.createEmpty() : img
+  })()
+
   // ---- SSH 会话 ----
   ipcMain.handle(
     IpcChannels.sshConnect,
@@ -116,6 +126,27 @@ export function registerIpc(
       sftpService.writeText(sessionId, path, content, expectedMtime)
   )
 
+  /*
+   * 拖出到资源管理器。
+   *
+   * 必须先下载到本地再由主进程发起原生拖拽 —— 操作系统的拖放协议要的是
+   * 一个真实文件路径，渲染进程没法凭远端路径凭空造出一个拖放源。
+   * 所以这一步是「下载完才开始拖」，慢是必然的，超限文件在 prepareDragOut
+   * 里直接拒绝，避免用户对着「拖了没反应」的界面干等。
+   */
+  ipcMain.handle(
+    IpcChannels.sftpStartDrag,
+    async (event, sessionId: string, remotePath: string, fileName: string) => {
+      const localPath = await sftpService.prepareDragOut(sessionId, remotePath, fileName, dragOutDir())
+      event.sender.startDrag({ file: localPath, icon: dragIcon })
+      return localPath
+    }
+  )
+  // 取消：只置一个标记，正在跑的拷贝自己会在下一个数据块处停下来并清理半截文件
+  ipcMain.handle(IpcChannels.sftpCancelDrag, (_event, sessionId: string) =>
+    sftpService.cancelDragOut(sessionId)
+  )
+
   // ---- 传输队列 ----
   ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -170,6 +201,7 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.transferList, () => transferManager.list())
   ipcMain.handle(IpcChannels.transferCancel, (_event, id: string) => transferManager.cancel(id))
   ipcMain.handle(IpcChannels.transferClearFinished, () => transferManager.clearFinished())
+  ipcMain.handle(IpcChannels.transferCancelAll, () => transferManager.cancelAll())
 
   // ---- 端口转发 ----
   ipcMain.handle(IpcChannels.forwardList, () => forwardManager.list())

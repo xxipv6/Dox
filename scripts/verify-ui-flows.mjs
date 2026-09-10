@@ -7,7 +7,13 @@ import { _electron as electron } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-const host = process.argv[2] ?? 'example.com'
+// 不再硬编码测试主机：公开仓库里写死自己的服务器地址，等于公开
+// 「这台机器开着 22 端口」，改用参数或环境变量传入。
+const host = process.argv[2] ?? process.env.DOX_TEST_HOST
+if (!host) {
+  console.error('用法: node scripts/verify-ui-flows.mjs <host> [port] [user]，或设置 DOX_TEST_HOST')
+  process.exit(2)
+}
 const port = process.argv[3] ?? '22'
 const user = process.argv[4] ?? 'root'
 mkdirSync('shots', { recursive: true })

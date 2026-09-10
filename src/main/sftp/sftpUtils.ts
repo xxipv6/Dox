@@ -1,5 +1,5 @@
 import { posix } from 'node:path'
-import type { Attributes, FileEntryWithStats, SFTPWrapper } from 'ssh2'
+import type { FileEntryWithStats, SFTPWrapper, Stats } from 'ssh2'
 
 /** ssh2 回调式 API 的 Promise 封装，SftpService 与 TransferManager 共用 */
 
@@ -9,7 +9,7 @@ export function readdirP(sftp: SFTPWrapper, dir: string): Promise<FileEntryWithS
   })
 }
 
-export function statP(sftp: SFTPWrapper, path: string): Promise<Attributes> {
+export function statP(sftp: SFTPWrapper, path: string): Promise<Stats> {
   return new Promise((resolve, reject) => {
     sftp.stat(path, (err, attrs) => (err ? reject(err) : resolve(attrs)))
   })

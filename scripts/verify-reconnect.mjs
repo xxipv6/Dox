@@ -84,12 +84,26 @@ function tail(text, n = 8) {
 
 // ---------- 准备：切到 DOM 渲染器 + 挂状态记录器 ----------
 await win.waitForLoadState('domcontentloaded')
+
+/*
+ * 先清布局再等终端，顺序不能反。
+ *
+ * 本脚本上一轮会留下一个连不上/断开的 SSH 标签，重启后布局恢复会把它恢复
+ * 成活动标签；那种标签没有终端，所有 .terminal-container 都是 v-show 隐藏的、
+ * clientWidth 为 0，等待终端可见必然超时。之前这个等待放在清理之前，
+ * 表现成「第一次能跑通、第二次必挂」。
+ */
+await win.waitForTimeout(1200)
+await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+await win.reload()
+await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
   // 签名是 (fn, arg, options)：漏掉 arg 会把 timeout 当成页面函数参数，
   // 静默退回默认的 30 秒 —— 写在代码里的值从来没生效过。
-  undefined, { timeout: 10000 }
+  undefined, { timeout: 15000 }
 )
+
 // 设置现在存在主进程，改完要等它落盘再 reload，否则会读到旧值
 const originalSettings = await win.evaluate(() => window.api.getSettings())
 await win.evaluate(async () => {
@@ -151,6 +165,24 @@ try {
 }
 await win.waitForTimeout(2000)
 check('SSH 连接建立', true)
+
+/*
+ * 拿刚才连上的那台设备的地址，下面「认证失败」那条断言复用它。
+ *
+ * 不再把主机名写死在脚本里：公开仓库里写死自己的服务器地址等于公开
+ * 「这台机器开着 22 端口」。而且复用当前设备本来就更对 —— 要验的正是
+ * 「连你自己这台机器时，密码错不会触发重连」。
+ * 从最后一个 ':' 切端口，这样 IPv6 地址也不会被切坏。
+ */
+const target = await win.evaluate(() => {
+  const el = document.querySelector('.device .device-host')
+  const text = el?.textContent?.trim() ?? ''
+  const at = text.indexOf('@')
+  const colon = text.lastIndexOf(':')
+  if (at < 0 || colon < at) return null
+  return { username: text.slice(0, at), host: text.slice(at + 1, colon), port: text.slice(colon + 1) }
+})
+check('取到了测试目标地址', !!target, JSON.stringify(target))
 
 // ---------- 断线前：进入可辨识目录 ----------
 await termRun('cd /tmp && rm -f /tmp/dox-cwd-marker /root/dox-cwd-marker')
@@ -241,8 +273,8 @@ check(
 const logBeforeAuth = (await statusLog()).length
 await win.locator('.add-btn').click()
 await win.waitForTimeout(500)
-await win.locator('input[placeholder^="192.168"]').fill('example.com')
-await win.locator('input[placeholder="root"]').fill('root')
+await win.locator('input[placeholder^="192.168"]').fill(target.host)
+await win.locator('input[placeholder="root"]').fill(target.username)
 await win.locator('input[placeholder="登录密码"]').fill('__definitely_wrong_password__')
 await win.locator('button:has-text("仅连接")').click()
 

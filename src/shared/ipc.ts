@@ -35,6 +35,10 @@ export const IpcChannels = {
   sftpDelete: 'sftp:delete',
   sftpReadText: 'sftp:readText',
   sftpWriteText: 'sftp:writeText',
+  // 拖出到资源管理器：先把远端文件落到本地临时目录，再发起原生拖拽
+  sftpStartDrag: 'sftp:startDrag',
+  // 中止正在进行的拖出准备（远端 → 本地的拷贝）
+  sftpCancelDrag: 'sftp:cancelDrag',
   // 传输队列
   transferPickUpload: 'transfer:pickUpload',
   transferEnqueueDropped: 'transfer:enqueueDropped',
@@ -43,6 +47,8 @@ export const IpcChannels = {
   transferList: 'transfer:list',
   transferCancel: 'transfer:cancel',
   transferClearFinished: 'transfer:clearFinished',
+  // 一次性停掉整个队列（文件夹传输会展开成成百上千条，逐条取消不现实）
+  transferCancelAll: 'transfer:cancelAll',
   // 主进程 → 渲染进程事件
   transferUpdate: 'transfer:update',
   // 端口转发

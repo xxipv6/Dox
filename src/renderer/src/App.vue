@@ -150,72 +150,81 @@ async function toggleSftp(): Promise<void> {
         </template>
       </div>
 
-      <!-- 终端 + SFTP 分栏 -->
-      <div class="terminal-area" :class="{ 'editor-open': editor.visible }">
-        <div v-if="!store.tabs.length" class="welcome">
-          <h2>Dox 终端</h2>
-          <p>本地终端启动中… SSH 会话请从左侧连接。</p>
-        </div>
+      <!--
+        终端 + SFTP 分栏，传输队列停靠在最下方。
 
-        <div class="terminal-stack">
-          <div
-            v-for="tab in store.tabs"
-            :key="tab.tabId"
-            v-show="tab.tabId === store.activeTabId"
-            class="tab-content"
-            :class="{
-              'split-row': tab.split === 'row',
-              'split-column': tab.split === 'column'
-            }"
-          >
+        队列原来是绝对定位浮在右下角的，而 SFTP 面板正好在右侧 ——
+        传几个文件后队列一出现，文件列表底部那几十行就被盖住点不动了
+        （双击、悬停、拖拽全被截走）。改成一整条底部停靠，占自己的高度，
+        不再遮任何东西。
+      -->
+      <div class="terminal-area" :class="{ 'editor-open': editor.visible }">
+        <div class="workspace">
+          <div v-if="!store.tabs.length" class="welcome">
+            <h2>Dox 终端</h2>
+            <p>本地终端启动中… SSH 会话请从左侧连接。</p>
+          </div>
+
+          <div class="terminal-stack">
             <div
-              v-for="pane in tab.panes"
-              :key="pane.paneId"
-              class="pane"
-              :class="{ focused: pane.paneId === tab.activePaneId }"
-              @mousedown="store.setActivePane(tab, pane)"
+              v-for="tab in store.tabs"
+              :key="tab.tabId"
+              v-show="tab.tabId === store.activeTabId"
+              class="tab-content"
+              :class="{
+                'split-row': tab.split === 'row',
+                'split-column': tab.split === 'column'
+              }"
             >
-              <TerminalPanel
-                v-if="pane.sessionId"
-                :ref="(el) => setPanelRef(pane.sessionId!, el as InstanceType<typeof TerminalPanel> | null)"
-                :session-id="pane.sessionId"
-              />
-              <div v-else class="tab-placeholder">
-                <template v-if="pane.status === 'connecting'">正在连接 {{ tab.title }} …</template>
-                <template v-else-if="pane.status === 'error'">连接失败：{{ pane.error }}</template>
-                <!-- 重启后恢复出来的临时连接：没有凭证，必须用户重新认证 -->
-                <template v-else-if="tab.pendingPrefill">
-                  <div class="resume-hint">
-                    <p>这是上次未保存的会话（密码未存储）</p>
-                    <button class="resume-btn" @click="store.requestAddDevice(tab.pendingPrefill!)">
-                      重新连接 {{ tab.pendingPrefill.username }}@{{ tab.pendingPrefill.host }}
-                    </button>
-                  </div>
-                </template>
-                <template v-else>已断开</template>
+              <div
+                v-for="pane in tab.panes"
+                :key="pane.paneId"
+                class="pane"
+                :class="{ focused: pane.paneId === tab.activePaneId }"
+                @mousedown="store.setActivePane(tab, pane)"
+              >
+                <TerminalPanel
+                  v-if="pane.sessionId"
+                  :ref="(el) => setPanelRef(pane.sessionId!, el as InstanceType<typeof TerminalPanel> | null)"
+                  :session-id="pane.sessionId"
+                />
+                <div v-else class="tab-placeholder">
+                  <template v-if="pane.status === 'connecting'">正在连接 {{ tab.title }} …</template>
+                  <template v-else-if="pane.status === 'error'">连接失败：{{ pane.error }}</template>
+                  <!-- 重启后恢复出来的临时连接：没有凭证，必须用户重新认证 -->
+                  <template v-else-if="tab.pendingPrefill">
+                    <div class="resume-hint">
+                      <p>这是上次未保存的会话（密码未存储）</p>
+                      <button class="resume-btn" @click="store.requestAddDevice(tab.pendingPrefill!)">
+                        重新连接 {{ tab.pendingPrefill.username }}@{{ tab.pendingPrefill.host }}
+                      </button>
+                    </div>
+                  </template>
+                  <template v-else>已断开</template>
+                </div>
+                <button
+                  v-if="tab.panes.length > 1"
+                  class="pane-close"
+                  title="关闭此窗格"
+                  @click.stop="store.closePane(tab, pane)"
+                ><Icon name="x" :size="12" /></button>
               </div>
-              <button
-                v-if="tab.panes.length > 1"
-                class="pane-close"
-                title="关闭此窗格"
-                @click.stop="store.closePane(tab, pane)"
-              >×</button>
             </div>
           </div>
+
+          <FileExplorer
+            v-if="store.sftpVisible && store.activeTab?.kind === 'ssh' && store.activeSessionId"
+            :key="store.activeSessionId"
+            :session-id="store.activeSessionId"
+          />
+
+          <!-- 双击文件后在此编辑；key 绑定会话，切会话不串内容 -->
+          <FileEditor
+            v-if="store.sftpVisible && editor.visible && store.activeSessionId"
+            :key="`ed-${store.activeSessionId}`"
+            :session-id="store.activeSessionId"
+          />
         </div>
-
-        <FileExplorer
-          v-if="store.sftpVisible && store.activeTab?.kind === 'ssh' && store.activeSessionId"
-          :key="store.activeSessionId"
-          :session-id="store.activeSessionId"
-        />
-
-        <!-- 双击文件后在此编辑；key 绑定会话，切会话不串内容 -->
-        <FileEditor
-          v-if="store.sftpVisible && editor.visible && store.activeSessionId"
-          :key="`ed-${store.activeSessionId}`"
-          :session-id="store.activeSessionId"
-        />
 
         <TransferQueue />
       </div>
@@ -365,7 +374,14 @@ async function toggleSftp(): Promise<void> {
   padding: 0 4px;
   line-height: 15px;
 }
+/* 纵向：上面是工作区（终端 + SFTP + 编辑器），下面是传输队列停靠条 */
 .terminal-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.workspace {
   flex: 1;
   min-height: 0;
   display: flex;

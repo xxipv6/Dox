@@ -146,6 +146,44 @@ function openInTerminal(): void {
   window.api.input(props.sessionId, `cd ${quoted}\r`)
 }
 
+// ---- 拖出到资源管理器 ----
+/** 正在把哪个文件拉到本地（拖出必须先下载完才能交给系统拖动） */
+const dragPreparing = ref<string | null>(null)
+
+/**
+ * 拖出行 → 交给主进程发起原生拖拽。
+ *
+ * 这里必须 preventDefault：不掐掉 HTML5 默认拖拽的话，渲染进程会同时启动
+ * 一个「拖着一团网页内容」的拖拽，和主进程发起的原生文件拖拽打架。
+ * 真正的拖拽由主进程 `webContents.startDrag` 发起 —— 只有它能给操作系统
+ * 一个真实文件路径，而远端路径必须先下载到本地。
+ *
+ * 下载期间界面上只能等着，所以这里给一条明确的进行中提示，
+ * 否则用户看到的就是「拖了一下什么都没发生」。
+ */
+async function onDragStart(e: DragEvent, entry: FileEntry): Promise<void> {
+  e.preventDefault()
+
+  errorMsg.value = ''
+  dragPreparing.value = entry.name
+  try {
+    // 文件和目录都交给主进程：目录会先递归拉到本地临时目录再交给系统拖动，
+    // 大小/文件数超限由主进程抛错（见 SftpService.prepareDragOut）
+    await window.api.sftpStartDrag(props.sessionId, entry.path, entry.name)
+  } catch (err) {
+    // 用户自己点的取消不是错误，别把它当失败弹在界面上
+    const text = errorText(err)
+    if (!text.includes('已取消')) errorMsg.value = text
+  } finally {
+    dragPreparing.value = null
+  }
+}
+
+/** 中止拖出：拷贝可能已经拉了很久（目录要递归），用户必须能反悔 */
+function cancelDragOut(): void {
+  void window.api.sftpCancelDrag(props.sessionId)
+}
+
 // ---- 拖拽上传 ----
 function onDrop(e: DragEvent): void {
   dragOver.value = false
@@ -212,6 +250,14 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
+    <!--
+      拖出要先完整下载到本地才能交给系统拖动，这段等待必须让用户看见。
+      文件夹可能要递归拉很久，所以文案里点明是这个原因，别让人以为卡死了。
+    -->
+    <div v-if="dragPreparing" class="drag-hint">
+      <span>正在把「{{ dragPreparing }}」取到本地（拖出需要先有本地文件）…</span>
+      <button class="drag-cancel" @click="cancelDragOut">取消</button>
+    </div>
     <div v-if="errorMsg" class="error-banner">{{ errorMsg }}</div>
     <div v-if="loading" class="hint">加载中…</div>
 
@@ -234,6 +280,8 @@ onBeforeUnmount(() => {
         v-for="entry in entries"
         :key="entry.path"
         class="row"
+        draggable="true"
+        @dragstart="onDragStart($event, entry)"
         @dblclick="openEntry(entry)"
       >
         <Icon
@@ -390,6 +438,30 @@ onBeforeUnmount(() => {
   color: #f7768e;
   font-size: 12px;
   border-bottom: 1px solid #2a2b3d;
+}
+.drag-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  color: #7aa2f7;
+  font-size: 12px;
+  border-bottom: 1px solid #2a2b3d;
+}
+.drag-cancel {
+  flex-shrink: 0;
+  margin-left: auto;
+  background: none;
+  border: 1px solid #2a2b3d;
+  border-radius: 4px;
+  color: #c0caf5;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.drag-cancel:hover {
+  border-color: #f7768e;
+  color: #f7768e;
 }
 .hint {
   padding: 16px;

@@ -11,6 +11,17 @@ const EMIT_INTERVAL = 100
 /** 已结束任务在内存中保留的上限，防止长时间运行后任务表无界增长 */
 const MAX_FINISHED_TASKS = 500
 
+/**
+ * 成功 / 被取消的任务在界面上再留多久，然后自己消失（ms）。
+ *
+ * 传完之后那一条会一直挂在队列里，用户得手动点「清除已完成」才能收掉 ——
+ * 而队列现在会占掉底部一条高度，越攒越挤。留几秒是给用户一个「传完了」的
+ * 确认窗口，过了就自动走。
+ *
+ * 失败的任务**不自动消失**：错误得留着让人看见并处理，悄悄收掉等于没报错。
+ */
+const AUTO_DISMISS_MS = 3000
+
 interface InternalTask extends TransferTask {
   _cancel?: () => void
   /**
@@ -27,12 +38,18 @@ interface LocalFileItem {
   rel: string
 }
 
-/** 递归遍历本地目录，返回所有文件 */
-async function walkLocal(root: string): Promise<LocalFileItem[]> {
+/**
+ * 递归遍历本地目录，返回所有文件。
+ *
+ * isCanceled 每轮都要问一次：上传文件夹时本地遍历可能也要好几秒，
+ * 用户点了「全部取消」不该等它遍历完。
+ */
+async function walkLocal(root: string, isCanceled: () => boolean): Promise<LocalFileItem[]> {
   const out: LocalFileItem[] = []
   const walk = async (dir: string, relDir: string): Promise<void> => {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true })
     for (const entry of entries) {
+      if (isCanceled()) return
       const full = join(dir, entry.name)
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name
       if (entry.isDirectory()) await walk(full, rel)
@@ -59,6 +76,16 @@ export class TransferManager {
   private readonly maxConcurrent = 2
   private lastEmitAt = 0
   private emitScheduled = false
+  /** taskId → 自动消失定时器，任务被提前移除时要顺手清掉 */
+  private dismissTimers = new Map<string, NodeJS.Timeout>()
+  /**
+   * 中断正在进行的目录展开。
+   *
+   * 传文件夹时任务是一条条「边遍历边入队」的：遍历一个几千文件的目录要好几秒，
+   * 这期间新任务持续冒出来。只把当前这批取消掉没有意义 —— 遍历还在跑，
+   * 下一秒又是几十条新的，用户看到的就是「怎么取消都取消不掉」。
+   */
+  private stopExpansion = false
 
   constructor(
     private readonly getSftp: (sessionId: string) => Promise<SFTPWrapper>,
@@ -71,6 +98,8 @@ export class TransferManager {
 
   /** 上传本地文件或文件夹（文件夹递归展开），返回创建的任务列表 */
   async enqueueUpload(sessionId: string, localPath: string, remoteDir: string): Promise<TransferTask[]> {
+    // 新一轮开始：清掉上一次「全部取消」留下的中断标记，否则这次一进去就停
+    this.stopExpansion = false
     const stat = await fs.promises.stat(localPath)
 
     if (stat.isFile()) {
@@ -89,7 +118,7 @@ export class TransferManager {
       const sftp = await this.getSftp(sessionId)
       const rootRemote = posix.join(remoteDir, basename(localPath))
       await mkdirRemoteRecursive(sftp, rootRemote)
-      const files = await walkLocal(localPath)
+      const files = await walkLocal(localPath, () => this.stopExpansion)
       const created: TransferTask[] = []
       for (const f of files) {
         const remotePath = posix.join(rootRemote, toPosixRel(f.rel))
@@ -115,6 +144,8 @@ export class TransferManager {
 
   /** 下载远端文件夹（递归展开）到本地目录，返回创建的任务列表 */
   async enqueueDownloadDir(sessionId: string, remotePath: string, localDir: string): Promise<TransferTask[]> {
+    // 同 enqueueUpload：新任务必须能重新开始
+    this.stopExpansion = false
     const sftp = await this.getSftp(sessionId)
     const rootName = posix.basename(remotePath)
     const rootLocal = join(localDir, rootName)
@@ -124,6 +155,8 @@ export class TransferManager {
     const walk = async (rDir: string, lDir: string, relDir: string): Promise<void> => {
       const items = await readdirP(sftp, rDir)
       for (const item of items) {
+        // 用户点了「全部取消」：停在这，已建的任务由 cancelAll 负责收
+        if (this.stopExpansion) return
         if (item.filename === '.' || item.filename === '..') continue
         const rChild = posix.join(rDir, item.filename)
         const rel = relDir ? `${relDir}/${item.filename}` : item.filename
@@ -152,7 +185,7 @@ export class TransferManager {
     // 补一条已完成记录代表「目录本身已创建」。
     if (created.length === 0) {
       const task = this.createTask(sessionId, 'download', rootLocal, remotePath, 0, `${rootName}/`)
-      task.status = 'done'
+      this.settle(task, 'done')
       this.emit()
       return [this.snapshot(task)]
     }
@@ -164,21 +197,70 @@ export class TransferManager {
     if (!task) return
     if (task.status === 'pending') {
       // pump 会跳过非 pending 项，无需从 queue 移除
-      task.status = 'canceled'
-      this.emit()
+      this.settle(task, 'canceled')
     } else if (task.status === 'active') {
       task._cancelRequested = true
       task._cancel?.()
     }
   }
 
-  clearFinished(): void {
-    for (const [id, task] of this.tasks) {
-      if (task.status === 'done' || task.status === 'error' || task.status === 'canceled') {
-        this.tasks.delete(id)
+  /**
+   * 全部取消：停掉所有排队/进行中的任务，并中断还在跑的目录展开。
+   *
+   * 传文件夹时队列里会有成百上千条，一条条点取消既点不完也点不过来；
+   * 而且只要遍历没停，取消掉的总会被新冒出来的补上。
+   */
+  cancelAll(): void {
+    this.stopExpansion = true
+    for (const task of this.tasks.values()) {
+      if (task.status === 'pending') {
+        this.settle(task, 'canceled')
+      } else if (task.status === 'active') {
+        task._cancelRequested = true
+        task._cancel?.()
       }
     }
     this.emit()
+  }
+
+  clearFinished(): void {
+    for (const [id, task] of this.tasks) {
+      if (task.status === 'done' || task.status === 'error' || task.status === 'canceled') {
+        this.remove(id)
+      }
+    }
+    this.emit()
+  }
+
+  /**
+   * 任务落定。done / canceled 会排一次自动消失，error 留着不动
+   * （错误必须留在界面上让人看见，见 AUTO_DISMISS_MS 的说明）。
+   */
+  private settle(task: InternalTask, status: 'done' | 'error' | 'canceled'): void {
+    task.status = status
+    if (status === 'error') return
+    const id = task.id
+    const timer = setTimeout(() => {
+      this.dismissTimers.delete(id)
+      // 期间可能已被 clearFinished 或用户重传顶掉
+      if (this.tasks.has(id)) {
+        this.tasks.delete(id)
+        this.emit()
+      }
+    }, AUTO_DISMISS_MS)
+    // 不拖住进程退出
+    timer.unref?.()
+    this.dismissTimers.set(id, timer)
+  }
+
+  /** 移除任务，连同它的自动消失定时器 */
+  private remove(id: string): void {
+    const timer = this.dismissTimers.get(id)
+    if (timer) {
+      clearTimeout(timer)
+      this.dismissTimers.delete(id)
+    }
+    this.tasks.delete(id)
   }
 
   private createTask(
@@ -216,7 +298,7 @@ export class TransferManager {
     for (const [id, task] of this.tasks) {
       if (excess <= 0) break
       if (task.status === 'done' || task.status === 'error' || task.status === 'canceled') {
-        this.tasks.delete(id)
+        this.remove(id)
         excess--
       }
     }
@@ -265,15 +347,15 @@ export class TransferManager {
     try {
       const sftp = await this.getSftp(task.sessionId)
       await this.pipe(task, sftp)
-      task.status = 'done'
       task.transferred = task.size
+      this.settle(task, 'done')
     } catch (err) {
       const e = err as Error
       if (e.message === CANCELED) {
-        task.status = 'canceled'
+        this.settle(task, 'canceled')
       } else {
-        task.status = 'error'
         task.error = e.message
+        this.settle(task, 'error')
       }
     }
     this.emit()
@@ -294,26 +376,47 @@ export class TransferManager {
         ? sftp.createWriteStream(task.remotePath)
         : fs.createWriteStream(task.localPath)
 
-      const fail = (err: Error): void => {
+      let failure: Error | null = null
+      /** 取消/出错后要做的收尾，等 dst 真正关闭再执行（见下面 close 的说明） */
+      let cleanup: (() => void) | null = null
+
+      const abort = (err: Error, after?: () => void): void => {
+        if (failure) return
+        failure = err
+        cleanup = after ?? null
         src.destroy()
         dst.destroy()
-        reject(err)
       }
-      src.on('error', fail)
-      dst.on('error', fail)
+      src.on('error', abort)
+      dst.on('error', abort)
       src.on('data', (chunk: Buffer | string) => {
         task.transferred += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
         this.emitThrottled()
       })
-      dst.on('close', () => resolve())
+
+      /*
+       * 落定与清理都只在这里做。
+       * destroy() 只是「开始关闭」，文件句柄要等 'close' 才释放；之前在
+       * _cancel 里 destroy() 完立刻 unlink，是在和句柄释放赛跑 —— Windows 上
+       * 会 EBUSY 而这个失败被 catch 吞掉，结果是「取消了，本地却留个半截文件」。
+       */
+      dst.on('close', () => {
+        if (failure) {
+          cleanup?.()
+          reject(failure)
+        } else {
+          resolve()
+        }
+      })
 
       task._cancel = () => {
-        src.destroy()
-        dst.destroy()
-        // 清理半截文件（尽力而为）
-        if (isUpload) void unlinkP(sftp, task.remotePath).catch(() => undefined)
-        else void fs.promises.unlink(task.localPath).catch(() => undefined)
-        reject(new Error(CANCELED))
+        abort(
+          new Error(CANCELED),
+          // 半截文件：上传删远端、下载删本地，都放在句柄释放之后
+          isUpload
+            ? (): void => void unlinkP(sftp, task.remotePath).catch(() => undefined)
+            : (): void => void fs.promises.unlink(task.localPath).catch(() => undefined)
+        )
       }
 
       src.pipe(dst)

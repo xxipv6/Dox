@@ -85,6 +85,16 @@ export interface DoxApi {
     content: string,
     expectedMtime?: number
   ): Promise<number>
+  /**
+   * 拖出到资源管理器。
+   *
+   * 远端文件会先完整下载到本地临时目录（操作系统的拖放协议只认真实文件路径），
+   * 然后由主进程发起原生拖拽。目录与超限文件会抛错。
+   * 调用方必须在 dragstart 里 preventDefault，否则会和 HTML5 默认拖拽打架。
+   */
+  sftpStartDrag(sessionId: string, remotePath: string, fileName: string): Promise<void>
+  /** 中止该会话正在进行的拖出准备，丢弃已拉取的半截临时文件 */
+  sftpCancelDrag(sessionId: string): Promise<void>
 
   // ---- 传输队列 ----
   /** 弹出本地文件选择框，选中文件上传到 remoteDir */
@@ -98,6 +108,8 @@ export interface DoxApi {
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>
   clearFinishedTransfers(): Promise<void>
+  /** 停掉整个队列，并中断还在展开的目录遍历 */
+  cancelAllTransfers(): Promise<void>
   onTransferUpdate(cb: (tasks: TransferTask[]) => void): () => void
 
   /** 拖拽事件中把 File 对象解析为本地绝对路径（webUtils） */

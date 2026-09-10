@@ -113,6 +113,23 @@ console.log('传输任务:', JSON.stringify(task))
 check('拖放产生了上传任务', !!task, JSON.stringify(task))
 check('上传成功（状态 done、无错误）', task?.status === 'done' && !task?.error, JSON.stringify(task))
 
+/*
+ * 传输面板不许压在文件列表上。
+ *
+ * 它原来是绝对定位浮在右下角的，而 SFTP 面板正好在右侧 —— 传完文件后
+ * 列表底部那些行就被盖住，双击、悬停、拖拽全部失效，还看不出是被谁挡的。
+ * 这里量两者的矩形交叠面积，必须是 0。
+ */
+const overlap = await win.evaluate(() => {
+  const panel = document.querySelector('.transfer-panel')?.getBoundingClientRect()
+  const list = document.querySelector('.explorer')?.getBoundingClientRect()
+  if (!panel || !list) return { missing: true }
+  const w = Math.max(0, Math.min(panel.right, list.right) - Math.max(panel.left, list.left))
+  const h = Math.max(0, Math.min(panel.bottom, list.bottom) - Math.max(panel.top, list.top))
+  return { area: Math.round(w * h) }
+})
+check('传输面板与文件列表零重叠', overlap.area === 0, JSON.stringify(overlap))
+
 // ---------- 远端确实多出这个文件 ----------
 await win.locator('.toolbar button[title="刷新"]').click()
 await win.waitForTimeout(1800)

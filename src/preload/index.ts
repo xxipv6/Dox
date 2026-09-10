@@ -66,6 +66,9 @@ const api: DoxApi = {
   sftpReadText: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpReadText, sessionId, path),
   sftpWriteText: (sessionId, path, content, expectedMtime) =>
     ipcRenderer.invoke(IpcChannels.sftpWriteText, sessionId, path, content, expectedMtime),
+  sftpStartDrag: (sessionId, remotePath, fileName) =>
+    ipcRenderer.invoke(IpcChannels.sftpStartDrag, sessionId, remotePath, fileName),
+  sftpCancelDrag: (sessionId) => ipcRenderer.invoke(IpcChannels.sftpCancelDrag, sessionId),
 
   // ---- 传输队列 ----
   pickUpload: (sessionId, remoteDir) =>
@@ -79,6 +82,7 @@ const api: DoxApi = {
   listTransfers: () => ipcRenderer.invoke(IpcChannels.transferList),
   cancelTransfer: (id) => ipcRenderer.invoke(IpcChannels.transferCancel, id),
   clearFinishedTransfers: () => ipcRenderer.invoke(IpcChannels.transferClearFinished),
+  cancelAllTransfers: () => ipcRenderer.invoke(IpcChannels.transferCancelAll),
   onTransferUpdate: (cb) => {
     const listener = (_e: IpcRendererEvent, tasks: TransferTask[]): void => cb(tasks)
     ipcRenderer.on(IpcChannels.transferUpdate, listener)

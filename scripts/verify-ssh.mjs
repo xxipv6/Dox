@@ -7,7 +7,13 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { Client } = require('ssh2')
 
-const host = process.argv[2] ?? 'example.com'
+// 不再硬编码测试主机：公开仓库里写死自己的服务器地址，等于公开
+// 「这台机器开着 22 端口」，改用参数或环境变量传入。
+const host = process.argv[2] ?? process.env.DOX_TEST_HOST
+if (!host) {
+  console.error('用法: node scripts/verify-ssh.mjs <host> [port] [user]，或设置 DOX_TEST_HOST')
+  process.exit(2)
+}
 const port = Number(process.argv[3] ?? 22)
 const username = process.argv[4] ?? 'root'
 

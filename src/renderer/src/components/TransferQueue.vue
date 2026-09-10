@@ -45,6 +45,19 @@ function progress(t: TransferTask): number {
     <div class="panel-header" @click="collapsed = !collapsed">
       <span>传输队列<template v-if="activeCount">（{{ activeCount }} 进行中）</template></span>
       <span class="header-actions">
+        <!--
+          文件夹传输会展开成成百上千条任务，逐条点 × 既点不完也点不过来，
+          而且目录遍历还在继续吐新任务 —— 取消掉的总会被补上。这里给一个
+          总开关：停掉全部任务，并中断还在跑的目录遍历。
+        -->
+        <button
+          v-if="activeCount"
+          class="icon-btn danger"
+          title="全部取消"
+          @click.stop="api.cancelAllTransfers()"
+        >
+          <Icon name="x" />
+        </button>
         <button class="icon-btn" title="清除已完成" @click.stop="api.clearFinishedTransfers()">
           <Icon name="check-square" />
         </button>
@@ -86,32 +99,36 @@ function progress(t: TransferTask): number {
           class="icon-btn"
           title="取消"
           @click="api.cancelTransfer(task.id)"
-        >×</button>
+        ><Icon name="x" :size="12" /></button>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+/*
+ * 底部停靠，不再浮在内容上面。
+ *
+ * 原先是 position: absolute; right/bottom: 12px; width: 420px; z-index: 10 ——
+ * 而 SFTP 面板就在右侧 360px 处，于是队列一出现就把文件列表底部几十行盖住，
+ * 那些行双击、悬停、拖拽全部失效，而且看不出是被谁挡的。
+ * 现在它占自己的一条高度（折叠时只有标题栏），谁都不遮。
+ */
 .transfer-panel {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  width: 420px;
-  max-width: 60%;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #2a2b3d;
   background: #16161e;
-  border: 1px solid #2a2b3d;
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  z-index: 10;
-  overflow: hidden;
+  max-height: 40%;
 }
 .panel-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 12px;
-  font-size: 13px;
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 12px;
   cursor: pointer;
   background: #1f2335;
 }
@@ -119,8 +136,10 @@ function progress(t: TransferTask): number {
   display: flex;
   gap: 4px;
 }
+/* 占满面板剩余高度，上限由 .transfer-panel 的 max-height 控制 */
 .task-list {
-  max-height: 220px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 .more-hint {
@@ -129,6 +148,13 @@ function progress(t: TransferTask): number {
   color: #565f89;
   border-bottom: 1px solid #1f2335;
 }
+/*
+ * 任务行限宽。
+ *
+ * 面板改成全宽底部停靠后，一行会横跨整个窗口宽 —— 4px 的进度条被拉成
+ * 一整屏的细线，右端的「完成 · 20.0 MB/20.0 MB」离文件名将近一米远，
+ * 完全看不出是一件事。限到 720px 后就还是一行正常的列表项。
+ */
 .task {
   display: flex;
   align-items: center;
@@ -136,6 +162,7 @@ function progress(t: TransferTask): number {
   padding: 6px 12px;
   font-size: 12px;
   border-top: 1px solid #1f2335;
+  max-width: 720px;
 }
 .direction {
   flex-shrink: 0;
@@ -152,9 +179,9 @@ function progress(t: TransferTask): number {
   margin-bottom: 4px;
 }
 .progress-track {
-  height: 4px;
+  height: 6px;
   background: #2a2b3d;
-  border-radius: 2px;
+  border-radius: 3px;
   overflow: hidden;
 }
 .progress-bar {
