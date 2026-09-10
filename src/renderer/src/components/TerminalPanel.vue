@@ -157,8 +157,7 @@ onMounted(() => {
     cursorBlink: true,
     fontSize: settings.fontSize,
     fontFamily: settings.fontFamily,
-    // 连字只有 DOM 渲染器能做（WebGL 逐字形绘制），见下方 renderer 选择
-    lineHeight: 1.2,
+    // 不设 lineHeight：非 1 的行高会改变 fit() 的行数计算，属于未验证的渲染风险
     scrollback: 10000,
     theme: settings.currentPreset.theme,
     allowProposedApi: true
