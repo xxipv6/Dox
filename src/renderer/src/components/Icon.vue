@@ -16,7 +16,7 @@ export type IconName =
   | 'folder' | 'folder-plus' | 'file' | 'link'
   | 'upload' | 'download' | 'follow' | 'paste' | 'terminal' | 'server'
   | 'split-right' | 'split-down' | 'panel-left'
-  | 'key' | 'alert' | 'settings'
+  | 'key' | 'alert' | 'settings' | 'sun' | 'moon' | 'box' | 'zap'
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 14 })
 
@@ -81,7 +81,23 @@ const PATHS: Record<IconName, string[]> = {
   settings: [
     'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
     'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z'
-  ]
+  ],
+
+  // 主题切换按钮：显示的是**当前**主题，点一下切到另一个
+  sun: [
+    'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z',
+    'M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4'
+  ],
+  moon: ['M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'],
+
+  // 容器：一个立方体
+  box: [
+    'M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8z',
+    'M3.3 7L12 12l8.7-5',
+    'M12 22V12'
+  ],
+  // 快捷命令：闪电
+  zap: ['M13 2 3 14h9l-1 8 10-12h-9l1-8z']
 }
 
 const paths = computed(() => PATHS[props.name] ?? [])

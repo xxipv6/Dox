@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import type { CommandSnippet } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
 import Icon from './Icon.vue'
+import SidebarSection from './SidebarSection.vue'
 
 const api = window.api
 const store = useSessionStore()
 
 const snippets = ref<CommandSnippet[]>([])
+
+/** 收起状态下也能一眼看出存了几条 */
+const badge = computed(() => (snippets.value.length ? String(snippets.value.length) : undefined))
 const formVisible = ref(false)
 const editingId = ref<string | null>(null)
 const form = reactive({ name: '', command: '' })
@@ -63,17 +67,18 @@ async function remove(s: CommandSnippet): Promise<void> {
 </script>
 
 <template>
-  <div class="section-title">
-    快捷命令
-    <button
-      class="icon-btn"
-      :title="formVisible ? '收起' : '新建片段'"
-      @click="
-        formVisible = !formVisible;
-        if (!formVisible) resetForm()
-      "
-    ><Icon :name="formVisible ? 'minus' : 'plus'" :size="15" /></button>
-  </div>
+  <SidebarSection title="快捷命令" icon="zap" :badge="badge">
+    <template #actions>
+      <button
+        class="icon-btn"
+        :title="formVisible ? '收起' : '新建片段'"
+        @click="
+          formVisible = !formVisible;
+          if (!formVisible) resetForm()
+        "
+      ><Icon :name="formVisible ? 'minus' : 'plus'" :size="15" /></button>
+    </template>
+
 
   <div v-if="formVisible" class="snippet-form">
     <input v-model="form.name" placeholder="名称（可留空）" />
@@ -110,18 +115,10 @@ async function remove(s: CommandSnippet): Promise<void> {
       <button class="icon-btn danger" title="删除" @click="remove(s)"><Icon name="x" /></button>
     </span>
   </div>
+  </SidebarSection>
 </template>
 
 <style scoped>
-.section-title {
-  font-size: 12px;
-  color: #565f89;
-  margin: 12px 0 6px;
-  text-transform: uppercase;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
 .snippet-form {
   display: flex;
   flex-direction: column;
@@ -130,33 +127,33 @@ async function remove(s: CommandSnippet): Promise<void> {
 }
 .snippet-form input,
 .snippet-form textarea {
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 6px;
-  color: #c0caf5;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
   padding: 7px 10px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   outline: none;
   font-family: Consolas, monospace;
   resize: vertical;
 }
 .snippet-form input:focus,
 .snippet-form textarea:focus {
-  border-color: #7aa2f7;
+  border-color: var(--accent-text);
 }
 .btn {
   padding: 6px 0;
-  border-radius: 6px;
-  border: 1px solid #2a2b3d;
-  background: #1f2335;
-  color: #c0caf5;
-  font-size: 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--fg);
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 .btn.primary {
-  background: #7aa2f7;
-  border-color: #7aa2f7;
-  color: #16161e;
+  background: var(--accent-text);
+  border-color: var(--accent-text);
+  color: var(--bg-panel);
   font-weight: 600;
 }
 .btn:disabled {
@@ -164,8 +161,8 @@ async function remove(s: CommandSnippet): Promise<void> {
   cursor: not-allowed;
 }
 .empty-hint {
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   padding: 4px 2px;
 }
 .snippet {
@@ -173,11 +170,11 @@ async function remove(s: CommandSnippet): Promise<void> {
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
 }
 .snippet:hover {
-  background: #1f2335;
+  background: var(--bg-hover);
 }
 .snippet-name {
   flex: 1;

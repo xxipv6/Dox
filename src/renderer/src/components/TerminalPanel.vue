@@ -7,6 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
+import { isPlainSshId } from '@shared/sessionId'
 import { useSettingsStore } from '../stores/settings'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
 import Icon from './Icon.vue'
@@ -360,8 +361,14 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => safeFit())
   resizeObserver.observe(container.value!)
 
-  // SSH 会话：主动取一次 home 作为相对路径基准；本地终端不需要
-  if (!props.sessionId.startsWith('local-')) {
+  /*
+   * 只有宿主机 SSH 会话才取 home 作为相对路径基准。
+   * 本地终端没有 SFTP；容器终端也没有 —— 它的会话 id 落在父 SSH 连接上，
+   * 真去调 sftpRealpath 会拿到**宿主机**的家目录，那是错的。
+   * 这里刻意用正向判断而不是 `!startsWith('local-')`：后者在会话类型变多之后
+   * 会静默改变含义。
+   */
+  if (isPlainSshId(props.sessionId)) {
     void window.api
       .sftpRealpath(props.sessionId, '.')
       .then((home) => {
@@ -385,9 +392,15 @@ onBeforeUnmount(() => {
   term?.dispose()
 })
 
-// 配色 / 字号 / 字体变化时实时应用（连字开关需重建渲染器，提示重开标签）
+/*
+ * 配色 / 字号 / 字体变化时实时应用（连字开关需重建渲染器，提示重开标签）。
+ *
+ * 第一个依赖是 currentPreset 而不是 themeId：themeId 是 'auto'（跟随界面）时，
+ * 用户切界面深浅并不会改 themeId，但 currentPreset 会由亮色终端换成暗色终端 ——
+ * 盯 themeId 的话终端就不跟着变了，正是「白界面配黑终端」的来源。
+ */
 watch(
-  () => [settings.themeId, settings.fontSize, settings.fontId],
+  () => [settings.currentPreset, settings.fontSize, settings.fontId],
   () => {
     if (!term) return
     term.options.theme = settings.currentPreset.theme
@@ -408,7 +421,17 @@ defineExpose({ refitAndFocus })
 
 <template>
   <div class="terminal-wrap">
-    <div ref="container" class="terminal-container" @contextmenu.prevent="openMenu"></div>
+    <!--
+      底色跟着**终端配色**走而不是 chrome 的 --bg-panel：xterm 只画自己那块画布，
+      四周的留白是这层 div 的背景。两者不一致时终端边上会露出一圈对不上的色边
+      （原先靠写死的深色恰好蒙对，换成浅色主题就露馅）。
+    -->
+    <div
+      ref="container"
+      class="terminal-container"
+      :style="{ background: settings.currentPreset.theme.background }"
+      @contextmenu.prevent="openMenu"
+    ></div>
 
     <!-- 断线重连状态条：重连期间一直挂着，随时可以停下 -->
     <div v-if="reconnect" class="reconnect-bar">
@@ -470,10 +493,10 @@ defineExpose({ refitAndFocus })
   align-items: center;
   gap: 8px;
   padding: 4px 10px;
-  font-size: 12px;
-  color: #e0af68;
-  background: rgba(224, 175, 104, 0.12);
-  border-bottom: 1px solid rgba(224, 175, 104, 0.35);
+  font-size: var(--fs-sm);
+  color: var(--warning-text);
+  background: var(--warning-soft);
+  border-bottom: 1px solid var(--warning-border);
 }
 .reconnect-text {
   overflow: hidden;
@@ -485,22 +508,22 @@ defineExpose({ refitAndFocus })
 }
 .reconnect-bar button {
   background: none;
-  border: 1px solid rgba(224, 175, 104, 0.5);
-  border-radius: 4px;
-  color: #e0af68;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--r-xs);
+  color: var(--warning-text);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   padding: 1px 8px;
   flex-shrink: 0;
 }
 .reconnect-bar button:hover {
-  background: rgba(224, 175, 104, 0.18);
+  background: var(--warning-soft);
 }
 .pulse {
   width: 7px;
   height: 7px;
-  border-radius: 50%;
-  background: #e0af68;
+  border-radius: var(--r-pill);
+  background: var(--warning-text);
   flex-shrink: 0;
   animation: reconnect-pulse 1s infinite alternate;
 }
@@ -519,48 +542,48 @@ defineExpose({ refitAndFocus })
   display: flex;
   gap: 4px;
   padding: 6px;
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
   z-index: 5;
 }
 .search-bar input {
-  background: #16161e;
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  color: #c0caf5;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  color: var(--fg);
   padding: 4px 8px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   width: 180px;
   outline: none;
 }
 .search-bar input:focus {
-  border-color: #7aa2f7;
+  border-color: var(--accent-text);
 }
 .search-bar button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: none;
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  color: #565f89;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  color: var(--fg-muted);
   cursor: pointer;
   padding: 4px 8px;
 }
 .search-bar button:hover {
-  color: #c0caf5;
+  color: var(--fg);
 }
 .context-menu {
   position: fixed;
   z-index: 50;
   min-width: 180px;
   padding: 4px;
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 8px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
 }
@@ -571,22 +594,22 @@ defineExpose({ refitAndFocus })
   gap: 16px;
   background: none;
   border: none;
-  border-radius: 5px;
-  color: #c0caf5;
-  font-size: 13px;
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-size: var(--fs-md);
   text-align: left;
   padding: 6px 10px;
   cursor: pointer;
 }
 .context-menu button:hover:not(:disabled) {
-  background: #2a2b3d;
+  background: var(--border);
 }
 .context-menu button:disabled {
   opacity: 0.35;
   cursor: default;
 }
 .hint {
-  color: #565f89;
-  font-size: 11px;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
 }
 </style>

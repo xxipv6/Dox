@@ -1,6 +1,8 @@
 import type {
   AppSettings,
   CommandSnippet,
+  ContainerProbeResult,
+  DownloadRequest,
   DroppedFile,
   FileEntry,
   ForwardRule,
@@ -85,16 +87,31 @@ export interface DoxApi {
     content: string,
     expectedMtime?: number
   ): Promise<number>
+
+  // ---- 容器（Docker / Podman）----
   /**
-   * 拖出到资源管理器。
+   * 只读探测有哪些运行中的容器。
+   * 「没装 docker」「没权限」是预期内的状态，用 reason 返回而不是抛错。
+   * 只跑 `docker ps`，两侧都不安装任何东西。
    *
-   * 远端文件会先完整下载到本地临时目录（操作系统的拖放协议只认真实文件路径），
-   * 然后由主进程发起原生拖拽。目录与超限文件会抛错。
-   * 调用方必须在 dragstart 里 preventDefault，否则会和 HTML5 默认拖拽打架。
+   * `parentSessionId` 有三种取值：真实 SSH 会话 id（列那台机器上的）、
+   * `LOCAL_CONTAINER_TARGET`（列**本机**的）、以及 null（没有可列的目标）。
    */
-  sftpStartDrag(sessionId: string, remotePath: string, fileName: string): Promise<void>
-  /** 中止该会话正在进行的拖出准备，丢弃已拉取的半截临时文件 */
-  sftpCancelDrag(sessionId: string): Promise<void>
+  listContainers(parentSessionId: string): Promise<ContainerProbeResult>
+  /**
+   * 进入容器，返回 `container-` 前缀的会话 id；之后的输入/resize/断开走通用通道。
+   *
+   * 承载方式由 `parentSessionId` 决定：真实会话 id → 在**那条 SSH 连接**上开一条
+   * `docker exec` 通道；`LOCAL_CONTAINER_TARGET` → 在本机起一个 pty 跑
+   * `docker exec -it`。对渲染层来说两者没有区别。
+   *
+   * 容器名的字符集在主进程校验，shell 也由主进程解析，渲染层传的只是名字。
+   */
+  connectContainer(
+    parentSessionId: string,
+    containerName: string,
+    term: TermSize
+  ): Promise<string>
 
   // ---- 传输队列 ----
   /** 弹出本地文件选择框，选中文件上传到 remoteDir */
@@ -105,6 +122,11 @@ export interface DoxApi {
   download(sessionId: string, remotePath: string, fileName: string): Promise<TransferTask | null>
   /** 弹出目录选择框后递归下载远端文件夹；用户取消时返回空数组 */
   downloadDir(sessionId: string, remotePath: string): Promise<TransferTask[]>
+  /**
+   * 批量下载。只弹一次目录选择框，把每一项都放进所选目录 ——
+   * 选中十项弹十次保存框是没法用的。用户取消时返回空数组。
+   */
+  downloadMany(sessionId: string, items: DownloadRequest[]): Promise<TransferTask[]>
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>
   clearFinishedTransfers(): Promise<void>

@@ -4,11 +4,15 @@ import type { ForwardRule } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
+import SidebarSection from './SidebarSection.vue'
 
 const api = window.api
 const store = useSessionStore()
 
 const rules = ref<ForwardRule[]>([])
+
+/** 收起状态下也能一眼看出有几条规则在跑，不用展开去数 */
+const badge = computed(() => (rules.value.length ? String(rules.value.length) : undefined))
 const formVisible = ref(false)
 const form = reactive({
   type: 'local' as 'local' | 'remote',
@@ -79,15 +83,15 @@ const statusText: Record<ForwardRule['status'], string> = {
 </script>
 
 <template>
-  <div class="section-title">
-    端口转发
-    <button
-      v-if="store.activeSessionId"
-      class="icon-btn"
-      :title="formVisible ? '收起' : '添加转发'"
-      @click="formVisible = !formVisible"
-    ><Icon :name="formVisible ? 'minus' : 'plus'" :size="15" /></button>
-  </div>
+  <SidebarSection title="端口转发" icon="link" :badge="badge">
+    <template #actions>
+      <button
+        v-if="store.activeSessionId"
+        class="icon-btn"
+        :title="formVisible ? '收起' : '添加转发'"
+        @click="formVisible = !formVisible"
+      ><Icon :name="formVisible ? 'minus' : 'plus'" :size="15" /></button>
+    </template>
 
   <div v-if="formVisible" class="forward-form">
     <div class="form-row type-switch">
@@ -126,18 +130,10 @@ const statusText: Record<ForwardRule['status'], string> = {
       <Icon name="x" />
     </button>
   </div>
+  </SidebarSection>
 </template>
 
 <style scoped>
-.section-title {
-  font-size: 12px;
-  color: #565f89;
-  margin: 12px 0 6px;
-  text-transform: uppercase;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
 .forward-form {
   display: flex;
   flex-direction: column;
@@ -151,12 +147,12 @@ const statusText: Record<ForwardRule['status'], string> = {
 .form-row input {
   flex: 1;
   min-width: 0;
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 6px;
-  color: #c0caf5;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
   padding: 6px 8px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   outline: none;
 }
 .port-input {
@@ -166,48 +162,48 @@ const statusText: Record<ForwardRule['status'], string> = {
   flex: 1;
   text-align: center;
   padding: 5px 0;
-  border-radius: 6px;
-  font-size: 12px;
-  color: #565f89;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   cursor: pointer;
-  border: 1px solid #2a2b3d;
+  border: 1px solid var(--border);
 }
 .type-switch label.active {
-  color: #7aa2f7;
-  border-color: #7aa2f7;
+  color: var(--accent-text);
+  border-color: var(--accent-text);
 }
 .type-switch input {
   display: none;
 }
 .form-hint {
-  font-size: 11px;
-  color: #565f89;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
   margin: 0;
 }
 .form-error {
-  font-size: 11px;
-  color: #f7768e;
+  font-size: var(--fs-xs);
+  color: var(--danger-text);
   margin: 0;
   word-break: break-all;
 }
 .btn {
   padding: 6px 0;
-  border-radius: 6px;
-  border: 1px solid #2a2b3d;
-  background: #1f2335;
-  color: #c0caf5;
-  font-size: 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--fg);
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 .btn.primary {
-  background: #7aa2f7;
-  border-color: #7aa2f7;
-  color: #16161e;
+  background: var(--accent-text);
+  border-color: var(--accent-text);
+  color: var(--bg-panel);
   font-weight: 600;
 }
 .empty-hint {
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   padding: 4px 2px;
 }
 .rule {
@@ -215,11 +211,11 @@ const statusText: Record<ForwardRule['status'], string> = {
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
 }
 .rule:hover {
-  background: #1f2335;
+  background: var(--bg-hover);
 }
 .rule.inactive {
   opacity: 0.45;
@@ -227,21 +223,21 @@ const statusText: Record<ForwardRule['status'], string> = {
 .rule-type {
   width: 18px;
   height: 18px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   flex-shrink: 0;
 }
 .rule-type.local {
-  background: rgba(122, 162, 247, 0.15);
-  color: #7aa2f7;
+  background: var(--accent-soft);
+  color: var(--accent-text);
 }
 .rule-type.remote {
-  background: rgba(158, 206, 106, 0.15);
-  color: #9ece6a;
+  background: var(--success-soft);
+  color: var(--success-text);
 }
 .rule-desc {
   flex: 1;
@@ -251,16 +247,16 @@ const statusText: Record<ForwardRule['status'], string> = {
   font-family: Consolas, monospace;
 }
 .rule-status {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   flex-shrink: 0;
 }
 .rule-status.active {
-  color: #9ece6a;
+  color: var(--success-text);
 }
 .rule-status.error {
-  color: #f7768e;
+  color: var(--danger-text);
 }
 .rule-status.stopped {
-  color: #565f89;
+  color: var(--fg-muted);
 }
 </style>

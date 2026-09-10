@@ -4,8 +4,10 @@ import { useSessionStore } from '../stores/sessions'
 import { useSettingsStore } from '../stores/settings'
 import DeviceDialog from './DeviceDialog.vue'
 import Icon from './Icon.vue'
+import SidebarSection from './SidebarSection.vue'
 import ForwardPanel from './ForwardPanel.vue'
 import SnippetPanel from './SnippetPanel.vue'
+import ContainerPanel from './ContainerPanel.vue'
 import type { SavedSession } from '@shared/types'
 
 const store = useSessionStore()
@@ -14,8 +16,6 @@ const settings = useSettingsStore()
 const collapsed = ref(false)
 const dialogVisible = ref(false)
 const editing = ref<SavedSession | null>(null)
-/** 展开显示端口转发 / 快捷命令等次级面板 */
-const showTools = ref(false)
 
 onMounted(() => store.refreshSaved())
 
@@ -61,6 +61,17 @@ async function remove(s: SavedSession): Promise<void> {
     <div class="sidebar-header">
       <span v-if="!collapsed" class="logo">Dox</span>
       <span class="header-actions">
+        <!--
+          主题一键切。图标显示的是**将要切到**的目标（当前是亮色就显示月亮），
+          和标题文案一致，不会出现「点太阳结果变亮了」这种歧义。
+        -->
+        <button
+          class="icon-btn theme-toggle"
+          :title="settings.resolvedTheme === 'dark' ? '切换到亮色主题' : '切换到深色主题'"
+          @click="settings.toggleTheme()"
+        >
+          <Icon :name="settings.resolvedTheme === 'dark' ? 'sun' : 'moon'" :size="16" />
+        </button>
         <button v-if="!collapsed" class="icon-btn" title="设置" @click="settings.openDialog()">
           <Icon name="settings" :size="16" />
         </button>
@@ -70,61 +81,60 @@ async function remove(s: SavedSession): Promise<void> {
       </span>
     </div>
 
-    <template v-if="!collapsed">
-      <!-- 设备列表 -->
-      <div class="section-title">
-        设备
-        <button class="icon-btn add-btn" title="添加设备" @click="openAdd">
-          <Icon name="plus" :size="15" />
-        </button>
-      </div>
+    <div v-if="!collapsed" class="sidebar-body">
+      <!--
+        侧栏只保留一种标题形状（SidebarSection）：可点的行 + 图标 + 箭头。
+        原先是一个「工具」大标题下面并排三个同级小标题，四行字视觉重量差不多，
+        分不清哪层是分组哪层是内容 —— 现在层级由折叠表达。
+      -->
+      <SidebarSection title="设备" icon="server" :open="true">
+        <template #actions>
+          <button class="icon-btn" title="添加设备" @click="openAdd">
+            <Icon name="plus" :size="15" />
+          </button>
+        </template>
 
-      <div class="device-list">
-        <div v-if="!store.savedSessions.length" class="empty-hint">
-          还没有设备，点右上角 ＋ 添加
-        </div>
-        <div
-          v-for="s in store.savedSessions"
-          :key="s.id"
-          class="device"
-          :title="`${s.username}@${s.host}:${s.port} — 双击连接`"
-          @dblclick="store.connectSaved(s)"
-        >
-          <Icon class="device-icon" name="server" :size="15" />
-          <span class="device-info">
-            <span class="device-name">
-              <span v-if="s.jumpHostId" class="jump-badge" title="经跳板机连接">
-                <Icon name="link" :size="12" />
-              </span>{{ s.name }}
+        <div class="device-list">
+          <div v-if="!store.savedSessions.length" class="empty-hint">
+            还没有设备，点右侧 ＋ 添加
+          </div>
+          <div
+            v-for="s in store.savedSessions"
+            :key="s.id"
+            class="device"
+            :title="`${s.username}@${s.host}:${s.port} — 双击连接`"
+            @dblclick="store.connectSaved(s)"
+          >
+            <Icon class="device-icon" name="server" :size="15" />
+            <span class="device-info">
+              <span class="device-name">
+                <span v-if="s.jumpHostId" class="jump-badge" title="经跳板机连接">
+                  <Icon name="link" :size="12" />
+                </span>{{ s.name }}
+              </span>
+              <span class="device-host">{{ s.username }}@{{ s.host }}:{{ s.port }}</span>
             </span>
-            <span class="device-host">{{ s.username }}@{{ s.host }}:{{ s.port }}</span>
-          </span>
-          <!-- 同时拦截 click 与 dblclick：只 stop click 的话，连点两下 × 会
-               触发整行的 dblclick（去连接），看起来就像「删除没反应」 -->
-          <span class="device-actions" @dblclick.stop>
-            <button class="icon-btn" title="连接" @click.stop="store.connectSaved(s)">
-              <Icon name="play" />
-            </button>
-            <button class="icon-btn" title="编辑" @click.stop="openEdit(s)">
-              <Icon name="pencil" />
-            </button>
-            <button class="icon-btn danger" title="删除" @click.stop="remove(s)">
-              <Icon name="x" />
-            </button>
-          </span>
+            <!-- 同时拦截 click 与 dblclick：只 stop click 的话，连点两下 × 会
+                 触发整行的 dblclick（去连接），看起来就像「删除没反应」 -->
+            <span class="device-actions" @dblclick.stop>
+              <button class="icon-btn" title="连接" @click.stop="store.connectSaved(s)">
+                <Icon name="play" />
+              </button>
+              <button class="icon-btn" title="编辑" @click.stop="openEdit(s)">
+                <Icon name="pencil" />
+              </button>
+              <button class="icon-btn danger" title="删除" @click.stop="remove(s)">
+                <Icon name="x" />
+              </button>
+            </span>
+          </div>
         </div>
-      </div>
+      </SidebarSection>
 
-      <!-- 次级工具面板 -->
-      <div class="section-title tools-toggle" @click="showTools = !showTools">
-        工具
-        <Icon class="chevron" :name="showTools ? 'chevron-down' : 'chevron-right'" :size="14" />
-      </div>
-      <template v-if="showTools">
-        <ForwardPanel />
-        <SnippetPanel />
-      </template>
-    </template>
+      <ForwardPanel />
+      <ContainerPanel />
+      <SnippetPanel />
+    </div>
 
     <DeviceDialog
       :visible="dialogVisible"
@@ -137,70 +147,77 @@ async function remove(s: SavedSession): Promise<void> {
 
 <style scoped>
 .sidebar {
-  width: 260px;
+  width: 264px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: #16161e;
-  border-right: 1px solid #2a2b3d;
-  padding: 8px;
-  overflow-y: auto;
-  transition: width 0.15s;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  transition: width var(--dur-slow) var(--ease-out);
 }
 .sidebar.collapsed {
-  width: 40px;
+  width: 44px;
   align-items: center;
 }
+/*
+ * 应用标题栏：固定高度 + 下边框，和下面的内容切成两块。
+ * 原来是整条侧栏一起滚 —— 内容一长，「Dox」和那几个按钮就滚没了，
+ * 想切主题还得先滚回顶部。标题栏现在不参与滚动。
+ */
 .sidebar-header {
+  flex-shrink: 0;
+  height: 48px;
+  padding: 0 var(--sp-2) 0 var(--sp-3);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.sidebar.collapsed .sidebar-header {
+  height: auto;
+  padding: var(--sp-2) 0;
+  border-bottom: none;
+  flex-direction: column;
+  gap: var(--sp-1);
 }
 .header-actions {
   display: flex;
+  align-items: center;
   gap: 2px;
 }
 .logo {
-  font-weight: 700;
-  font-size: 16px;
-  color: #7aa2f7;
+  font-weight: var(--fw-semibold);
+  font-size: var(--fs-lg);
+  letter-spacing: -0.01em;
+  color: var(--accent-text);
 }
-.section-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 12px;
-  color: #565f89;
-  margin: 8px 0 6px;
-  text-transform: uppercase;
-}
-/* 全局 .icon-btn:hover 要能生效，这里不能加 !important 把颜色锁死 */
-.add-btn {
-  color: #7aa2f7;
-}
-.add-btn:hover {
-  color: #9ab8ff;
+/* 滚动只发生在这一层 */
+.sidebar-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-3) var(--sp-2) var(--sp-2);
 }
 .device-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 .device {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  gap: var(--sp-2);
+  padding: 7px var(--sp-2);
+  border-radius: var(--r-md);
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
 }
 .device:hover {
-  background: #1f2335;
+  background: var(--bg-hover);
 }
 .device-icon {
-  color: #565f89;
+  color: var(--fg-muted);
   flex-shrink: 0;
 }
 .device-info {
@@ -208,16 +225,18 @@ async function remove(s: SavedSession): Promise<void> {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 1px;
 }
 .device-name {
-  font-size: 13px;
+  font-size: var(--fs-md);
+  color: var(--fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .device-host {
-  font-size: 11px;
-  color: #565f89;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -225,8 +244,8 @@ async function remove(s: SavedSession): Promise<void> {
 .jump-badge {
   display: inline-flex;
   vertical-align: -2px;
-  margin-right: 4px;
-  color: #7aa2f7;
+  margin-right: var(--sp-1);
+  color: var(--accent-text);
 }
 /*
  * 同 FileExplorer：绝对定位悬浮，不用 visibility —— 后者只是不画出来，
@@ -238,26 +257,17 @@ async function remove(s: SavedSession): Promise<void> {
   right: 5px;
   top: 50%;
   transform: translateY(-50%);
-  padding-left: 8px;
-  background: #1f2335;
-  box-shadow: -8px 0 8px #1f2335;
+  padding-left: var(--sp-2);
+  background: var(--bg-hover);
+  box-shadow: -8px 0 8px var(--bg-hover);
 }
 .device:hover .device-actions {
   display: flex;
 }
-.tools-toggle {
-  cursor: pointer;
-  border-top: 1px solid #2a2b3d;
-  padding-top: 10px;
-  margin-top: 12px;
-}
-.chevron {
-  color: #565f89;
-}
 .empty-hint {
-  font-size: 12px;
-  color: #565f89;
-  padding: 8px 4px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  padding: var(--sp-2);
   line-height: 1.6;
 }
 </style>

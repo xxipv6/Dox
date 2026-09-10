@@ -9,7 +9,6 @@ directories:
 files:
   - out/**
   - package.json
-  # 拖出到资源管理器时用做拖拽图标，运行时按 asar 路径读
   - build/icon.png
 
 asar: true

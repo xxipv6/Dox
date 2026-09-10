@@ -6,11 +6,91 @@ export interface TerminalThemePreset {
   theme: ITheme
 }
 
-/** 终端配色预设（UI 整体配色保持深色，主题化在后续版本） */
+/**
+ * 「跟随界面主题」哨兵值。
+ *
+ * 它**不是**一个预设，所以不在 TERMINAL_THEMES 里 —— 界面切到亮色时它解析成
+ * sky-light，切到深色时解析成 midnight-slate。把它混进预设数组会让设置弹窗
+ * 多出一个没有自己配色的选项，点上去那个色板小方块也无从渲染。
+ */
+export const AUTO_THEME_ID = 'auto'
+
+/** auto 在两套界面主题下分别落到哪个预设 */
+const AUTO_PAIRS: Record<'light' | 'dark', string> = {
+  light: 'sky-light',
+  dark: 'midnight-slate'
+}
+
+/**
+ * 选择终端配色。
+ *
+ * 前两套（sky-light / midnight-slate）与界面主题同源，是 auto 的落点；
+ * 后面五套是经典配色，**原样保留**作为手动覆盖 —— 老用户的选择不该被
+ * 静默改掉，哪怕界面已经换了皮。
+ */
 export const TERMINAL_THEMES: TerminalThemePreset[] = [
   {
+    id: 'sky-light',
+    name: '晴空（跟随界面·亮）',
+    theme: {
+      background: '#ffffff',
+      foreground: '#1e293b',
+      cursor: '#0ea5e9',
+      cursorAccent: '#ffffff',
+      // 比 --accent-soft 稍重一点：选中色是要压在白色上的，太淡会看不见。
+      // selectionForeground 必须显式给：xterm 不设时自己算，浅底 + 浅前景会算出
+      // 几乎看不清的字
+      selectionBackground: '#d6edfb',
+      selectionForeground: '#1e293b',
+      black: '#24292f',
+      red: '#cf222e',
+      green: '#1a7f37',
+      yellow: '#9a6700',
+      blue: '#0969da',
+      magenta: '#8250df',
+      cyan: '#1b7c83',
+      white: '#6e7781',
+      brightBlack: '#57606a',
+      brightRed: '#a40e26',
+      brightGreen: '#116329',
+      brightYellow: '#7d4e00',
+      brightBlue: '#0ea5e9',
+      brightMagenta: '#a475f9',
+      brightCyan: '#0e7490',
+      brightWhite: '#8c959f'
+    }
+  },
+  {
+    id: 'midnight-slate',
+    name: '冷夜（跟随界面·暗）',
+    theme: {
+      background: '#0b1220',
+      foreground: '#e2e8f0',
+      cursor: '#38bdf8',
+      cursorAccent: '#0b1220',
+      selectionBackground: '#1e3a5f',
+      selectionForeground: '#e2e8f0',
+      black: '#1e293b',
+      red: '#f87171',
+      green: '#34d399',
+      yellow: '#fbbf24',
+      blue: '#38bdf8',
+      magenta: '#c084fc',
+      cyan: '#22d3ee',
+      white: '#cbd5e1',
+      brightBlack: '#475569',
+      brightRed: '#fca5a5',
+      brightGreen: '#6ee7b7',
+      brightYellow: '#fcd34d',
+      brightBlue: '#7dd3fc',
+      brightMagenta: '#d8b4fe',
+      brightCyan: '#67e8f9',
+      brightWhite: '#f1f5f9'
+    }
+  },
+  {
     id: 'tokyo-night',
-    name: 'Tokyo Night（默认）',
+    name: 'Tokyo Night',
     theme: {
       background: '#1a1b26',
       foreground: '#c0caf5',
@@ -128,7 +208,9 @@ export const TERMINAL_THEMES: TerminalThemePreset[] = [
       blue: '#4078f2',
       magenta: '#a626a4',
       cyan: '#0184bc',
-      white: '#fafafa',
+      // 原来是 #fafafa —— 压在白底上等于隐身，任何用 ANSI 白输出文字的程序
+      // 都变成一片空白。浅色底的主题里 white 本来就该映射成中灰。
+      white: '#6e7781',
       brightBlack: '#696c77',
       brightRed: '#e45649',
       brightGreen: '#50a14f',
@@ -136,11 +218,29 @@ export const TERMINAL_THEMES: TerminalThemePreset[] = [
       brightBlue: '#4078f2',
       brightMagenta: '#a626a4',
       brightCyan: '#0184bc',
-      brightWhite: '#ffffff'
+      // 同上：白底上的 brightWhite 也得往灰里落，才看得见
+      brightWhite: '#8c959f'
     }
   }
 ]
 
 export function getThemePreset(id: string): TerminalThemePreset {
   return TERMINAL_THEMES.find((t) => t.id === id) ?? TERMINAL_THEMES[0]
+}
+
+/**
+ * 把 `themeId`（可能是 auto 哨兵）解析成真正要用的预设。
+ *
+ * 第二个参数是**已解析**的深浅（'system' 已经落到亮或暗），不是 UiTheme ——
+ * auto 需要一个确定的答案，拿到 'system' 是没法查表的。
+ *
+ * 单独一个函数而不是塞进 `currentPreset` computed 里：这个映射是纯的，
+ * 单独放可以一眼看全「什么设置配什么配色」，也方便单独验。
+ */
+export function resolveThemePreset(
+  themeId: string,
+  resolvedTheme: 'light' | 'dark'
+): TerminalThemePreset {
+  if (themeId === AUTO_THEME_ID) return getThemePreset(AUTO_PAIRS[resolvedTheme])
+  return getThemePreset(themeId)
 }

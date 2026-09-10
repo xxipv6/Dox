@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'ele
 import { IpcChannels } from '../shared/ipc'
 import type { DoxApi } from '../shared/api'
 import type {
+  DownloadRequest,
   DroppedFile,
   ForwardRule,
   HostKeyVerifyRequest,
@@ -66,9 +67,12 @@ const api: DoxApi = {
   sftpReadText: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpReadText, sessionId, path),
   sftpWriteText: (sessionId, path, content, expectedMtime) =>
     ipcRenderer.invoke(IpcChannels.sftpWriteText, sessionId, path, content, expectedMtime),
-  sftpStartDrag: (sessionId, remotePath, fileName) =>
-    ipcRenderer.invoke(IpcChannels.sftpStartDrag, sessionId, remotePath, fileName),
-  sftpCancelDrag: (sessionId) => ipcRenderer.invoke(IpcChannels.sftpCancelDrag, sessionId),
+
+  // ---- 容器 ----
+  listContainers: (parentSessionId) =>
+    ipcRenderer.invoke(IpcChannels.containerList, parentSessionId),
+  connectContainer: (parentSessionId, containerName, term) =>
+    ipcRenderer.invoke(IpcChannels.containerConnect, parentSessionId, containerName, term),
 
   // ---- 传输队列 ----
   pickUpload: (sessionId, remoteDir) =>
@@ -79,6 +83,8 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.transferDownload, sessionId, remotePath, fileName),
   downloadDir: (sessionId, remotePath) =>
     ipcRenderer.invoke(IpcChannels.transferDownloadDir, sessionId, remotePath),
+  downloadMany: (sessionId, items) =>
+    ipcRenderer.invoke(IpcChannels.transferDownloadMany, sessionId, items),
   listTransfers: () => ipcRenderer.invoke(IpcChannels.transferList),
   cancelTransfer: (id) => ipcRenderer.invoke(IpcChannels.transferCancel, id),
   clearFinishedTransfers: () => ipcRenderer.invoke(IpcChannels.transferClearFinished),

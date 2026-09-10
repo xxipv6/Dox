@@ -77,14 +77,26 @@ export interface FileEntry {
   mtime: number
 }
 
+/** 界面主题。'system' 跟随操作系统的深浅色设置 */
+export type UiTheme = 'light' | 'dark' | 'system'
+
 /**
- * 应用设置（终端配色/字体/本地 shell）。
+ * 应用设置（界面主题/终端配色/字体/本地 shell）。
  *
  * 与布局一样存在主进程，不放渲染进程的 localStorage —— 打包后渲染进程从
  * file:// 加载，往那个源写 localStorage 不会落盘，用户改完设置重启就丢。
  */
 export interface AppSettings {
+  /**
+   * 终端配色预设 id。
+   *
+   * `'auto'` 是**哨兵值不是预设**：表示「跟随界面主题」，由渲染层按当前
+   * 界面深浅解析成具体的亮/暗终端预设。老配置里存的是具体预设 id，
+   * 那种情况就按手动覆盖处理，不去动用户的选择。
+   */
   themeId: string
+  /** 界面主题：亮色 / 深色 / 跟随系统 */
+  uiTheme: UiTheme
   fontSize: number
   fontId: string
   /** 连字需要 DOM 渲染器（WebGL 逐字形绘制，无法做字形替换） */
@@ -123,22 +135,6 @@ export interface LayoutSnapshot {
 /** 内置编辑器可打开的文件大小上限（字节）。超过则只允许下载后查看 */
 export const MAX_EDITABLE_BYTES = 2 * 1024 * 1024
 
-/**
- * 允许「拖出到资源管理器」的文件大小上限（字节）。
- *
- * 拖出必须先完整下载到本地临时目录（操作系统的拖放协议只认真实文件路径），
- * 这段时间里界面上什么都不会发生 —— 拖一个几百兆的文件等于让用户对着
- * 一个「拖了没反应」的界面干等。超过这个大小就明确拒绝并指路「下载」按钮。
- */
-export const MAX_DRAG_BYTES = 64 * 1024 * 1024
-
-/**
- * 目录拖出时的文件数上限。
- *
- * 字节数不是唯一的坑：几万个 1 字节的小文件总量很小，但每个都要一次
- * SFTP 往返 + 一次本地建文件，实际耗时远超同体积的大文件。
- */
-export const MAX_DRAG_FILES = 2000
 
 /**
  * 远端文本文件读取结果（内置编辑器用）。
@@ -167,6 +163,13 @@ export interface TransferTask {
   transferred: number
   status: TransferStatus
   error?: string
+}
+
+/** 批量下载的一项（右键菜单选中多项时提交给主进程） */
+export interface DownloadRequest {
+  remotePath: string
+  name: string
+  isDir: boolean
 }
 
 /** 渲染进程拖拽文件时经 webUtils 解析出的本地文件信息 */
@@ -231,6 +234,71 @@ export interface ZmodemFile {
   size: number
   data: Uint8Array
 }
+
+// ---- 容器（Docker / Podman）----
+
+/**
+ * 一个容器的摘要。
+ *
+ * `status` 原样保留 docker 给的文案（"Up 3 hours (healthy)"）—— 那句话本身
+ * 就是信息，翻译或裁剪都只会丢东西。`state` 才是给程序判断用的。
+ */
+export interface ContainerInfo {
+  /** 短 id（12 位）。也是容器默认的 hostname，验证脚本靠这点确认真的进了容器 */
+  id: string
+  /** 容器名，`docker exec` 的目标。已按 CONTAINER_TARGET_RE 校验过字符集 */
+  name: string
+  image: string
+  status: string
+  state: 'running' | 'paused' | 'exited' | 'other'
+  health?: 'healthy' | 'unhealthy' | 'starting'
+}
+
+/** 一次容器列表探测的结果 */
+export interface ContainerList {
+  runtime: 'docker' | 'podman'
+  /**
+   * runtime 可执行文件的**绝对路径**。
+   * 探测时补过 PATH 才解析出来，而交互式 exec 通道没有那份 PATH 补充，
+   * 所以后续命令必须用这个绝对路径，不能再用裸 `docker`。
+   */
+  binary: string
+  /** 只含运行中（与 paused）的容器 */
+  containers: ContainerInfo[]
+  /** 有多少个已停止的，用于「另有 N 个已停止」 */
+  stoppedCount: number
+  /** 容器太多被字节上限截断；此时 stoppedCount 只是下界 */
+  truncated?: boolean
+  /** docker 版本过旧，--format 降级过，状态信息不可用 */
+  formatDowngraded?: boolean
+}
+
+/** 探测失败的原因，决定界面给哪一句话 */
+export type ContainerProbeReason =
+  /** 远端既没有 docker 也没有 podman */
+  | 'no-binary'
+  /** 没有权限访问 docker socket */
+  | 'no-permission'
+  /** 守护进程没跑 / socket 不可达 */
+  | 'daemon-down'
+  /** 容器此刻不在运行（列表与点击之间被停了） */
+  | 'container-gone'
+  /** exec 被 seccomp / AppArmor / 容器用户权限拒绝 */
+  | 'exec-denied'
+  /** 容器里没有可用的 shell（distroless / scratch） */
+  | 'no-shell'
+  | 'error'
+
+/**
+ * 探测结果用判别联合返回，**不抛错**。
+ *
+ * 「没装 docker」「没权限」都是预期内的状态，各自要有各自的界面 —— 把它们
+ * 当成异常扔到 catch 里，界面就只剩一句通用的「失败了」，用户不知道该做什么。
+ * （`open()` 是动作，那个才走抛错 + errorText 的既有路径。）
+ */
+export type ContainerProbeResult =
+  | { ok: true; list: ContainerList }
+  | { ok: false; reason: ContainerProbeReason; message: string }
 
 /** 本地终端可用的 shell */
 export interface LocalShellInfo {

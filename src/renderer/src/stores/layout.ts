@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
-import type { LayoutSnapshot } from '@shared/types'
-import { useSessionStore } from './sessions'
+import type { LayoutSnapshot, LayoutTabSnapshot } from '@shared/types'
+import { useSessionStore, type SessionTab } from './sessions'
 
 /** 布局变动很频繁（分屏、开关标签），攒一下再写 */
 const SAVE_DEBOUNCE_MS = 400
@@ -23,8 +23,24 @@ export const useLayoutStore = defineStore('layout', () => {
 
   function snapshot(): LayoutSnapshot {
     const store = useSessionStore()
+    /*
+     * 容器标签不进快照。
+     *
+     * 它完全依附于「父会话 + 那个容器此刻还在」这个瞬时事实：父会话 id 重启后
+     * 就失效了，容器也可能早被删掉或重建。存下来只会在下次启动时制造一个
+     * 立刻显示「已断开」、且无法自动恢复的僵尸标签 —— 比不恢复更糟。
+     * 重启后父会话照常恢复、容器列表照常能列，再点一次即可。
+     *
+     * 类型上也顺带保证了这一点：LayoutTabSnapshot.kind 保持 'ssh' | 'local'，
+     * 容器标签从源头上漏不进持久化。
+     */
+    // 谓词里把 kind 收窄，编译器才能确认残留的标签符合 LayoutTabSnapshot
+    const persistable = store.tabs.filter(
+      (tab): tab is SessionTab & { kind: LayoutTabSnapshot['kind'] } =>
+        tab.kind !== 'container'
+    )
     return {
-      tabs: store.tabs.map((tab) => ({
+      tabs: persistable.map((tab) => ({
         kind: tab.kind,
         title: tab.title,
         split: tab.split,

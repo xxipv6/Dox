@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { EditorState, type Extension } from '@codemirror/state'
+import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
+import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { basicSetup } from 'codemirror'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { useEditorStore, type OpenFile } from '../stores/editor'
+import { useSettingsStore } from '../stores/settings'
 import { languageFor } from '../editor/languages'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useEditorStore()
+const settings = useSettingsStore()
 
 const files = computed(() => store.filesOf(props.sessionId))
 const active = computed(() => store.activeFile(props.sessionId))
@@ -30,10 +33,60 @@ const cachedStates = new Map<string, EditorState>()
  */
 const savedAt = ref(0)
 
+/**
+ * 语法着色的**唯一**会变的部分，所以单独放进 Compartment。
+ *
+ * 为什么不直接把主题塞进 buildExtensions：EditorState 是按文件缓存下来保留
+ * 撤销历史的（见 cachedStates），扩展在 state 建好那一刻就冻住了 —— 用户切一次
+ * 深浅色就得重建 state，代价是他所有文件的撤销历史一起清空。
+ * Compartment 支持就地 reconfigure，历史不动。
+ */
+const themeCompartment = new Compartment()
+
+/**
+ * 编辑器外框。颜色全走 CSS 变量 —— 变量在**绘制时**才解析，所以同一份主题对象
+ * 在两套界面主题下各自取到正确的值：不用写两遍，也不会跟着主题一起过期。
+ *
+ * 必须排在语法主题**后面**：CodeMirror 里后出现的 theme 扩展优先级更高，
+ * 这样它才能盖掉 oneDark 自带的深色底和 gutter 色。
+ */
+const chromeTheme = EditorView.theme({
+  '&': {
+    height: '100%',
+    fontSize: 'var(--fs-md)',
+    backgroundColor: 'var(--bg-panel)',
+    color: 'var(--fg)'
+  },
+  '.cm-scroller': { fontFamily: 'Consolas, "Cascadia Mono", monospace' },
+  '.cm-gutters': {
+    backgroundColor: 'var(--bg-sunken)',
+    color: 'var(--fg-muted)',
+    borderRight: '1px solid var(--border)'
+  },
+  '.cm-activeLine': { backgroundColor: 'var(--bg-hover)' },
+  '.cm-activeLineGutter': { backgroundColor: 'var(--bg-hover)', color: 'var(--fg-secondary)' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--fg)' },
+  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': {
+    backgroundColor: 'var(--accent-soft)'
+  }
+})
+
+/**
+ * 深色用 oneDark 自带的语法配色；亮色用 CodeMirror 的默认高亮
+ * （`defaultHighlightStyle` 本来就是给浅底设计的）。basicSetup 里也带了一份，
+ * 这里显式再给一次是为了让「亮色档是什么」在这一个函数里看得全。
+ */
+function syntaxTheme(): Extension {
+  return settings.resolvedTheme === 'dark'
+    ? oneDark
+    : syntaxHighlighting(defaultHighlightStyle, { fallback: true })
+}
+
 function buildExtensions(path: string): Extension[] {
   return [
     basicSetup,
-    oneDark,
+    themeCompartment.of(syntaxTheme()),
+    chromeTheme,
     languageFor(path),
     // 配置文件常有超长行，不折行会把内容推出屏幕外
     EditorView.lineWrapping,
@@ -54,11 +107,6 @@ function buildExtensions(path: string): Extension[] {
       // 闭包里捕获旧对象会把编辑写到已经没人看的地方
       const file = store.filesOf(props.sessionId).find((f) => f.path === path)
       if (file) file.content = u.state.doc.toString()
-    }),
-    EditorView.theme({
-      '&': { height: '100%', fontSize: '13px', backgroundColor: '#1a1b26' },
-      '.cm-scroller': { fontFamily: 'Consolas, "Cascadia Mono", monospace' },
-      '.cm-gutters': { backgroundColor: '#16161e', borderRight: '1px solid #2a2b3d' }
     })
   ]
 }
@@ -84,8 +132,19 @@ function sync(): void {
     cachedStates.get(file.path) ??
     EditorState.create({ doc: file.content, extensions: buildExtensions(file.path) })
   view = new EditorView({ state, parent: hostEl.value })
+  // 缓存下来的 state 里冻着**当时**的语法主题，用户中途切过深浅色的话已经过期了，
+  // 这里按当前主题就地重配一次（新 state 走 buildExtensions，本来就是对的不受影响）
+  view.dispatch({ effects: themeCompartment.reconfigure(syntaxTheme()) })
   mountedPath = file.path
 }
+
+// 界面深浅色变化：就地换语法主题。撤销历史、光标、滚动位置都保留。
+watch(
+  () => settings.resolvedTheme,
+  () => {
+    view?.dispatch({ effects: themeCompartment.reconfigure(syntaxTheme()) })
+  }
+)
 
 watch(
   () => [active.value?.path, active.value?.loading, active.value?.error],
@@ -195,13 +254,13 @@ function dirty(file: OpenFile | null | undefined): boolean {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #2a2b3d;
-  background: #1a1b26;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
 }
 .editor-tabs {
   display: flex;
   align-items: stretch;
-  border-bottom: 1px solid #2a2b3d;
+  border-bottom: 1px solid var(--border);
   overflow-x: auto;
   flex-shrink: 0;
 }
@@ -210,16 +269,16 @@ function dirty(file: OpenFile | null | undefined): boolean {
   align-items: center;
   gap: 5px;
   padding: 6px 10px;
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   cursor: pointer;
-  border-right: 1px solid #2a2b3d;
+  border-right: 1px solid var(--border);
   white-space: nowrap;
 }
 .etab.active {
-  color: #c0caf5;
-  background: #24283b;
-  box-shadow: inset 0 2px 0 #7aa2f7;
+  color: var(--fg);
+  background: var(--bg-active);
+  box-shadow: inset 0 2px 0 var(--accent);
 }
 .etab-name {
   max-width: 160px;
@@ -227,21 +286,21 @@ function dirty(file: OpenFile | null | undefined): boolean {
   text-overflow: ellipsis;
 }
 .dirty-dot {
-  color: #e0af68;
-  font-size: 10px;
+  color: var(--warning-text);
+  font-size: var(--fs-xs);
 }
 .etab-close {
   display: inline-flex;
   align-items: center;
   background: none;
   border: none;
-  color: #565f89;
+  color: var(--fg-muted);
   cursor: pointer;
   padding: 2px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
 }
 .etab-close:hover {
-  color: #f7768e;
+  color: var(--danger-text);
 }
 .spacer {
   flex: 1;
@@ -251,16 +310,16 @@ function dirty(file: OpenFile | null | undefined): boolean {
   align-items: center;
   justify-content: center;
   border: none;
-  border-left: 1px solid #2a2b3d;
+  border-left: 1px solid var(--border);
   background: none;
-  color: #565f89;
-  font-size: 12px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
   padding: 0 10px;
   cursor: pointer;
   white-space: nowrap;
 }
 .bar-btn:hover:not(:disabled) {
-  color: #c0caf5;
+  color: var(--fg);
 }
 .bar-btn:disabled {
   opacity: 0.4;
@@ -268,16 +327,16 @@ function dirty(file: OpenFile | null | undefined): boolean {
 }
 .editor-path {
   padding: 4px 10px;
-  font-size: 11px;
-  color: #565f89;
-  border-bottom: 1px solid #2a2b3d;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   flex-shrink: 0;
 }
 .saved-hint {
-  color: #9ece6a;
+  color: var(--success-text);
   margin-left: 8px;
 }
 .editor-host {
@@ -291,12 +350,12 @@ function dirty(file: OpenFile | null | undefined): boolean {
 .editor-hint,
 .editor-error {
   padding: 16px;
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   text-align: center;
 }
 .editor-error {
-  color: #f7768e;
+  color: var(--danger-text);
   display: flex;
   flex-direction: column;
   gap: 10px;

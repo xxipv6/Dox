@@ -8,10 +8,11 @@ import type { IPty } from 'node-pty'
 import { app, type WebContents } from 'electron'
 import { IpcChannels } from '../../shared/ipc'
 import type { LocalShellInfo, TermSize } from '../../shared/types'
+import { LOCAL_ID_PREFIX } from '../../shared/sessionId'
 import { detectShells, resolveShell } from './shells'
 
-/** 本地会话 id 统一前缀，IPC 层按此前缀把 input/resize 路由到本管理器 */
-export const LOCAL_ID_PREFIX = 'local-'
+// 前缀定义在 shared/sessionId.ts（渲染层也要用同一份），这里转出去保持既有导入可用
+export { LOCAL_ID_PREFIX }
 
 interface LocalSession {
   id: string

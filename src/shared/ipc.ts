@@ -35,15 +35,21 @@ export const IpcChannels = {
   sftpDelete: 'sftp:delete',
   sftpReadText: 'sftp:readText',
   sftpWriteText: 'sftp:writeText',
-  // 拖出到资源管理器：先把远端文件落到本地临时目录，再发起原生拖拽
-  sftpStartDrag: 'sftp:startDrag',
-  // 中止正在进行的拖出准备（远端 → 本地的拷贝）
-  sftpCancelDrag: 'sftp:cancelDrag',
+  /*
+   * 容器终端（Docker / Podman）。
+   *
+   * 只有「列容器」和「进去」两个入口 —— 进容器之后的输入 / resize / 断开
+   * 走上面的通用通道，按会话 id 的 `container-` 前缀路由，不需要新通道。
+   */
+  containerList: 'container:list',
+  containerConnect: 'container:connect',
   // 传输队列
   transferPickUpload: 'transfer:pickUpload',
   transferEnqueueDropped: 'transfer:enqueueDropped',
   transferDownload: 'transfer:download',
   transferDownloadDir: 'transfer:downloadDir',
+  // 选中多项一起下载：只弹一次目录选择框，全部放进所选目录
+  transferDownloadMany: 'transfer:downloadMany',
   transferList: 'transfer:list',
   transferCancel: 'transfer:cancel',
   transferClearFinished: 'transfer:clearFinished',

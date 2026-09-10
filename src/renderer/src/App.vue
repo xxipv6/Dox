@@ -247,10 +247,17 @@ async function toggleSftp(): Promise<void> {
   flex-direction: column;
   min-width: 0;
 }
+/*
+ * 标签栏做成**凹陷**的一条，活动标签用抬升的 --bg-panel。
+ *
+ * 这样活动标签和下方的终端区域是同一个面，看起来是「从标签栏里长出来、
+ * 连到内容上」，这是标签页最容易被一眼读懂的形状。反过来（浅栏+深色活动标签）
+ * 也分得清，但读起来像"选中的那块被按下去了"，语义是反的。
+ */
 .tab-bar {
   display: flex;
-  background: #16161e;
-  border-bottom: 1px solid #2a2b3d;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .tabs-scroll {
@@ -262,69 +269,85 @@ async function toggleSftp(): Promise<void> {
 .tab {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  font-size: 13px;
-  color: #565f89;
+  gap: var(--sp-2);
+  /*
+   * 定高 + 居中，而不是靠上下 padding 撑出来：图标、标题、关闭按钮三者的
+   * 垂直中线这样才对得齐。也顺带让标签栏高度不随内容（比如退出码徽标）跳动。
+   */
+  height: 38px;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-md);
+  color: var(--fg-secondary);
   cursor: pointer;
-  border-right: 1px solid #2a2b3d;
+  border-right: 1px solid var(--border);
   white-space: nowrap;
+  transition:
+    background-color var(--dur-base) var(--ease-out),
+    color var(--dur-base) var(--ease-out);
 }
 /*
- * 活动标签。原来只把背景从 #16161e 提到 #1a1b26 —— 四个通道各差 4/255，
- * 跟没写一样。改成顶部一条高亮线 + 明显提亮的面，扫一眼就知道在哪。
+ * 活动标签。
+ *
+ * 历史教训留在这儿：旧版只把标签底色往亮里提了一档，四个通道各差 4/255，
+ * 跟没写一样。所以现在除了抬升的面，还叠一条顶部高亮线，两个信号一起给。
+ *
+ * 高亮线用 --accent 而不是 --accent-text：它是纯装饰，位置信息已经由
+ * 背景和相邻关系给足了，不需要为了对比度把它压暗。
  */
 .tab.active {
-  color: #c0caf5;
-  background: #24283b;
-  box-shadow: inset 0 2px 0 #7aa2f7;
+  color: var(--fg);
+  background: var(--bg-panel);
+  box-shadow: inset 0 2px 0 var(--accent);
 }
 .tab.active:hover {
-  background: #292e42;
+  background: var(--bg-panel);
 }
 .tab:not(.active):hover {
-  background: #1f2335;
-  color: #a9b1d6;
+  background: var(--bg-hover);
+  color: var(--fg-secondary);
 }
 .bar-btn {
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
   display: inline-flex;
   align-items: center;
   gap: 6px;
   border: none;
-  border-left: 1px solid #2a2b3d;
+  border-left: 1px solid var(--border);
   background: none;
-  color: #565f89;
-  font-size: 13px;
+  color: var(--fg-muted);
+  font-size: var(--fs-md);
   padding: 0 12px;
   cursor: pointer;
   white-space: nowrap;
 }
 .bar-btn:hover {
-  color: #c0caf5;
-  background: #1f2335;
+  color: var(--fg);
+  background: var(--bg-hover);
 }
 .bar-btn.on {
-  color: #7aa2f7;
-  background: #1f2335;
-  box-shadow: inset 0 -2px 0 #7aa2f7;
+  color: var(--accent-text);
+  background: var(--bg-hover);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 .status-dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
-  background: #565f89;
+  border-radius: var(--r-pill);
+  background: var(--fg-muted);
 }
 .status-dot.connecting,
 .status-dot.reconnecting {
-  background: #e0af68;
+  background: var(--warning-text);
   animation: pulse 1s infinite alternate;
 }
 .status-dot.connected {
-  background: #9ece6a;
+  background: var(--success-text);
 }
 .status-dot.error,
 .status-dot.closed {
-  background: #f7768e;
+  background: var(--danger-text);
 }
 @keyframes pulse {
   from {
@@ -337,40 +360,47 @@ async function toggleSftp(): Promise<void> {
 .tab-close {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   background: none;
   border: none;
-  color: #565f89;
+  color: var(--fg-muted);
   cursor: pointer;
-  padding: 2px;
-  border-radius: 3px;
+  /* 24×24 的点击区：原来只有 2px padding（约 16px），比 Fitts 定律允许的
+     最小值还小，误点成「切标签」的概率很高 */
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-sm);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 .tab-close:hover {
-  color: #f7768e;
-  background: #1f2335;
-}
-.tab.active .tab-close {
-  color: #a9b1d6;
+  color: var(--fg-on-accent);
+  background: var(--danger-text);
 }
 .tab-new {
   display: inline-flex;
   align-items: center;
   border: none;
-  border-right: 1px solid #2a2b3d;
+  border-right: 1px solid var(--border);
   background: none;
-  color: #565f89;
-  padding: 0 14px;
+  color: var(--fg-muted);
+  padding: 0 var(--sp-4);
   cursor: pointer;
   flex-shrink: 0;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 .tab-new:hover {
-  color: #7aa2f7;
-  background: #1f2335;
+  color: var(--accent-text);
+  background: var(--bg-hover);
 }
 .exit-badge {
-  font-size: 10px;
-  color: #f7768e;
-  background: rgba(247, 118, 142, 0.14);
-  border-radius: 3px;
+  font-size: var(--fs-xs);
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border-radius: var(--r-xs);
   padding: 0 4px;
   line-height: 15px;
 }
@@ -427,14 +457,14 @@ async function toggleSftp(): Promise<void> {
   display: flex;
 }
 .pane + .pane {
-  border-left: 1px solid #2a2b3d;
+  border-left: 1px solid var(--border);
 }
 .split-column .pane + .pane {
   border-left: none;
-  border-top: 1px solid #2a2b3d;
+  border-top: 1px solid var(--border);
 }
 .pane.focused {
-  outline: 1px solid #3d59a1;
+  outline: 1px solid var(--focus-ring);
   outline-offset: -1px;
 }
 .pane-close {
@@ -442,16 +472,16 @@ async function toggleSftp(): Promise<void> {
   top: 4px;
   right: 6px;
   z-index: 6;
-  background: rgba(22, 22, 30, 0.8);
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  color: #565f89;
+  background: color-mix(in srgb, var(--bg-panel) 80%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  color: var(--fg-muted);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-md);
   padding: 0 6px;
 }
 .pane-close:hover {
-  color: #f7768e;
+  color: var(--danger-text);
 }
 .welcome {
   position: absolute;
@@ -460,15 +490,15 @@ async function toggleSftp(): Promise<void> {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #565f89;
+  color: var(--fg-muted);
 }
 .tab-placeholder {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #565f89;
-  font-size: 14px;
+  color: var(--fg-muted);
+  font-size: var(--fs-md);
 }
 .resume-hint {
   display: flex;
@@ -480,19 +510,19 @@ async function toggleSftp(): Promise<void> {
 }
 .resume-hint p {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .resume-btn {
   background: none;
-  border: 1px dashed #565f89;
-  border-radius: 6px;
-  color: #7aa2f7;
+  border: 1px dashed var(--fg-muted);
+  border-radius: var(--r-sm);
+  color: var(--accent-text);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-md);
   padding: 6px 14px;
 }
 .resume-btn:hover {
-  border-color: #7aa2f7;
-  background: #1f2335;
+  border-color: var(--accent-text);
+  background: var(--bg-hover);
 }
 </style>

@@ -214,7 +214,7 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -222,28 +222,28 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
 }
 .dialog {
   width: 460px;
-  background: #16161e;
-  border: 1px solid #2a2b3d;
-  border-radius: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   padding: 18px;
 }
 .dialog-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   margin-bottom: 16px;
 }
 .close-btn {
   background: none;
   border: none;
-  color: #565f89;
-  font-size: 18px;
+  color: var(--fg-muted);
+  font-size: var(--fs-xl);
   cursor: pointer;
 }
 .close-btn:hover {
-  color: #c0caf5;
+  color: var(--fg);
 }
 .grid {
   display: grid;
@@ -252,8 +252,8 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
   align-items: center;
 }
 .grid > label {
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
 }
 .row {
   display: flex;
@@ -269,22 +269,22 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
 }
 input,
 select {
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 6px;
-  color: #c0caf5;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg);
   padding: 7px 10px;
-  font-size: 13px;
+  font-size: var(--fs-md);
   outline: none;
   width: 100%;
   box-sizing: border-box;
 }
 input:focus,
 select:focus {
-  border-color: #7aa2f7;
+  border-color: var(--accent-text);
 }
 input.invalid {
-  border-color: #f7768e;
+  border-color: var(--danger-text);
 }
 .segmented {
   display: flex;
@@ -294,22 +294,22 @@ input.invalid {
   flex: 1;
   text-align: center;
   padding: 6px 0;
-  border-radius: 6px;
-  font-size: 12px;
-  color: #565f89;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   cursor: pointer;
-  border: 1px solid #2a2b3d;
+  border: 1px solid var(--border);
 }
 .segmented label.active {
-  color: #7aa2f7;
-  border-color: #7aa2f7;
+  color: var(--accent-text);
+  border-color: var(--accent-text);
 }
 .segmented input {
   display: none;
 }
 .error {
-  color: #f7768e;
-  font-size: 12px;
+  color: var(--danger-text);
+  font-size: var(--fs-sm);
   margin: 12px 0 0;
 }
 .actions {
@@ -320,20 +320,20 @@ input.invalid {
 }
 .btn {
   padding: 7px 16px;
-  border-radius: 6px;
-  border: 1px solid #2a2b3d;
-  background: #1f2335;
-  color: #c0caf5;
-  font-size: 13px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--fg);
+  font-size: var(--fs-md);
   cursor: pointer;
 }
 .btn:hover:not(:disabled) {
-  border-color: #3d59a1;
+  border-color: var(--focus-ring);
 }
 .btn.primary {
-  background: #7aa2f7;
-  border-color: #7aa2f7;
-  color: #16161e;
+  background: var(--accent-text);
+  border-color: var(--accent-text);
+  color: var(--bg-panel);
   font-weight: 600;
 }
 .btn:disabled {

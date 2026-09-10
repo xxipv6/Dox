@@ -92,7 +92,8 @@ await win.keyboard.press('Escape')
 await win.waitForTimeout(400)
 check('Esc 关掉了设置弹窗', (await win.locator('.overlay').count()) === 0)
 
-await win.locator('.add-btn').click()
+// 侧栏改版后「添加设备」不再是 .add-btn，而是标题栏里的图标按钮（按 title 认）
+await win.locator('button[title="添加设备"]').click()
 await win.waitForTimeout(400)
 check('添加设备弹窗已打开', (await win.locator('.overlay .dialog-header:has-text("添加设备")').count()) > 0)
 await win.keyboard.press('Escape')
@@ -126,6 +127,10 @@ check('面包屑不是「/ / xxx」', !/\/\s*\/\s*\//.test(crumb), crumb)
 
 // ---------- A. 文件名可用宽度 ----------
 console.log('\nA. 文件名宽度')
+// 先把鼠标挪开。Playwright 的鼠标位置会跨步骤保留，前面点过按钮之后
+// 可能正好停在某一行上，那样量到的就是悬停态而不是静止态。
+await win.mouse.move(2, 2)
+await win.waitForTimeout(200)
 const nameStats = await win.evaluate(() => {
   const rows = [...document.querySelectorAll('.file-list .row')]
   const names = rows.map((r) => r.querySelector('.file-name')).filter(Boolean)
@@ -136,10 +141,17 @@ const nameStats = await win.evaluate(() => {
     total: names.length,
     // 不悬停时按钮是 display:none，宽高都是 0 —— 不再偷走横向空间
     actionWidth: actions.length ? actions[0].getBoundingClientRect().width : -1,
+    // 非 0 时要知道是谁在 hover，否则只能看到数字瞎猜
+    hoverCount: document.querySelectorAll('.file-list .row:hover').length,
+    flexCount: actions.filter((a) => getComputedStyle(a).display !== 'none').length,
     sample: names.slice(0, 3).map((n) => n.textContent)
   }
 })
-check('行尾按钮不占宽度（未悬停时为 0）', nameStats.actionWidth === 0, String(nameStats.actionWidth))
+check(
+  '行尾按钮不占宽度（未悬停时为 0）',
+  nameStats.actionWidth === 0,
+  `${nameStats.actionWidth}px（悬停行 ${nameStats.hoverCount} 个，展开的按钮组 ${nameStats.flexCount} 个）`
+)
 check(
   '文件名列拿到足够宽度（≥100px）',
   nameStats.minWidth >= 100,
@@ -167,6 +179,167 @@ for (let i = 0; i < 10 && !hovered.visible; i++) {
 }
 check('悬停时行尾按钮出现', hovered.visible)
 await win.screenshot({ path: join(outDir, '12-row-hover.png') })
+
+// ---------- F. 选中模型（对齐本地文件管理器的操作习惯）----------
+console.log('\nF. 选中')
+
+const selection = () =>
+  win.evaluate(() => {
+    const rows = [...document.querySelectorAll('.file-list .row')]
+    return {
+      count: rows.filter((r) => r.classList.contains('selected')).length,
+      names: rows
+        .filter((r) => r.classList.contains('selected'))
+        .map((r) => (r.querySelector('.file-name')?.textContent ?? '').trim()),
+      // 选中行的实际底色，用来确认不是只加了个 class 而没样式
+      bg: (() => {
+        const el = rows.find((r) => r.classList.contains('selected'))
+        return el ? getComputedStyle(el).backgroundColor : null
+      })(),
+      bar: (() => {
+        const el = rows.find((r) => r.classList.contains('selected'))
+        return el ? getComputedStyle(el, '::before').width : null
+      })()
+    }
+  })
+
+const rowAt = (i) => win.locator('.file-list .row').nth(i)
+const rowNames = () =>
+  win.evaluate(() =>
+    [...document.querySelectorAll('.file-list .row')].map((r) =>
+      (r.querySelector('.file-name')?.textContent ?? '').trim()
+    )
+  )
+
+/**
+ * 点完之后把鼠标挪开再读样式。
+ *
+ * 鼠标停在刚点过的那一行上，量到的是 `.row.selected:hover` 的悬停底色，
+ * 不是静止态的选中底色 —— 断言会莫名其妙地失败在一个「颜色不对」上，
+ * 而其实样式完全正确。
+ */
+const clickThenPark = async (index, options) => {
+  await rowAt(index).click(options)
+  await win.mouse.move(2, 2)
+  await win.waitForTimeout(250) // 等 --dur-base(120ms) 过渡走完
+}
+
+/**
+ * 某个颜色令牌在当前主题下的**计算值**。
+ *
+ * 断言要盯着令牌本身，而不是写死一个色值：界面的配色是一层可换的令牌
+ * （亮色「晴空」/ 深色「冷夜」），写死色值等于把测试绑死在某一次配色上 ——
+ * 换配色时它会红，但它红的原因跟「选中行有没有底色」毫无关系。
+ */
+const tokenColor = (name, prop = 'background') =>
+  win.evaluate(
+    ({ n, p }) => {
+      const probe = document.createElement('div')
+      probe.style.setProperty(p, `var(${n})`)
+      document.body.appendChild(probe)
+      const v = getComputedStyle(probe)[p === 'background' ? 'backgroundColor' : p]
+      probe.remove()
+      return v
+    },
+    { n: name, p: prop }
+  )
+
+// 起点：还没点过任何行
+check('起点没有选中项', (await selection()).count === 0)
+
+await clickThenPark(1)
+let s = await selection()
+check('单击选中一行', s.count === 1, JSON.stringify(s))
+check(
+  '选中行有实际底色（就是 --bg-active，不是只有 class）',
+  s.bg === (await tokenColor('--bg-active')),
+  `${s.bg} vs --bg-active ${await tokenColor('--bg-active')}`
+)
+check('选中行左侧有竖条', s.bar === '2px', String(s.bar))
+await win.screenshot({ path: join(outDir, '13-selection.png') })
+
+await clickThenPark(3)
+check('普通点击是单选（前一个取消）', (await selection()).count === 1)
+
+await clickThenPark(5, { modifiers: ['Control'] })
+check('Ctrl+点击 加到选区', (await selection()).count === 2, JSON.stringify((await selection()).names))
+
+// Shift 连选 = 锚点(5) 到目标(8) 的闭区间，再并上已有的选区。
+// 锚点在第 5 项已经选中，所以并集是 5 项而不是 4 项。
+await clickThenPark(8, { modifiers: ['Shift'] })
+s = await selection()
+const names = await rowNames()
+const expected = [3, 5, 6, 7, 8].map((i) => names[i]).sort()
+check(
+  'Shift+点击 连选到锚点',
+  JSON.stringify([...s.names].sort()) === JSON.stringify(expected),
+  `${JSON.stringify(s.names)} 期望 ${JSON.stringify(expected)}`
+)
+
+await clickThenPark(5, { modifiers: ['Control'] })
+check('Ctrl+点击已选中项是取消它', (await selection()).count === 4, JSON.stringify((await selection()).names))
+
+/*
+ * 点列表空白处清空。
+ *
+ * 这里不能用「点 (5,5)」糊弄过去 —— 当前目录 36 项，列表是撑满且溢出的，
+ * (5,5) 落在第一行上，测的是「点了第一行」。真正的空白区在内容不足一屏时
+ * 才存在。所以两种情形分开测：
+ *   内容溢出 → 直接派发一次 click 到 .file-list 自身，验证 @click.self 的绑定
+ *   内容不满 → 用真实鼠标点最后一行下方的空白
+ */
+const listHasBlank = await win.evaluate(() => {
+  const list = document.querySelector('.file-list')
+  return !!list && list.scrollHeight <= list.clientHeight - 20
+})
+if (listHasBlank) {
+  const box = await win.locator('.file-list').boundingBox()
+  await win.mouse.click(box.x + 5, box.y + box.height - 6)
+  await win.waitForTimeout(200)
+  check('点空白处清空选中（真实鼠标）', (await selection()).count === 0)
+} else {
+  await win.locator('.file-list').dispatchEvent('click')
+  await win.waitForTimeout(200)
+  check('点空白处清空选中（@click.self 绑定）', (await selection()).count === 0)
+}
+
+// 换目录后旧路径没意义，必须一并清掉
+await clickThenPark(1)
+check('换目录前有选中项', (await selection()).count === 1)
+const dirIndex = (await win.evaluate(() =>
+  [...document.querySelectorAll('.file-list .row')].findIndex((r) =>
+    r.querySelector('.file-icon.dir')
+  )
+))
+if (dirIndex >= 0) {
+  await rowAt(dirIndex).dblclick()
+  await win.waitForTimeout(900)
+  check('切换目录后选中被清空', (await selection()).count === 0)
+} else {
+  console.log('  · 当前目录没有子目录，跳过「换目录清空选中」')
+}
+
+// ---------- G. 过渡（“弹弹的”但克制）----------
+console.log('\nG. 过渡')
+const motion = await win.evaluate(() => {
+  const pick = (sel, pseudo) => {
+    const el = document.querySelector(sel)
+    if (!el) return null
+    const cs = getComputedStyle(el, pseudo ?? undefined)
+    return { dur: cs.transitionDuration, prop: cs.transitionProperty }
+  }
+  return {
+    row: pick('.file-list .row'),
+    tab: pick('.tab'),
+    device: pick('.device'),
+    icon: pick('.icon-btn')
+  }
+})
+const hasMotion = (m) => !!m && m.dur !== '0s' && m.dur !== 'all 0s'
+check('文件行有过渡', hasMotion(motion.row), JSON.stringify(motion.row))
+check('标签有过渡', hasMotion(motion.tab), JSON.stringify(motion.tab))
+check('设备行有过渡', hasMotion(motion.device), JSON.stringify(motion.device))
+check('图标按钮有过渡', hasMotion(motion.icon), JSON.stringify(motion.icon))
 
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 console.log(process.exitCode ? '\n结论: 存在失败项' : '\n结论: 全部通过')

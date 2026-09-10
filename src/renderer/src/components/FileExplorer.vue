@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { DroppedFile, FileEntry } from '@shared/types'
+import type { DroppedFile, FileEntry, TransferTask } from '@shared/types'
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
+import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
@@ -23,6 +24,46 @@ const newDirName = ref('')
 const renamingPath = ref<string | null>(null)
 const renameValue = ref('')
 
+// ---- 选中（对齐本地文件管理器的操作习惯）----
+/** 已选中的条目路径。用 Set 而不是单个值，Ctrl 多选才有地方放 */
+const selected = ref<Set<string>>(new Set())
+/** Shift 连选的锚点（entries 里的下标） */
+const anchorIndex = ref<number | null>(null)
+
+const isSelected = (entry: FileEntry): boolean => selected.value.has(entry.path)
+
+/**
+ * 单击选中。和资源管理器一致：
+ *   普通点击 → 只选中它
+ *   Ctrl/Cmd  → 切换这一项，其余不动
+ *   Shift     → 从锚点连选到这一项
+ * 双击仍然是打开（浏览器会先发两次 click 再发 dblclick，顺序天然正确）。
+ */
+function onRowClick(e: MouseEvent, entry: FileEntry, index: number): void {
+  const next = new Set(selected.value)
+  if (e.shiftKey && anchorIndex.value !== null) {
+    const [from, to] = [anchorIndex.value, index].sort((a, b) => a - b)
+    for (let i = from; i <= to; i++) {
+      const item = entries.value[i]
+      if (item) next.add(item.path)
+    }
+  } else if (e.ctrlKey || e.metaKey) {
+    if (next.has(entry.path)) next.delete(entry.path)
+    else next.add(entry.path)
+    anchorIndex.value = index
+  } else {
+    next.clear()
+    next.add(entry.path)
+    anchorIndex.value = index
+  }
+  selected.value = next
+}
+
+const clearSelection = (): void => {
+  selected.value = new Set()
+  anchorIndex.value = null
+}
+
 /**
  * 面包屑的各级目录。
  *
@@ -38,6 +79,8 @@ const breadcrumbs = computed(() => {
 async function load(dir?: string): Promise<void> {
   loading.value = true
   errorMsg.value = ''
+  // 换目录后旧路径已经没意义，留着会选中一个看不见的东西
+  clearSelection()
   try {
     if (dir) cwd.value = dir
     entries.value = await window.api.sftpList(props.sessionId, cwd.value)
@@ -140,48 +183,97 @@ async function pickUpload(): Promise<void> {
   await guard(() => window.api.pickUpload(props.sessionId, cwd.value))
 }
 
+// ---- 右键菜单 ----
+const menu = ref<{ x: number; y: number; items: ContextMenuItem[] } | null>(null)
+/** 菜单是对哪几项开的。动作要用这一刻的选区，不能等点了再读（那时选区可能已变） */
+let menuTargets: FileEntry[] = []
+const closeMenu = (): void => {
+  menu.value = null
+}
+
+/**
+ * 右键行。
+ *
+ * 选区规则跟资源管理器一致：点在已选中的行上 → 保持整片选区（这样
+ * 「Ctrl 多选之后右键下载」才成立）；点在选区外 → 先把这一行单独选上。
+ */
+function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void {
+  if (!isSelected(entry)) {
+    selected.value = new Set([entry.path])
+    anchorIndex.value = index
+  }
+  const targets = entries.value.filter((en) => selected.value.has(en.path))
+  menuTargets = targets
+  const many = targets.length > 1
+  menu.value = {
+    x: e.clientX,
+    y: e.clientY,
+    items: [
+      {
+        id: 'download',
+        label: many ? `下载这 ${targets.length} 项` : '下载',
+        icon: 'download'
+      },
+      // 重命名只能对一项，多选时给个禁用项比整条去掉更好读
+      { id: 'rename', label: '重命名', icon: 'pencil', disabled: many },
+      {
+        id: 'delete',
+        label: many ? `删除这 ${targets.length} 项` : '删除',
+        icon: 'trash',
+        danger: true
+      }
+    ]
+  }
+}
+
+async function onMenuSelect(id: string): Promise<void> {
+  const targets = menuTargets
+  closeMenu()
+  if (!targets.length) return
+  if (id === 'download') await downloadTargets(targets)
+  else if (id === 'rename') startRename(targets[0])
+  else if (id === 'delete') await removeTargets(targets)
+}
+
+async function downloadTargets(targets: FileEntry[]): Promise<void> {
+  // 只有一项时沿用原来的路径：单文件弹保存框（能顺手改名），单目录弹目录框
+  if (targets.length === 1) {
+    await downloadEntry(targets[0])
+    return
+  }
+  await guard(() =>
+    window.api.downloadMany(
+      props.sessionId,
+      targets.map((t) => ({ remotePath: t.path, name: t.name, isDir: t.isDir }))
+    )
+  )
+}
+
+async function removeTargets(targets: FileEntry[]): Promise<void> {
+  if (targets.length === 1) {
+    await removeEntry(targets[0])
+    return
+  }
+  const dirs = targets.filter((t) => t.isDir).length
+  const hint = dirs ? `，其中 ${dirs} 个是目录（连同内容递归删除）` : ''
+  if (!confirm(`确认删除选中的 ${targets.length} 项？${hint}。不可恢复。`)) return
+  try {
+    // 逐项删：一项失败不该把剩下的都吞掉，删成的那些也要如实反映出来
+    for (const t of targets) {
+      await window.api.sftpDelete(props.sessionId, t.path, t.isDir)
+    }
+  } catch (err) {
+    alert(`删除过程中出错：${errorText(err)}`)
+  } finally {
+    clearSelection()
+    await load()
+  }
+}
+
 /** 在终端中 cd 到当前目录（SFTP → 终端方向联动） */
 function openInTerminal(): void {
   const quoted = `'${cwd.value.replace(/'/g, `'\\''`)}'`
   window.api.input(props.sessionId, `cd ${quoted}\r`)
-}
-
-// ---- 拖出到资源管理器 ----
-/** 正在把哪个文件拉到本地（拖出必须先下载完才能交给系统拖动） */
-const dragPreparing = ref<string | null>(null)
-
-/**
- * 拖出行 → 交给主进程发起原生拖拽。
- *
- * 这里必须 preventDefault：不掐掉 HTML5 默认拖拽的话，渲染进程会同时启动
- * 一个「拖着一团网页内容」的拖拽，和主进程发起的原生文件拖拽打架。
- * 真正的拖拽由主进程 `webContents.startDrag` 发起 —— 只有它能给操作系统
- * 一个真实文件路径，而远端路径必须先下载到本地。
- *
- * 下载期间界面上只能等着，所以这里给一条明确的进行中提示，
- * 否则用户看到的就是「拖了一下什么都没发生」。
- */
-async function onDragStart(e: DragEvent, entry: FileEntry): Promise<void> {
-  e.preventDefault()
-
-  errorMsg.value = ''
-  dragPreparing.value = entry.name
-  try {
-    // 文件和目录都交给主进程：目录会先递归拉到本地临时目录再交给系统拖动，
-    // 大小/文件数超限由主进程抛错（见 SftpService.prepareDragOut）
-    await window.api.sftpStartDrag(props.sessionId, entry.path, entry.name)
-  } catch (err) {
-    // 用户自己点的取消不是错误，别把它当失败弹在界面上
-    const text = errorText(err)
-    if (!text.includes('已取消')) errorMsg.value = text
-  } finally {
-    dragPreparing.value = null
-  }
-}
-
-/** 中止拖出：拷贝可能已经拉了很久（目录要递归），用户必须能反悔 */
-function cancelDragOut(): void {
-  void window.api.sftpCancelDrag(props.sessionId)
 }
 
 // ---- 拖拽上传 ----
@@ -196,6 +288,62 @@ function onDrop(e: DragEvent): void {
   if (files.length) void guard(() => window.api.enqueueDropped(props.sessionId, cwd.value, files))
 }
 
+// ---- 上传完成后自动刷新 ----
+/*
+ * 上传结束列表不会自己变，用户得手动点刷新才看得到刚传上去的东西。
+ * 传一整个目录时尤其别扭：进度条都收干净了，眼前还是原来的样子。
+ *
+ * 三条约束：
+ *   只认上传 —— 下载改的是本地，远端目录纹丝不动，跟着刷是白跑一趟；
+ *   防抖 —— 传一个目录会展开成成百上千条任务，逐条刷新等于把 SFTP
+ *     服务器打爆，列表也会疯狂闪；
+ *   正在输入时不刷 —— 新建文件夹 / 重命名的输入框会被 load() 冲掉。
+ */
+const REFRESH_DEBOUNCE_MS = 600
+let refreshTimer: number | null = null
+/** 上一次看到的每条任务状态，用来认出「刚刚变成完成」的那一条 */
+let lastStatus = new Map<string, TransferTask['status']>()
+let unsubscribeTransfers: (() => void) | null = null
+
+/** 落地路径是否在当前目录（含子目录）里 —— 别处的上传没必要刷这一屏 */
+function isUnderCwd(remotePath: string): boolean {
+  const base = cwd.value.endsWith('/') ? cwd.value : `${cwd.value}/`
+  return remotePath.startsWith(base)
+}
+
+function scheduleRefresh(): void {
+  if (refreshTimer !== null) window.clearTimeout(refreshTimer)
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null
+    if (creatingDir.value || renamingPath.value) return
+    void load()
+  }, REFRESH_DEBOUNCE_MS)
+}
+
+function watchTransfers(): void {
+  unsubscribeTransfers = window.api.onTransferUpdate((tasks) => {
+    const next = new Map<string, TransferTask['status']>()
+    let touched = false
+    for (const t of tasks) {
+      next.set(t.id, t.status)
+      const was = lastStatus.get(t.id)
+      // was === undefined 是挂载后的第一份快照：里面已经是完成的那些不算数，
+      // 否则一打开面板就会为一个早就传完的文件白刷一次
+      if (
+        was !== undefined &&
+        was !== 'done' &&
+        t.status === 'done' &&
+        t.direction === 'upload' &&
+        isUnderCwd(t.remotePath)
+      ) {
+        touched = true
+      }
+    }
+    lastStatus = next
+    if (touched) scheduleRefresh()
+  })
+}
+
 // 会话切换时重新加载
 watch(() => props.sessionId, init)
 
@@ -207,8 +355,13 @@ watch(
   }
 )
 
-onMounted(init)
+onMounted(() => {
+  watchTransfers()
+  void init()
+})
 onBeforeUnmount(() => {
+  unsubscribeTransfers?.()
+  if (refreshTimer !== null) window.clearTimeout(refreshTimer)
   entries.value = []
 })
 </script>
@@ -250,19 +403,16 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <!--
-      拖出要先完整下载到本地才能交给系统拖动，这段等待必须让用户看见。
-      文件夹可能要递归拉很久，所以文案里点明是这个原因，别让人以为卡死了。
-    -->
-    <div v-if="dragPreparing" class="drag-hint">
-      <span>正在把「{{ dragPreparing }}」取到本地（拖出需要先有本地文件）…</span>
-      <button class="drag-cancel" @click="cancelDragOut">取消</button>
-    </div>
     <div v-if="errorMsg" class="error-banner">{{ errorMsg }}</div>
     <div v-if="loading" class="hint">加载中…</div>
 
-    <!-- 文件列表 -->
-    <div v-else class="file-list">
+    <!-- 文件列表；点空白处取消选中（和资源管理器一致） -->
+    <div
+      v-else
+      class="file-list"
+      @click.self="clearSelection"
+      @contextmenu.self.prevent="clearSelection"
+    >
       <div v-if="creatingDir" class="row editing">
         <Icon class="file-icon" name="folder" :size="15" />
         <input
@@ -277,11 +427,12 @@ onBeforeUnmount(() => {
       </div>
 
       <div
-        v-for="entry in entries"
+        v-for="(entry, index) in entries"
         :key="entry.path"
         class="row"
-        draggable="true"
-        @dragstart="onDragStart($event, entry)"
+        :class="{ selected: isSelected(entry) }"
+        @click="onRowClick($event, entry, index)"
+        @contextmenu.prevent="onRowContextMenu($event, entry, index)"
         @dblclick="openEntry(entry)"
       >
         <Icon
@@ -319,6 +470,15 @@ onBeforeUnmount(() => {
 
       <div v-if="!entries.length && !creatingDir" class="hint">空目录，拖拽文件到此处上传</div>
     </div>
+
+    <ContextMenu
+      v-if="menu"
+      :x="menu.x"
+      :y="menu.y"
+      :items="menu.items"
+      @select="onMenuSelect"
+      @close="closeMenu"
+    />
   </div>
 </template>
 
@@ -328,29 +488,29 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #2a2b3d;
-  background: #16161e;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
 }
 .explorer.drag-over {
-  outline: 2px dashed #7aa2f7;
+  outline: 2px dashed var(--focus-ring);
   outline-offset: -4px;
 }
 .toolbar {
   display: flex;
   gap: 4px;
   padding: 6px 8px;
-  border-bottom: 1px solid #2a2b3d;
+  border-bottom: 1px solid var(--border);
 }
 .breadcrumb {
   padding: 6px 10px;
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   overflow-x: auto;
   white-space: nowrap;
-  border-bottom: 1px solid #2a2b3d;
+  border-bottom: 1px solid var(--border);
 }
 .crumb {
-  color: #7aa2f7;
+  color: var(--accent-text);
   cursor: pointer;
 }
 .sep {
@@ -366,12 +526,37 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  font-size: 13px;
+  /* 左侧留出选中条的宽度，选中时内容不会整体右移 */
+  padding: 4px 10px 4px 12px;
+  font-size: var(--fs-md);
   cursor: default;
+  border-radius: var(--r-xs);
+  transition: background-color var(--dur-fast) var(--ease-out);
 }
 .row:hover {
-  background: #1f2335;
+  background: var(--bg-hover);
+}
+/* 选中：块状高亮 + 左侧竖条，跟本地文件管理器一个读法 */
+.row.selected {
+  background: var(--bg-active);
+  transition: background-color var(--dur-base) var(--ease-out);
+}
+.row.selected:hover {
+  background: var(--bg-hover);
+}
+.row.selected::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 3px;
+  bottom: 3px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent-text);
+}
+/* 按下时轻微回弹，给「点到了」一个触感 */
+.row:active {
+  transform: scale(0.995);
 }
 .file-name {
   flex: 1;
@@ -383,14 +568,14 @@ onBeforeUnmount(() => {
 .file-size {
   width: 64px;
   text-align: right;
-  color: #565f89;
-  font-size: 12px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
   flex-shrink: 0;
 }
 .file-time {
   width: 108px;
-  color: #565f89;
-  font-size: 12px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
   flex-shrink: 0;
 }
 /*
@@ -408,65 +593,41 @@ onBeforeUnmount(() => {
   top: 50%;
   transform: translateY(-50%);
   padding-left: 10px;
-  background: #1f2335;
-  box-shadow: -10px 0 10px #1f2335;
+  background: var(--bg-hover);
+  box-shadow: -10px 0 10px var(--bg-hover);
 }
 .row:hover .row-actions {
   display: flex;
 }
 .rename-input {
   flex: 1;
-  background: #1f2335;
-  border: 1px solid #7aa2f7;
-  border-radius: 4px;
-  color: #c0caf5;
+  background: var(--bg-hover);
+  border: 1px solid var(--focus-ring);
+  border-radius: var(--r-xs);
+  color: var(--fg);
   padding: 2px 6px;
-  font-size: 13px;
+  font-size: var(--fs-md);
   outline: none;
 }
 .file-icon {
-  color: #565f89;
+  color: var(--fg-muted);
 }
 .file-icon.dir {
-  color: #7aa2f7;
+  color: var(--accent-text);
 }
 .spacer {
   flex: 1;
 }
 .error-banner {
   padding: 8px 10px;
-  color: #f7768e;
-  font-size: 12px;
-  border-bottom: 1px solid #2a2b3d;
-}
-.drag-hint {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  color: #7aa2f7;
-  font-size: 12px;
-  border-bottom: 1px solid #2a2b3d;
-}
-.drag-cancel {
-  flex-shrink: 0;
-  margin-left: auto;
-  background: none;
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  color: #c0caf5;
-  font-size: 11px;
-  padding: 2px 8px;
-  cursor: pointer;
-}
-.drag-cancel:hover {
-  border-color: #f7768e;
-  color: #f7768e;
+  color: var(--danger-text);
+  font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--border);
 }
 .hint {
   padding: 16px;
-  color: #565f89;
-  font-size: 12px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
   text-align: center;
 }
 </style>

@@ -6,6 +6,7 @@ import { IpcChannels } from '../../shared/ipc'
 import type {
   AppSettings,
   CommandSnippet,
+  DownloadRequest,
   DroppedFile,
   ForwardRuleInput,
   HostKeyDecision,
@@ -18,10 +19,11 @@ import type { LayoutStore } from '../store/layoutStore'
 import type { SettingsStore } from '../store/settingsStore'
 import type { SessionManager } from '../ssh/SessionManager'
 import type { LocalPtyManager } from '../local/LocalPtyManager'
-import { LOCAL_ID_PREFIX } from '../local/LocalPtyManager'
+import { isContainerId, isLocalId } from '../../shared/sessionId'
+import { applyNativeTheme } from '../theme'
+import type { ContainerManager } from '../container/ContainerManager'
 import type { ConfigStore } from '../store/configStore'
 import type { SftpService } from '../sftp/SftpService'
-import { dragOutDir } from '../sftp/dragOut'
 import type { TransferManager } from '../sftp/TransferManager'
 import type { ForwardManager } from '../forward/ForwardManager'
 
@@ -32,19 +34,11 @@ export function registerIpc(
   sftpService: SftpService,
   transferManager: TransferManager,
   forwardManager: ForwardManager,
+  containerManager: ContainerManager,
   localPtyManager: LocalPtyManager,
   layoutStore: LayoutStore,
   settingsStore: SettingsStore
 ): void {
-  // 拖拽图标。开发时是仓库根目录下的 build/icon.png；打包后它在 asar 里，
-  // 用 nativeImage 读（能穿 asar）。electron-builder 的 files 里已包含它，
-  // 万一还是取不到就退回空图 —— 拖拽照常可用，只是没有自定义图标。
-  const dragIcon = (() => {
-    const p = join(app.getAppPath(), 'build', 'icon.png')
-    const img = existsSync(p) ? nativeImage.createFromPath(p) : nativeImage.createEmpty()
-    return img.isEmpty() ? nativeImage.createEmpty() : img
-  })()
-
   // ---- SSH 会话 ----
   ipcMain.handle(
     IpcChannels.sshConnect,
@@ -56,23 +50,36 @@ export function registerIpc(
     localPtyManager.spawn(event.sender, term, shellId)
   )
   ipcMain.handle(IpcChannels.localListShells, () => localPtyManager.listShells())
-  // 输入 / resize / 断开按 id 前缀路由到本地或 SSH（高频消息用 send/on）
-  ipcMain.on(IpcChannels.sshInput, (_event, id: string, data: string | Uint8Array) =>
-    id.startsWith(LOCAL_ID_PREFIX) ? localPtyManager.write(id, data) : sessionManager.write(id, data)
-  )
-  ipcMain.on(IpcChannels.sshResize, (_event, id: string, cols: number, rows: number) =>
-    id.startsWith(LOCAL_ID_PREFIX)
-      ? localPtyManager.resize(id, cols, rows)
-      : sessionManager.resize(id, cols, rows)
-  )
-  ipcMain.on(IpcChannels.sshDisconnect, (_event, id: string) =>
-    id.startsWith(LOCAL_ID_PREFIX) ? localPtyManager.kill(id) : sessionManager.disconnect(id)
-  )
-  // 本地终端没有重连概念，只对 SSH 会话生效
+  /*
+   * 输入 / resize / 断开按 id 前缀路由到本地终端、容器终端或 SSH（高频消息用 send/on）。
+   *
+   * 容器会话跑在父 SSH 连接上，如果落到 sessionManager 手里，
+   * disconnect 会 client.end() 掐断整条连接、resize 会去找一条并不存在的 shell ——
+   * 前缀是这三条路唯一的分岔口。
+   */
+  ipcMain.on(IpcChannels.sshInput, (_event, id: string, data: string | Uint8Array) => {
+    if (isLocalId(id)) localPtyManager.write(id, data)
+    else if (isContainerId(id)) containerManager.write(id, data)
+    else sessionManager.write(id, data)
+  })
+  ipcMain.on(IpcChannels.sshResize, (_event, id: string, cols: number, rows: number) => {
+    if (isLocalId(id)) localPtyManager.resize(id, cols, rows)
+    else if (isContainerId(id)) containerManager.resize(id, cols, rows)
+    else sessionManager.resize(id, cols, rows)
+  })
+  ipcMain.on(IpcChannels.sshDisconnect, (_event, id: string) => {
+    if (isLocalId(id)) localPtyManager.kill(id)
+    else if (isContainerId(id)) containerManager.close(id)
+    else sessionManager.disconnect(id)
+  })
+  /*
+   * 重连控制**只认 SSH 会话** —— 容器终端没有重连这回事，
+   * 本地终端也没有。放容器 id 进重连状态机只会造出「容器在重连」这种无意义循环。
+   */
   ipcMain.on(
     IpcChannels.sshReconnectControl,
     (_event, id: string, action: 'stop' | 'now') => {
-      if (!id.startsWith(LOCAL_ID_PREFIX)) sessionManager.reconnectControl(id, action)
+      if (!isLocalId(id) && !isContainerId(id)) sessionManager.reconnectControl(id, action)
     }
   )
   ipcMain.on(IpcChannels.sshHostKeyAnswer, (_event, requestId: string, decision: HostKeyDecision) =>
@@ -81,9 +88,12 @@ export function registerIpc(
 
   // ---- 应用设置 ----
   ipcMain.handle(IpcChannels.settingsGet, () => settingsStore.get())
-  ipcMain.handle(IpcChannels.settingsSet, (_event, settings: AppSettings) =>
+  ipcMain.handle(IpcChannels.settingsSet, (_event, settings: AppSettings) => {
     settingsStore.set(settings)
-  )
+    // 界面主题不只是渲染进程的事：原生下拉/滚动条吃的是 nativeTheme，
+    // 窗口底色也要跟着换。不在这里同步的话，切主题后原生控件仍是旧外观
+    applyNativeTheme(settings)
+  })
 
   // ---- 标签布局 ----
   ipcMain.handle(IpcChannels.layoutGet, () => layoutStore.get())
@@ -126,25 +136,14 @@ export function registerIpc(
       sftpService.writeText(sessionId, path, content, expectedMtime)
   )
 
-  /*
-   * 拖出到资源管理器。
-   *
-   * 必须先下载到本地再由主进程发起原生拖拽 —— 操作系统的拖放协议要的是
-   * 一个真实文件路径，渲染进程没法凭远端路径凭空造出一个拖放源。
-   * 所以这一步是「下载完才开始拖」，慢是必然的，超限文件在 prepareDragOut
-   * 里直接拒绝，避免用户对着「拖了没反应」的界面干等。
-   */
-  ipcMain.handle(
-    IpcChannels.sftpStartDrag,
-    async (event, sessionId: string, remotePath: string, fileName: string) => {
-      const localPath = await sftpService.prepareDragOut(sessionId, remotePath, fileName, dragOutDir())
-      event.sender.startDrag({ file: localPath, icon: dragIcon })
-      return localPath
-    }
+  // ---- 容器终端 ----
+  ipcMain.handle(IpcChannels.containerList, (_event, parentSessionId: string) =>
+    containerManager.list(parentSessionId)
   )
-  // 取消：只置一个标记，正在跑的拷贝自己会在下一个数据块处停下来并清理半截文件
-  ipcMain.handle(IpcChannels.sftpCancelDrag, (_event, sessionId: string) =>
-    sftpService.cancelDragOut(sessionId)
+  ipcMain.handle(
+    IpcChannels.containerConnect,
+    (event, parentSessionId: string, containerName: string, term: TermSize) =>
+      containerManager.open(parentSessionId, containerName, term, event.sender)
   )
 
   // ---- 传输队列 ----
@@ -195,6 +194,35 @@ export function registerIpc(
       })
       if (result.canceled || !result.filePaths[0]) return []
       return transferManager.enqueueDownloadDir(sessionId, remotePath, result.filePaths[0])
+    }
+  )
+
+  /*
+   * 批量下载：只弹一次目录选择框。
+   *
+   * 单文件走 transferDownload 的保存框（能顺手改文件名），多选就不行了 ——
+   * 选中十项弹十次对话框没法用，所以统一问一次「放哪个目录」。
+   */
+  ipcMain.handle(
+    IpcChannels.transferDownloadMany,
+    async (event, sessionId: string, items: DownloadRequest[]) => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      const result = await dialog.showOpenDialog(win!, {
+        title: `选择保存位置（${items.length} 项将下载到所选目录内）`,
+        defaultPath: app.getPath('downloads'),
+        properties: ['openDirectory', 'createDirectory']
+      })
+      if (result.canceled || !result.filePaths[0]) return []
+      const dir = result.filePaths[0]
+      // 入队本身是串行排队的，这里并发提交只是在建任务记录，不占传输通道
+      const nested = await Promise.all(
+        items.map((item) =>
+          item.isDir
+            ? transferManager.enqueueDownloadDir(sessionId, item.remotePath, dir)
+            : transferManager.enqueueDownload(sessionId, item.remotePath, join(dir, item.name))
+        )
+      )
+      return nested.flat()
     }
   )
 

@@ -79,7 +79,7 @@ useEscapeToClose(
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -87,16 +87,16 @@ useEscapeToClose(
 }
 .dialog {
   width: 440px;
-  background: #16161e;
-  border: 1px solid #2a2b3d;
-  border-radius: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   padding: 18px;
 }
 .dialog.danger {
-  border-color: #f7768e;
+  border-color: var(--danger-text);
 }
 .dialog-header {
-  font-size: 15px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   margin-bottom: 10px;
 }
@@ -106,36 +106,36 @@ useEscapeToClose(
   gap: 8px;
 }
 .title-line.danger {
-  color: #f7768e;
+  color: var(--danger-text);
 }
 .host-line {
-  font-size: 14px;
+  font-size: var(--fs-md);
   margin-bottom: 10px;
-  color: #7aa2f7;
+  color: var(--accent-text);
 }
 .warning {
-  font-size: 12px;
-  color: #f7768e;
-  background: rgba(247, 118, 142, 0.08);
-  border-radius: 6px;
+  font-size: var(--fs-sm);
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border-radius: var(--r-sm);
   padding: 8px 10px;
   margin-bottom: 10px;
   line-height: 1.6;
 }
 .hint-text {
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   margin-bottom: 10px;
   line-height: 1.6;
 }
 .fp-row {
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   margin: 4px 0;
   word-break: break-all;
 }
 .fp-row code {
-  color: #c0caf5;
+  color: var(--fg);
   font-family: Consolas, monospace;
 }
 .actions {
@@ -146,27 +146,27 @@ useEscapeToClose(
 .btn {
   flex: 1;
   padding: 8px 0;
-  border-radius: 6px;
-  border: 1px solid #2a2b3d;
-  background: #1f2335;
-  color: #c0caf5;
-  font-size: 13px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--fg);
+  font-size: var(--fs-md);
   cursor: pointer;
 }
 .btn.primary {
-  background: #7aa2f7;
-  border-color: #7aa2f7;
-  color: #16161e;
+  background: var(--accent-text);
+  border-color: var(--accent-text);
+  color: var(--bg-panel);
   font-weight: 600;
 }
 .btn.reject:hover {
-  border-color: #f7768e;
-  color: #f7768e;
+  border-color: var(--danger-text);
+  color: var(--danger-text);
 }
 .more {
   margin-top: 10px;
-  font-size: 12px;
-  color: #565f89;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
   text-align: center;
 }
 </style>

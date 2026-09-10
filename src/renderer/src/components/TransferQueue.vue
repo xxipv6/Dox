@@ -67,7 +67,8 @@ function progress(t: TransferTask): number {
       </span>
     </div>
 
-    <div v-if="!collapsed" class="task-list">
+    <!-- 用 class 而不是 v-if：折叠要能动画，一 v-if 就直接从 DOM 里没了 -->
+    <div class="task-list" :class="{ collapsed }">
       <div v-if="hiddenCount" class="more-hint">另有 {{ hiddenCount }} 条较早的任务未显示</div>
       <div v-for="task in visibleTasks" :key="task.id" class="task">
         <Icon
@@ -118,8 +119,8 @@ function progress(t: TransferTask): number {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid #2a2b3d;
-  background: #16161e;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
   max-height: 40%;
 }
 .panel-header {
@@ -128,25 +129,37 @@ function progress(t: TransferTask): number {
   align-items: center;
   flex-shrink: 0;
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
-  background: #1f2335;
+  background: var(--bg-hover);
 }
 .header-actions {
   display: flex;
   gap: 4px;
 }
-/* 占满面板剩余高度，上限由 .transfer-panel 的 max-height 控制 */
+/*
+ * 占满面板剩余高度，上限由 .transfer-panel 的 max-height 控制。
+ * 展开/收起走 max-height 过渡；折叠时 max-height: 0 会压过 flex-grow，
+ * 所以不需要再单独把 flex 改掉。
+ */
 .task-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  max-height: 320px;
+  transition:
+    max-height var(--dur-slow) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out);
+}
+.task-list.collapsed {
+  max-height: 0;
+  opacity: 0;
 }
 .more-hint {
   padding: 6px 12px;
-  font-size: 11px;
-  color: #565f89;
-  border-bottom: 1px solid #1f2335;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--bg-hover);
 }
 /*
  * 任务行限宽。
@@ -160,13 +173,13 @@ function progress(t: TransferTask): number {
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  font-size: 12px;
-  border-top: 1px solid #1f2335;
+  font-size: var(--fs-sm);
+  border-top: 1px solid var(--bg-hover);
   max-width: 720px;
 }
 .direction {
   flex-shrink: 0;
-  color: #565f89;
+  color: var(--fg-muted);
 }
 .task-body {
   flex: 1;
@@ -180,27 +193,27 @@ function progress(t: TransferTask): number {
 }
 .progress-track {
   height: 6px;
-  background: #2a2b3d;
-  border-radius: 3px;
+  background: var(--border);
+  border-radius: var(--r-xs);
   overflow: hidden;
 }
 .progress-bar {
   height: 100%;
-  background: #7aa2f7;
+  background: var(--accent-text);
   transition: width 0.15s;
 }
 .progress-bar.done {
-  background: #9ece6a;
+  background: var(--success-text);
 }
 .progress-bar.error,
 .progress-bar.canceled {
-  background: #f7768e;
+  background: var(--danger-text);
 }
 .task-status {
   flex-shrink: 0;
-  color: #565f89;
+  color: var(--fg-muted);
 }
 .task-status.error {
-  color: #f7768e;
+  color: var(--danger-text);
 }
 </style>

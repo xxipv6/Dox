@@ -1,3 +1,163 @@
+/*
+ * 设计令牌。
+ *
+ * 这个文件是**唯一**允许写死色值的地方。组件里一律 `var(--token)`，
+ * 这样「换一套配色」才是一件能做的事 —— 在此之前颜色是散在 14 个文件里的
+ * 约 270 个字面量，只对应 28 个不同值，却没有任何一处可以统一调整。
+ */
+
+/* ---------------------------------------------------------------------------
+ * 不随主题变化的部分
+ * ------------------------------------------------------------------------- */
+:root {
+  /* 动效。同一类交互（悬停、选中、展开）在侧栏、文件列表、传输队列里
+     应当是同一个时长，否则放在一起会显得有的地方黏、有的地方跳。
+     整体偏克制 —— 这是工具，不是展示页。 */
+  --dur-fast: 80ms; /* 悬停、按下 */
+  --dur-base: 120ms; /* 选中、状态切换 */
+  --dur-slow: 160ms; /* 面板展开/收起 */
+  --ease-out: cubic-bezier(0.2, 0, 0.2, 1);
+
+  /* 圆角：控件 / 列表行 / 浮层 三档，徽标用 pill */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-pill: 999px;
+
+  /* 间距。现有代码里 2/3/4/5/6/8/10/12/14/16 都在用，
+     收敛到五档之后对齐关系才能一眼看出来。 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+
+  /* 字号。之前散落 10/11/12/13/14/15/16/18 八种，只保留五档 */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+
+  --fw-normal: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+}
+
+/* ---------------------------------------------------------------------------
+ * 亮色「晴空」（默认）
+ *
+ * 亮色写在 :root 上，所以没有 data-theme 属性时也是亮色 —— 首次渲染、
+ * 恢复主题失败、或将来某处漏了写属性，落到的都是完整的一套颜色，
+ * 而不是一堆未定义的 var()。
+ * ------------------------------------------------------------------------- */
+:root,
+:root[data-theme='light'] {
+  color-scheme: light; /* 原生滚动条 / select 下拉 / range / checkbox 跟着变 */
+
+  --bg: #f8faff; /* 应用底（雪白偏蓝） */
+  --bg-sunken: #e9f0fa; /* 凹陷条：标签栏、传输队列、代码块 */
+  --bg-panel: #ffffff; /* 抬升面：侧栏、面板、活动标签、对话框 */
+  --bg-hover: #eaf2fc; /* 悬停面 */
+  --bg-active: #dcedfb; /* 选中 / 活动面 */
+
+  --border: #dee7f5;
+  --border-strong: #c3d4ea;
+
+  --fg: #1e293b; /* 正文 */
+  --fg-secondary: #475569; /* 次级正文 */
+  --fg-muted: #5b6b80; /* 弱化文字 / 占位 / 图标 */
+  --fg-on-accent: #ffffff; /* 主色实底上的文字 */
+
+  /*
+   * 主色分两档，这不是冗余 —— 天空蓝 #0ea5e9 在白底上只有 2.77:1，
+   * 当**文字**和**图标**都不合格（WCAG AA 要 4.5:1，图形要 3:1）。
+   * 所以：
+   *   --accent      当"颜料"用：大块填充、进度条、装饰性高亮线、-soft 的基色
+   *   --accent-text 当"字"用：文字、图标、承载语义的边框、带白字的实底按钮
+   */
+  --accent: #0ea5e9; /* 天空蓝 */
+  --accent-text: #0369a1; /* 天空蓝·深（白底 5.9:1） */
+  --accent-hover: #0284c7;
+  --accent-soft: #e0f2fe; /* 主色淡底：选中行、悬停高亮 */
+  --focus-ring: #0284c7; /* 聚焦环要看得见，浅到 1.5:1 等于没有 */
+
+  /* 状态色同理：实心色当填充，-text 才是能写字的那档 */
+  --success: #10b981; /* 青草绿 */
+  --success-text: #047857; /* 白底 5.5:1 */
+  --success-soft: #e7f8f1;
+  --warning: #f59e0b; /* 琥珀 */
+  --warning-text: #b45309; /* 白底 5.0:1 */
+  --warning-soft: #fef3e2;
+  --warning-border: #f2c98b; /* 断线状态条的描边：要比 -soft 明显、又不喧宾夺主 */
+  --danger: #ef4444; /* 珊瑚红 */
+  --danger-text: #dc2626; /* 白底 4.8:1 */
+  --danger-soft: #fdecec;
+
+  --overlay: rgba(15, 23, 42, 0.35);
+
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-md:
+    0 4px 16px rgba(15, 23, 42, 0.1), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.16);
+}
+
+/* ---------------------------------------------------------------------------
+ * 深色「冷夜」
+ *
+ * 与亮色同源：同一套色相压暗，而不是另起一套紫灰。
+ * 选择器必须是 `:root[data-theme='dark']`（特异性 0,2,0）而不是
+ * `[data-theme='dark']` —— 后者与 `:root` 同为 0,1,0，只能靠出现顺序决胜，
+ * 以后有人在中间插一段就会静默失效。
+ * ------------------------------------------------------------------------- */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0b1220;
+  --bg-sunken: #080e18;
+  --bg-panel: #131c2e;
+  --bg-hover: #1b2740;
+  --bg-active: #1e3a5f;
+
+  --border: #23324c;
+  --border-strong: #33486b;
+
+  --fg: #e2e8f0;
+  --fg-secondary: #a9b8ce;
+  --fg-muted: #7c8ca6;
+  --fg-on-accent: #05121f;
+
+  /*
+   * 深色下不存在"颜料档 vs 文字档"的问题：这些颜色本身就是亮色，
+   * 铺在深底上对比度都在 7:1 以上。所以 -text 一律直接别名回基色 ——
+   * 令牌的**契约**（哪里用哪个）两套主题下保持一致，只有取值分叉。
+   */
+  --accent: #38bdf8;
+  --accent-text: var(--accent);
+  --accent-hover: #7dd3fc;
+  --accent-soft: #14304a;
+  --focus-ring: #0ea5e9;
+
+  --success: #34d399;
+  --success-text: var(--success);
+  --success-soft: rgba(52, 211, 153, 0.14);
+  --warning: #fbbf24;
+  --warning-text: var(--warning);
+  --warning-soft: rgba(251, 191, 36, 0.14);
+  --warning-border: rgba(251, 191, 36, 0.4);
+  --danger: #f87171;
+  --danger-text: var(--danger);
+  --danger-soft: rgba(248, 113, 113, 0.14);
+
+  --overlay: rgba(0, 0, 0, 0.55);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md:
+    0 4px 16px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
 html,
 body,
 #app {
@@ -8,17 +168,37 @@ body,
   overflow: hidden;
 }
 
+/*
+ * html / body 刻意**不刷底色**，底色的所有者是 #app。
+ *
+ * 原因：主题是异步读出来的（主进程 electron-store），在它落定之前浏览器已经开始
+ * 画了。如果 body 上写了 `var(--bg)`，深色用户每次启动都会先看到一帧亮色。
+ * 留空的话，那一帧露出来的是 BrowserWindow 的 backgroundColor —— 主进程在
+ * 建窗前就已经按用户设置算好了（见 src/main/index.ts 的 windowBackgroundColor），
+ * 所以从一开始就是对的，整类 FOUC 问题直接消失。
+ */
 body {
-  background: #1a1b26;
-  color: #c0caf5;
+  background: transparent;
+  color: var(--fg);
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   user-select: none;
 }
 
+#app {
+  background: var(--bg);
+}
+
 /* 终端内文本允许选择（选中即复制由 M4 实现） */
 .xterm {
   user-select: text;
+}
+
+/* 非终端文本的选中色。原先没有，用的是浏览器默认 —— 亮色下是一片
+   和主色毫无关系的系统蓝。 */
+::selection {
+  background: var(--accent-soft);
+  color: var(--fg);
 }
 
 /*
@@ -35,27 +215,37 @@ body {
   justify-content: center;
   background: none;
   border: none;
-  color: #565f89;
+  color: var(--fg-muted);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-md);
   padding: 3px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .icon-btn:hover {
-  color: #c0caf5;
-  background: #1f2335;
+  color: var(--fg);
+  background: var(--bg-hover);
 }
 
 .icon-btn.danger:hover {
-  color: #f7768e;
+  color: var(--danger);
 }
 
 .icon-btn.active {
-  color: #7aa2f7;
-  background: #1f2335;
+  color: var(--accent);
+  background: var(--bg-hover);
 }
 
 .icon-btn.dim {
   opacity: 0.45;
+}
+
+/* 键盘可达性：只在键盘聚焦时画环，鼠标点击不画。
+   之前全仓库只有 2 处有 outline。 */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }

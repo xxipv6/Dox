@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import type {
+  ContainerInfo,
   SavedSession,
   SaveSessionInput,
   SessionStatus,
@@ -20,11 +21,22 @@ export interface PaneState {
 /** row = 左右分屏，column = 上下分屏，none = 单 pane */
 export type SplitDirection = 'none' | 'row' | 'column'
 
+/** 容器标签的出身：从哪条 SSH 会话、进哪个容器 */
+export interface ContainerTabInfo {
+  /**
+   * 承载 `docker exec` 的父 SSH 会话 id。
+   * 同一标签的所有 pane 共用这一个 client，各自开一条独立的 exec 通道。
+   */
+  parentSessionId: string
+  containerName: string
+  image: string
+}
+
 export interface SessionTab {
   tabId: string
   title: string
-  /** ssh = 远端会话；local = 本地终端（node-pty） */
-  kind: 'ssh' | 'local'
+  /** ssh = 远端宿主机；local = 本地终端（node-pty）；container = 容器内 shell */
+  kind: 'ssh' | 'local' | 'container'
   /** SSH 标签页的连接配置，分屏时用于克隆出新会话；本地标签页为 null */
   config: SshSessionConfig | null
   /**
@@ -37,6 +49,8 @@ export interface SessionTab {
    * 用户点「重新连接」时用它预填认证表单 —— 密码不在其中，必须重新输入。
    */
   pendingPrefill?: { host: string; port: number; username: string }
+  /** 只有 kind === 'container' 才有 */
+  container?: ContainerTabInfo
   split: SplitDirection
   panes: PaneState[]
   activePaneId: string
@@ -152,9 +166,15 @@ export const useSessionStore = defineStore('sessions', () => {
       const sessionId =
         tab.kind === 'local'
           ? await window.api.connectLocal(size, useSettingsStore().localShellId || undefined)
-          : await window.api.connect(toPlainConfig(tab.config!), size, {
-              savedSessionId: tab.savedSessionId
-            })
+          : tab.kind === 'container'
+            ? await window.api.connectContainer(
+                tab.container!.parentSessionId,
+                tab.container!.containerName,
+                size
+              )
+            : await window.api.connect(toPlainConfig(tab.config!), size, {
+                savedSessionId: tab.savedSessionId
+              })
 
       // 连接在途时用户可能已经关掉了标签/窗格：此时会话已建立但无人认领，
       // 必须立刻断开，否则 ssh 连接（含整条跳板机链路）或本地 shell 进程
@@ -230,6 +250,45 @@ export const useSessionStore = defineStore('sessions', () => {
       title: '本地终端',
       kind: 'local',
       config: null,
+      split: 'none',
+      panes: [pane],
+      activePaneId: pane.paneId
+    })
+    tabs.value.push(tab)
+    activeTabId.value = tab.tabId
+    await connectPane(tab, pane)
+  }
+
+  /**
+   * 进入一个容器：在父 SSH 会话的连接上开一条 docker exec 通道。
+   *
+   * 同一个容器的标签如果已经关掉/断掉了，**复用那个标签**而不是再堆一个 ——
+   * 反复进出同一个容器不该把标签栏塞满。
+   */
+  async function enterContainer(
+    parentSessionId: string,
+    box: Pick<ContainerInfo, 'name' | 'image'>
+  ): Promise<void> {
+    const dead = tabs.value.find(
+      (t) =>
+        t.kind === 'container' &&
+        t.container?.parentSessionId === parentSessionId &&
+        t.container.containerName === box.name &&
+        t.panes.every((p) => p.status === 'closed' || p.status === 'error')
+    )
+    if (dead) {
+      activeTabId.value = dead.tabId
+      for (const pane of dead.panes) await connectPane(dead, pane)
+      return
+    }
+
+    const pane = newPane()
+    const tab = reactive<SessionTab>({
+      tabId: `tab-${++tabSeq}`,
+      title: `容器 · ${box.name}`,
+      kind: 'container',
+      config: null,
+      container: { parentSessionId, containerName: box.name, image: box.image },
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -376,6 +435,7 @@ export const useSessionStore = defineStore('sessions', () => {
     setLastExitCode,
     connect,
     connectSaved,
+    enterContainer,
     connectLocal,
     restoreUnsavedTab,
     splitActive,
