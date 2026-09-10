@@ -9,6 +9,7 @@ import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
 import { useSettingsStore } from '../stores/settings'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
+import Icon from './Icon.vue'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
@@ -427,9 +428,9 @@ defineExpose({ refitAndFocus })
         @keyup.enter="findNext"
         @keyup.shift.enter="findPrevious"
       />
-      <button title="上一个 (Shift+Enter)" @click="findPrevious">↑</button>
-      <button title="下一个 (Enter)" @click="findNext">↓</button>
-      <button title="关闭 (Esc)" @click="toggleSearch">×</button>
+      <button title="上一个 (Shift+Enter)" @click="findPrevious"><Icon name="arrow-up" /></button>
+      <button title="下一个 (Enter)" @click="findNext"><Icon name="arrow-down" /></button>
+      <button title="关闭 (Esc)" @click="toggleSearch"><Icon name="x" /></button>
     </div>
 
     <!-- 右键菜单 -->
@@ -538,12 +539,15 @@ defineExpose({ refitAndFocus })
   border-color: #7aa2f7;
 }
 .search-bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: 1px solid #2a2b3d;
   border-radius: 4px;
   color: #565f89;
   cursor: pointer;
-  padding: 0 8px;
+  padding: 4px 8px;
 }
 .search-bar button:hover {
   color: #c0caf5;

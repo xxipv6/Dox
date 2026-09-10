@@ -5,6 +5,7 @@ import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
 import { errorText } from '../utils/errors'
+import Icon from './Icon.vue'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
@@ -22,11 +23,16 @@ const newDirName = ref('')
 const renamingPath = ref<string | null>(null)
 const renameValue = ref('')
 
+/**
+ * 面包屑的各级目录。
+ *
+ * 这里**不再**塞一个 name 为 '/' 的根节点：模板会为每级的下一项补一个
+ * '/' 分隔符，根节点占着第 0 位却自己渲染成 '/'，于是 /root 显示成 / / root。
+ * 根由模板单独渲染一次。
+ */
 const breadcrumbs = computed(() => {
   const parts = cwd.value.split('/').filter(Boolean)
-  return [{ name: '/', path: '/' }].concat(
-    parts.map((name, i) => ({ name, path: '/' + parts.slice(0, i + 1).join('/') }))
-  )
+  return parts.map((name, i) => ({ name, path: '/' + parts.slice(0, i + 1).join('/') }))
 })
 
 async function load(dir?: string): Promise<void> {
@@ -179,22 +185,27 @@ onBeforeUnmount(() => {
   >
     <!-- 工具栏 -->
     <div class="toolbar">
-      <button class="icon-btn" title="上一级" @click="goUp">↑</button>
-      <button class="icon-btn" title="刷新" @click="load()">⟳</button>
-      <button class="icon-btn" title="新建文件夹" @click="creatingDir = true">📁+</button>
-      <button class="icon-btn" title="上传文件" @click="pickUpload">⬆</button>
+      <button class="icon-btn" title="上一级" @click="goUp"><Icon name="arrow-up" /></button>
+      <button class="icon-btn" title="刷新" @click="load()"><Icon name="refresh" /></button>
+      <button class="icon-btn" title="新建文件夹" @click="creatingDir = true">
+        <Icon name="folder-plus" />
+      </button>
+      <button class="icon-btn" title="上传文件" @click="pickUpload"><Icon name="upload" /></button>
       <span class="spacer"></span>
-      <button class="icon-btn" title="在终端中打开此目录" @click="openInTerminal">⌨</button>
+      <button class="icon-btn" title="在终端中打开此目录" @click="openInTerminal">
+        <Icon name="terminal" />
+      </button>
       <button
         class="icon-btn"
         :class="{ active: store.followTerminal }"
         :title="store.followTerminal ? '跟随终端：开（cd 时面板自动跳转）' : '跟随终端：关'"
         @click="store.toggleFollowTerminal()"
-      >⇄</button>
+      ><Icon name="follow" /></button>
     </div>
 
-    <!-- 面包屑 -->
+    <!-- 面包屑：根单独渲染一次，其余每级前面补分隔符 -->
     <div class="breadcrumb">
+      <a class="crumb" title="/" @click="load('/')">/</a>
       <template v-for="(crumb, i) in breadcrumbs" :key="crumb.path">
         <span v-if="i > 0" class="sep">/</span>
         <a class="crumb" @click="load(crumb.path)">{{ crumb.name }}</a>
@@ -207,7 +218,7 @@ onBeforeUnmount(() => {
     <!-- 文件列表 -->
     <div v-else class="file-list">
       <div v-if="creatingDir" class="row editing">
-        <span class="file-icon">📁</span>
+        <Icon class="file-icon" name="folder" :size="15" />
         <input
           v-model="newDirName"
           class="rename-input"
@@ -225,7 +236,12 @@ onBeforeUnmount(() => {
         class="row"
         @dblclick="openEntry(entry)"
       >
-        <span class="file-icon">{{ entry.isDir ? '📁' : entry.isSymlink ? '🔗' : '📄' }}</span>
+        <Icon
+          class="file-icon"
+          :class="{ dir: entry.isDir }"
+          :name="entry.isDir ? 'folder' : entry.isSymlink ? 'link' : 'file'"
+          :size="15"
+        />
         <input
           v-if="renamingPath === entry.path"
           v-model="renameValue"
@@ -243,9 +259,13 @@ onBeforeUnmount(() => {
             class="icon-btn"
             :title="entry.isDir ? '下载文件夹（递归）' : '下载'"
             @click.stop="downloadEntry(entry)"
-          >⬇</button>
-          <button class="icon-btn" title="重命名" @click.stop="startRename(entry)">✎</button>
-          <button class="icon-btn danger" title="删除" @click.stop="removeEntry(entry)">🗑</button>
+          ><Icon name="download" /></button>
+          <button class="icon-btn" title="重命名" @click.stop="startRename(entry)">
+            <Icon name="pencil" />
+          </button>
+          <button class="icon-btn danger" title="删除" @click.stop="removeEntry(entry)">
+            <Icon name="trash" />
+          </button>
         </span>
       </div>
 
@@ -294,6 +314,7 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 .row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -304,11 +325,9 @@ onBeforeUnmount(() => {
 .row:hover {
   background: #1f2335;
 }
-.row:hover .row-actions {
-  visibility: visible;
-}
 .file-name {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -326,10 +345,26 @@ onBeforeUnmount(() => {
   font-size: 12px;
   flex-shrink: 0;
 }
+/*
+ * 悬浮在行尾，不参与布局。
+ *
+ * 原来写的是 visibility: hidden —— 它只是不画出来，**照样占着宽度**，
+ * 于是三个按钮在每一行都白占 ~80px，把 360px 面板里的文件名挤到只剩
+ * 7 个字符（.vscode… 出现两次时根本分不出谁是谁）。改成绝对定位后
+ * 文件名拿回全部宽度，按钮只在悬停时盖住名字末尾。
+ */
 .row-actions {
-  visibility: hidden;
+  display: none;
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding-left: 10px;
+  background: #1f2335;
+  box-shadow: -10px 0 10px #1f2335;
+}
+.row:hover .row-actions {
   display: flex;
-  flex-shrink: 0;
 }
 .rename-input {
   flex: 1;
@@ -341,27 +376,14 @@ onBeforeUnmount(() => {
   font-size: 13px;
   outline: none;
 }
-.icon-btn {
-  background: none;
-  border: none;
+.file-icon {
   color: #565f89;
-  cursor: pointer;
-  font-size: 13px;
-  padding: 2px 4px;
 }
-.icon-btn:hover {
-  color: #c0caf5;
-}
-.icon-btn.active {
+.file-icon.dir {
   color: #7aa2f7;
-  background: #1f2335;
-  border-radius: 4px;
 }
 .spacer {
   flex: 1;
-}
-.icon-btn.danger:hover {
-  color: #f7768e;
 }
 .error-banner {
   padding: 8px 10px;

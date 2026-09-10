@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import type { SavedSession } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
 import { errorText } from '../utils/errors'
+import { useEscapeToClose } from '../composables/useEscapeToClose'
 
 const store = useSessionStore()
 
@@ -18,6 +19,13 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 
 const busy = ref(false)
 const errorMsg = ref('')
+
+// 正在连接时不让 Esc 关掉：请求已经发出去了，关掉弹窗会让用户
+// 以为操作被取消了，实际连接还在后台建
+useEscapeToClose(
+  () => props.visible && !busy.value,
+  () => emit('close')
+)
 
 const form = reactive({
   name: '',
@@ -180,7 +188,7 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
               :key="s.id"
               :value="s.id"
             >
-              ⛓ 经 {{ s.name }} 跳转
+              经 {{ s.name }} 跳转
             </option>
           </select>
         </template>

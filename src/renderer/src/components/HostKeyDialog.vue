@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { HostKeyDecision, HostKeyVerifyRequest } from '@shared/types'
+import Icon from './Icon.vue'
+import { useEscapeToClose } from '../composables/useEscapeToClose'
 
 const api = window.api
 
@@ -24,14 +26,27 @@ function answer(decision: HostKeyDecision): void {
   api.answerHostKey(req.requestId, decision)
   queue.value.shift()
 }
+
+/*
+ * Esc 等同于「拒绝」——三个选项里唯一不会授予信任的那个（fail closed）。
+ * 让 Esc 什么都不做更糟：用户会以为弹窗卡死了，然后去点「信任」。
+ */
+useEscapeToClose(
+  () => current.value !== null,
+  () => answer('reject')
+)
 </script>
 
 <template>
   <div v-if="current" class="overlay">
     <div class="dialog" :class="{ danger: current.status === 'changed' }">
       <div class="dialog-header">
-        <span v-if="current.status === 'new'">🔑 首次连接到新主机</span>
-        <span v-else>⚠️ 主机指纹已变更</span>
+        <span v-if="current.status === 'new'" class="title-line">
+          <Icon name="key" :size="16" /> 首次连接到新主机
+        </span>
+        <span v-else class="title-line danger">
+          <Icon name="alert" :size="16" /> 主机指纹已变更
+        </span>
       </div>
 
       <div class="host-line">
@@ -84,6 +99,14 @@ function answer(decision: HostKeyDecision): void {
   font-size: 15px;
   font-weight: 600;
   margin-bottom: 10px;
+}
+.title-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.title-line.danger {
+  color: #f7768e;
 }
 .host-line {
   font-size: 14px;

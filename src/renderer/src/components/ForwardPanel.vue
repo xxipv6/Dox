@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import type { ForwardRule } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
 import { errorText } from '../utils/errors'
+import Icon from './Icon.vue'
 
 const api = window.api
 const store = useSessionStore()
@@ -85,7 +86,7 @@ const statusText: Record<ForwardRule['status'], string> = {
       class="icon-btn"
       :title="formVisible ? '收起' : '添加转发'"
       @click="formVisible = !formVisible"
-    >{{ formVisible ? '−' : '＋' }}</button>
+    ><Icon :name="formVisible ? 'minus' : 'plus'" :size="15" /></button>
   </div>
 
   <div v-if="formVisible" class="forward-form">
@@ -121,7 +122,9 @@ const statusText: Record<ForwardRule['status'], string> = {
       :{{ rule.listenPort }} → {{ rule.targetHost }}:{{ rule.targetPort }}
     </span>
     <span class="rule-status" :class="rule.status">{{ statusText[rule.status] }}</span>
-    <button class="icon-btn danger" title="移除" @click="api.removeForward(rule.id)">×</button>
+    <button class="icon-btn danger" title="移除" @click="api.removeForward(rule.id)">
+      <Icon name="x" />
+    </button>
   </div>
 </template>
 
@@ -259,19 +262,5 @@ const statusText: Record<ForwardRule['status'], string> = {
 }
 .rule-status.stopped {
   color: #565f89;
-}
-.icon-btn {
-  background: none;
-  border: none;
-  color: #565f89;
-  cursor: pointer;
-  font-size: 13px;
-  padding: 2px 4px;
-}
-.icon-btn:hover {
-  color: #c0caf5;
-}
-.icon-btn.danger:hover {
-  color: #f7768e;
 }
 </style>

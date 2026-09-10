@@ -3,6 +3,7 @@ import { onMounted, ref, watch } from 'vue'
 import { useSessionStore } from '../stores/sessions'
 import { useSettingsStore } from '../stores/settings'
 import DeviceDialog from './DeviceDialog.vue'
+import Icon from './Icon.vue'
 import ForwardPanel from './ForwardPanel.vue'
 import SnippetPanel from './SnippetPanel.vue'
 import type { SavedSession } from '@shared/types'
@@ -60,9 +61,11 @@ async function remove(s: SavedSession): Promise<void> {
     <div class="sidebar-header">
       <span v-if="!collapsed" class="logo">Dox</span>
       <span class="header-actions">
-        <button v-if="!collapsed" class="icon-btn" title="设置" @click="settings.openDialog()">⚙</button>
+        <button v-if="!collapsed" class="icon-btn" title="设置" @click="settings.openDialog()">
+          <Icon name="settings" :size="16" />
+        </button>
         <button class="icon-btn" :title="collapsed ? '展开' : '收起'" @click="collapsed = !collapsed">
-          {{ collapsed ? '»' : '«' }}
+          <Icon :name="collapsed ? 'chevron-right' : 'panel-left'" :size="16" />
         </button>
       </span>
     </div>
@@ -71,7 +74,9 @@ async function remove(s: SavedSession): Promise<void> {
       <!-- 设备列表 -->
       <div class="section-title">
         设备
-        <button class="icon-btn add-btn" title="添加设备" @click="openAdd">＋</button>
+        <button class="icon-btn add-btn" title="添加设备" @click="openAdd">
+          <Icon name="plus" :size="15" />
+        </button>
       </div>
 
       <div class="device-list">
@@ -85,19 +90,27 @@ async function remove(s: SavedSession): Promise<void> {
           :title="`${s.username}@${s.host}:${s.port} — 双击连接`"
           @dblclick="store.connectSaved(s)"
         >
-          <span class="device-icon">🖥</span>
+          <Icon class="device-icon" name="server" :size="15" />
           <span class="device-info">
             <span class="device-name">
-              <span v-if="s.jumpHostId" class="jump-badge" title="经跳板机连接">⛓</span>{{ s.name }}
+              <span v-if="s.jumpHostId" class="jump-badge" title="经跳板机连接">
+                <Icon name="link" :size="12" />
+              </span>{{ s.name }}
             </span>
             <span class="device-host">{{ s.username }}@{{ s.host }}:{{ s.port }}</span>
           </span>
           <!-- 同时拦截 click 与 dblclick：只 stop click 的话，连点两下 × 会
                触发整行的 dblclick（去连接），看起来就像「删除没反应」 -->
           <span class="device-actions" @dblclick.stop>
-            <button class="icon-btn" title="连接" @click.stop="store.connectSaved(s)">▶</button>
-            <button class="icon-btn" title="编辑" @click.stop="openEdit(s)">✎</button>
-            <button class="icon-btn danger" title="删除" @click.stop="remove(s)">×</button>
+            <button class="icon-btn" title="连接" @click.stop="store.connectSaved(s)">
+              <Icon name="play" />
+            </button>
+            <button class="icon-btn" title="编辑" @click.stop="openEdit(s)">
+              <Icon name="pencil" />
+            </button>
+            <button class="icon-btn danger" title="删除" @click.stop="remove(s)">
+              <Icon name="x" />
+            </button>
           </span>
         </div>
       </div>
@@ -105,7 +118,7 @@ async function remove(s: SavedSession): Promise<void> {
       <!-- 次级工具面板 -->
       <div class="section-title tools-toggle" @click="showTools = !showTools">
         工具
-        <span class="chevron">{{ showTools ? '▾' : '▸' }}</span>
+        <Icon class="chevron" :name="showTools ? 'chevron-down' : 'chevron-right'" :size="14" />
       </div>
       <template v-if="showTools">
         <ForwardPanel />
@@ -162,13 +175,12 @@ async function remove(s: SavedSession): Promise<void> {
   margin: 8px 0 6px;
   text-transform: uppercase;
 }
+/* 全局 .icon-btn:hover 要能生效，这里不能加 !important 把颜色锁死 */
 .add-btn {
-  font-size: 15px !important;
-  color: #7aa2f7 !important;
-  line-height: 1;
+  color: #7aa2f7;
 }
 .add-btn:hover {
-  color: #9ab8ff !important;
+  color: #9ab8ff;
 }
 .device-list {
   display: flex;
@@ -176,6 +188,7 @@ async function remove(s: SavedSession): Promise<void> {
   gap: 2px;
 }
 .device {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -186,11 +199,8 @@ async function remove(s: SavedSession): Promise<void> {
 .device:hover {
   background: #1f2335;
 }
-.device:hover .device-actions {
-  visibility: visible;
-}
 .device-icon {
-  font-size: 14px;
+  color: #565f89;
   flex-shrink: 0;
 }
 .device-info {
@@ -213,13 +223,27 @@ async function remove(s: SavedSession): Promise<void> {
   white-space: nowrap;
 }
 .jump-badge {
-  margin-right: 3px;
-  font-size: 11px;
+  display: inline-flex;
+  vertical-align: -2px;
+  margin-right: 4px;
+  color: #7aa2f7;
 }
+/*
+ * 同 FileExplorer：绝对定位悬浮，不用 visibility —— 后者只是不画出来，
+ * 照样占着宽度，把设备名和主机地址挤窄。
+ */
 .device-actions {
-  visibility: hidden;
+  display: none;
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding-left: 8px;
+  background: #1f2335;
+  box-shadow: -8px 0 8px #1f2335;
+}
+.device:hover .device-actions {
   display: flex;
-  flex-shrink: 0;
 }
 .tools-toggle {
   cursor: pointer;
@@ -228,26 +252,12 @@ async function remove(s: SavedSession): Promise<void> {
   margin-top: 12px;
 }
 .chevron {
-  font-size: 10px;
+  color: #565f89;
 }
 .empty-hint {
   font-size: 12px;
   color: #565f89;
   padding: 8px 4px;
   line-height: 1.6;
-}
-.icon-btn {
-  background: none;
-  border: none;
-  color: #565f89;
-  cursor: pointer;
-  font-size: 13px;
-  padding: 2px 4px;
-}
-.icon-btn:hover {
-  color: #c0caf5;
-}
-.icon-btn.danger:hover {
-  color: #f7768e;
 }
 </style>

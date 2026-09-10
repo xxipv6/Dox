@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import type { CommandSnippet } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
+import Icon from './Icon.vue'
 
 const api = window.api
 const store = useSessionStore()
@@ -71,7 +72,7 @@ async function remove(s: CommandSnippet): Promise<void> {
         formVisible = !formVisible;
         if (!formVisible) resetForm()
       "
-    >{{ formVisible ? '−' : '＋' }}</button>
+    ><Icon :name="formVisible ? 'minus' : 'plus'" :size="15" /></button>
   </div>
 
   <div v-if="formVisible" class="snippet-form">
@@ -98,15 +99,15 @@ async function remove(s: CommandSnippet): Promise<void> {
         :class="{ dim: !store.activeSessionId }"
         title="发送到终端并执行"
         @click="run(s)"
-      >▶</button>
+      ><Icon name="play" /></button>
       <button
         class="icon-btn"
         :class="{ dim: !store.activeSessionId }"
         title="粘贴到命令行（不执行）"
         @click="pasteOnly(s)"
-      >⤵</button>
-      <button class="icon-btn" title="编辑" @click="edit(s)">✎</button>
-      <button class="icon-btn danger" title="删除" @click="remove(s)">×</button>
+      ><Icon name="paste" /></button>
+      <button class="icon-btn" title="编辑" @click="edit(s)"><Icon name="pencil" /></button>
+      <button class="icon-btn danger" title="删除" @click="remove(s)"><Icon name="x" /></button>
     </span>
   </div>
 </template>
@@ -187,22 +188,5 @@ async function remove(s: CommandSnippet): Promise<void> {
 .snippet-actions {
   display: flex;
   flex-shrink: 0;
-}
-.icon-btn {
-  background: none;
-  border: none;
-  color: #565f89;
-  cursor: pointer;
-  font-size: 13px;
-  padding: 2px 4px;
-}
-.icon-btn:hover {
-  color: #c0caf5;
-}
-.icon-btn.dim {
-  opacity: 0.35;
-}
-.icon-btn.danger:hover {
-  color: #f7768e;
 }
 </style>

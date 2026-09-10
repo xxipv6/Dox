@@ -20,3 +20,42 @@ body {
 .xterm {
   user-select: text;
 }
+
+/*
+ * 图标按钮：全局定义一次。
+ *
+ * 原先每个组件各抄一份，抄出了细微差别（padding 有的 2px 4px 有的 0 2px），
+ * 图标字体大小/对齐也跟着漂。放在这里统一，组件里只保留各自的颜色变体。
+ * 注意 scoped 样式带 [data-v-*] 属性选择器，特异性高于全局选择器，
+ * 所以组件里**不要**再重复定义基础规则，否则会盖掉这份。
+ */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: #565f89;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 3px;
+  border-radius: 4px;
+}
+
+.icon-btn:hover {
+  color: #c0caf5;
+  background: #1f2335;
+}
+
+.icon-btn.danger:hover {
+  color: #f7768e;
+}
+
+.icon-btn.active {
+  color: #7aa2f7;
+  background: #1f2335;
+}
+
+.icon-btn.dim {
+  opacity: 0.45;
+}

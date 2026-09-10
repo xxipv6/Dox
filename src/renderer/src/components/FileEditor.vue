@@ -6,6 +6,7 @@ import { basicSetup } from 'codemirror'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { useEditorStore, type OpenFile } from '../stores/editor'
 import { languageFor } from '../editor/languages'
+import Icon from './Icon.vue'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useEditorStore()
@@ -152,7 +153,7 @@ function dirty(file: OpenFile | null | undefined): boolean {
         <span v-if="dirty(file)" class="dirty-dot" title="有未保存的修改">●</span>
         <span class="etab-name">{{ file.name }}</span>
         <button class="etab-close" title="关闭" @click.stop="store.close(props.sessionId, file.path)">
-          ×
+          <Icon name="x" :size="12" />
         </button>
       </div>
       <span class="spacer"></span>
@@ -165,7 +166,9 @@ function dirty(file: OpenFile | null | undefined): boolean {
         保存
       </button>
       <button class="bar-btn" title="放弃本地修改，重新从远端读取" @click="reload">重载</button>
-      <button class="bar-btn" title="收起编辑器" @click="store.hide(props.sessionId)">✕</button>
+      <button class="bar-btn" title="收起编辑器" @click="store.hide(props.sessionId)">
+        <Icon name="x" />
+      </button>
     </div>
 
     <div class="editor-path" :title="active?.path">
@@ -215,7 +218,8 @@ function dirty(file: OpenFile | null | undefined): boolean {
 }
 .etab.active {
   color: #c0caf5;
-  background: #1a1b26;
+  background: #24283b;
+  box-shadow: inset 0 2px 0 #7aa2f7;
 }
 .etab-name {
   max-width: 160px;
@@ -227,12 +231,14 @@ function dirty(file: OpenFile | null | undefined): boolean {
   font-size: 10px;
 }
 .etab-close {
+  display: inline-flex;
+  align-items: center;
   background: none;
   border: none;
   color: #565f89;
   cursor: pointer;
-  font-size: 13px;
-  padding: 0 1px;
+  padding: 2px;
+  border-radius: 3px;
 }
 .etab-close:hover {
   color: #f7768e;
@@ -241,6 +247,9 @@ function dirty(file: OpenFile | null | undefined): boolean {
   flex: 1;
 }
 .bar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   border-left: 1px solid #2a2b3d;
   background: none;

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { TransferTask } from '@shared/types'
 import { formatPercent, formatSize } from '../utils/format'
+import Icon from './Icon.vue'
 
 const api = window.api
 const tasks = ref<TransferTask[]>([])
@@ -44,15 +45,23 @@ function progress(t: TransferTask): number {
     <div class="panel-header" @click="collapsed = !collapsed">
       <span>传输队列<template v-if="activeCount">（{{ activeCount }} 进行中）</template></span>
       <span class="header-actions">
-        <button class="icon-btn" title="清除已完成" @click.stop="api.clearFinishedTransfers()">🧹</button>
-        <button class="icon-btn">{{ collapsed ? '▲' : '▼' }}</button>
+        <button class="icon-btn" title="清除已完成" @click.stop="api.clearFinishedTransfers()">
+          <Icon name="check-square" />
+        </button>
+        <button class="icon-btn">
+          <Icon :name="collapsed ? 'chevron-up' : 'chevron-down'" />
+        </button>
       </span>
     </div>
 
     <div v-if="!collapsed" class="task-list">
       <div v-if="hiddenCount" class="more-hint">另有 {{ hiddenCount }} 条较早的任务未显示</div>
       <div v-for="task in visibleTasks" :key="task.id" class="task">
-        <span class="direction">{{ task.direction === 'upload' ? '⬆' : '⬇' }}</span>
+        <Icon
+          class="direction"
+          :name="task.direction === 'upload' ? 'upload' : 'download'"
+          :size="13"
+        />
         <div class="task-body">
           <div class="task-name" :title="task.localPath + ' ↔ ' + task.remotePath">
             {{ task.fileName }}
@@ -130,6 +139,7 @@ function progress(t: TransferTask): number {
 }
 .direction {
   flex-shrink: 0;
+  color: #565f89;
 }
 .task-body {
   flex: 1;
@@ -165,15 +175,5 @@ function progress(t: TransferTask): number {
 }
 .task-status.error {
   color: #f7768e;
-}
-.icon-btn {
-  background: none;
-  border: none;
-  color: #565f89;
-  cursor: pointer;
-  padding: 2px 4px;
-}
-.icon-btn:hover {
-  color: #c0caf5;
 }
 </style>

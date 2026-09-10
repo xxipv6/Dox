@@ -10,6 +10,7 @@ import FileEditor from './components/FileEditor.vue'
 import TransferQueue from './components/TransferQueue.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
+import Icon from './components/Icon.vue'
 
 const store = useSessionStore()
 const editor = useEditorStore()
@@ -116,10 +117,14 @@ async function toggleSftp(): Promise<void> {
               class="exit-badge"
               :title="`上一条命令退出码 ${activeExitCode(tab)}`"
             >✗{{ activeExitCode(tab) }}</span>
-            <button class="tab-close" title="关闭" @click.stop="store.closeTab(tab)">×</button>
+            <button class="tab-close" title="关闭" @click.stop="store.closeTab(tab)">
+              <Icon name="x" :size="12" />
+            </button>
           </div>
 
-          <button class="tab-new" title="新建本地终端" @click="store.connectLocal()">＋</button>
+          <button class="tab-new" title="新建本地终端" @click="store.connectLocal()">
+            <Icon name="plus" :size="15" />
+          </button>
         </div>
 
         <template v-if="store.activePane?.sessionId">
@@ -128,20 +133,20 @@ async function toggleSftp(): Promise<void> {
             class="bar-btn"
             title="向右分屏（同主机新会话）"
             @click="split('row')"
-          >◧</button>
+          ><Icon name="split-right" /></button>
           <button
             v-if="store.activeTab!.split === 'none'"
             class="bar-btn"
             title="向下分屏（同主机新会话）"
             @click="split('column')"
-          >⬓</button>
+          ><Icon name="split-down" /></button>
           <button
             v-if="store.activeTab!.kind === 'ssh'"
             class="bar-btn"
             :class="{ on: store.sftpVisible }"
             title="SFTP 文件面板"
             @click="toggleSftp"
-          >📂 SFTP</button>
+          ><Icon name="folder" /> SFTP</button>
         </template>
       </div>
 
@@ -256,11 +261,26 @@ async function toggleSftp(): Promise<void> {
   border-right: 1px solid #2a2b3d;
   white-space: nowrap;
 }
+/*
+ * 活动标签。原来只把背景从 #16161e 提到 #1a1b26 —— 四个通道各差 4/255，
+ * 跟没写一样。改成顶部一条高亮线 + 明显提亮的面，扫一眼就知道在哪。
+ */
 .tab.active {
   color: #c0caf5;
-  background: #1a1b26;
+  background: #24283b;
+  box-shadow: inset 0 2px 0 #7aa2f7;
+}
+.tab.active:hover {
+  background: #292e42;
+}
+.tab:not(.active):hover {
+  background: #1f2335;
+  color: #a9b1d6;
 }
 .bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: none;
   border-left: 1px solid #2a2b3d;
   background: none;
@@ -272,10 +292,12 @@ async function toggleSftp(): Promise<void> {
 }
 .bar-btn:hover {
   color: #c0caf5;
+  background: #1f2335;
 }
 .bar-btn.on {
   color: #7aa2f7;
-  background: #1a1b26;
+  background: #1f2335;
+  box-shadow: inset 0 -2px 0 #7aa2f7;
 }
 .status-dot {
   width: 8px;
@@ -304,26 +326,32 @@ async function toggleSftp(): Promise<void> {
   }
 }
 .tab-close {
+  display: inline-flex;
+  align-items: center;
   background: none;
   border: none;
   color: #565f89;
   cursor: pointer;
-  font-size: 14px;
-  padding: 0 2px;
+  padding: 2px;
+  border-radius: 3px;
 }
 .tab-close:hover {
   color: #f7768e;
+  background: #1f2335;
+}
+.tab.active .tab-close {
+  color: #a9b1d6;
 }
 .tab-new {
+  display: inline-flex;
+  align-items: center;
   border: none;
   border-right: 1px solid #2a2b3d;
   background: none;
   color: #565f89;
-  font-size: 15px;
   padding: 0 14px;
   cursor: pointer;
   flex-shrink: 0;
-  line-height: 1;
 }
 .tab-new:hover {
   color: #7aa2f7;

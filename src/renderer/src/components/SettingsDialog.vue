@@ -2,9 +2,15 @@
 import { onMounted, ref } from 'vue'
 import { FONT_PRESETS, useSettingsStore } from '../stores/settings'
 import { TERMINAL_THEMES } from '../utils/themes'
+import { useEscapeToClose } from '../composables/useEscapeToClose'
 import type { LocalShellInfo } from '@shared/types'
 
 const settings = useSettingsStore()
+
+useEscapeToClose(
+  () => settings.dialogVisible,
+  () => (settings.dialogVisible = false)
+)
 const shells = ref<LocalShellInfo[]>([])
 
 onMounted(async () => {
