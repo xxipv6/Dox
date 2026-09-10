@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
 import { useSessionStore, type SessionTab } from './stores/sessions'
 import SessionSidebar from './components/SessionSidebar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
@@ -9,6 +9,11 @@ import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
 
 const store = useSessionStore()
+
+// Wave 形态：应用启动即开一个本地终端标签页
+onMounted(() => {
+  if (store.tabs.length === 0) void store.connectLocal()
+})
 
 /** sessionId → TerminalPanel 实例，用于标签页/分屏切换后 refit + focus */
 const panelRefs = ref<Record<string, InstanceType<typeof TerminalPanel>>>({})
@@ -90,6 +95,7 @@ async function toggleSftp(): Promise<void> {
             @click="split('column')"
           >⬓</button>
           <button
+            v-if="store.activeTab!.kind === 'ssh'"
             class="bar-btn"
             :class="{ on: store.sftpVisible }"
             title="SFTP 文件面板"
@@ -101,8 +107,8 @@ async function toggleSftp(): Promise<void> {
       <!-- 终端 + SFTP 分栏 -->
       <div class="terminal-area">
         <div v-if="!store.tabs.length" class="welcome">
-          <h2>Dox SSH 终端</h2>
-          <p>从左侧选择已保存的会话，或填写快速连接开始。</p>
+          <h2>Dox 终端</h2>
+          <p>本地终端启动中… SSH 会话请从左侧连接。</p>
         </div>
 
         <div class="terminal-stack">
@@ -143,7 +149,7 @@ async function toggleSftp(): Promise<void> {
         </div>
 
         <FileExplorer
-          v-if="store.sftpVisible && store.activeSessionId"
+          v-if="store.sftpVisible && store.activeTab?.kind === 'ssh' && store.activeSessionId"
           :key="store.activeSessionId"
           :session-id="store.activeSessionId"
         />

@@ -7,6 +7,7 @@ import { KnownHostsStore } from './store/knownHosts'
 import { SftpService } from './sftp/SftpService'
 import { TransferManager } from './sftp/TransferManager'
 import { ForwardManager } from './forward/ForwardManager'
+import { LocalPtyManager } from './local/LocalPtyManager'
 import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
 import { setupAutoUpdater } from './updater'
@@ -38,6 +39,7 @@ const forwardManager = new ForwardManager(
 )
 // 会话断开时自动停止其转发规则
 sessionManager.onClosed = (id) => forwardManager.stopBySession(id)
+const localPtyManager = new LocalPtyManager()
 
 // Windows 通知 / 任务栏跳转列表所需
 if (process.platform === 'win32') {
@@ -78,7 +80,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  registerIpc(sessionManager, configStore, sftpService, transferManager, forwardManager)
+  registerIpc(sessionManager, configStore, sftpService, transferManager, forwardManager, localPtyManager)
   createWindow()
   setupAutoUpdater()
 
@@ -89,7 +91,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   sessionManager.disconnectAll()
+  localPtyManager.killAll()
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => sessionManager.disconnectAll())
+app.on('before-quit', () => {
+  sessionManager.disconnectAll()
+  localPtyManager.killAll()
+})

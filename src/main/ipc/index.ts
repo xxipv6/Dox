@@ -13,6 +13,8 @@ import type {
   TermSize
 } from '../../shared/types'
 import type { SessionManager } from '../ssh/SessionManager'
+import type { LocalPtyManager } from '../local/LocalPtyManager'
+import { LOCAL_ID_PREFIX } from '../local/LocalPtyManager'
 import type { ConfigStore } from '../store/configStore'
 import type { SftpService } from '../sftp/SftpService'
 import type { TransferManager } from '../sftp/TransferManager'
@@ -24,20 +26,29 @@ export function registerIpc(
   configStore: ConfigStore,
   sftpService: SftpService,
   transferManager: TransferManager,
-  forwardManager: ForwardManager
+  forwardManager: ForwardManager,
+  localPtyManager: LocalPtyManager
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle('ssh:connect', (event, config: SshSessionConfig, term: TermSize) =>
     sessionManager.connect(config, event.sender, term)
   )
-  // 输入与 resize 为高频消息，用 send/on 避免 handle 的 Promise 开销
+  // ---- 本地终端 ----
+  ipcMain.handle(IpcChannels.localConnect, (event, term: TermSize) =>
+    localPtyManager.spawn(event.sender, term)
+  )
+  // 输入 / resize / 断开按 id 前缀路由到本地或 SSH（高频消息用 send/on）
   ipcMain.on(IpcChannels.sshInput, (_event, id: string, data: string | Uint8Array) =>
-    sessionManager.write(id, data)
+    id.startsWith(LOCAL_ID_PREFIX) ? localPtyManager.write(id, data) : sessionManager.write(id, data)
   )
   ipcMain.on(IpcChannels.sshResize, (_event, id: string, cols: number, rows: number) =>
-    sessionManager.resize(id, cols, rows)
+    id.startsWith(LOCAL_ID_PREFIX)
+      ? localPtyManager.resize(id, cols, rows)
+      : sessionManager.resize(id, cols, rows)
   )
-  ipcMain.on(IpcChannels.sshDisconnect, (_event, id: string) => sessionManager.disconnect(id))
+  ipcMain.on(IpcChannels.sshDisconnect, (_event, id: string) =>
+    id.startsWith(LOCAL_ID_PREFIX) ? localPtyManager.kill(id) : sessionManager.disconnect(id)
+  )
   ipcMain.on(IpcChannels.sshHostKeyAnswer, (_event, requestId: string, decision: HostKeyDecision) =>
     sessionManager.answerHostKey(requestId, decision)
   )

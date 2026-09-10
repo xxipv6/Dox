@@ -5,6 +5,8 @@ export const IpcChannels = {
   sshInput: 'ssh:input',
   sshResize: 'ssh:resize',
   sshDisconnect: 'ssh:disconnect',
+  // 本地终端（id 带 local- 前缀，input/resize/disconnect 共用上方通道按前缀路由）
+  localConnect: 'local:connect',
   // 主进程 → 渲染进程事件
   sshData: 'ssh:data',
   sshStatus: 'ssh:status',

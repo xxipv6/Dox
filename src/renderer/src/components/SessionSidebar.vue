@@ -78,6 +78,8 @@ async function saveAndConnect(): Promise<void> {
     </div>
 
     <template v-if="!collapsed">
+      <button class="btn local-term-btn" @click="store.connectLocal()">💻 本地终端</button>
+
       <!-- 已保存会话 -->
       <div class="section-title">会话</div>
       <div v-if="!store.savedSessions.length" class="empty-hint">暂无保存的会话</div>
@@ -296,5 +298,11 @@ input:focus {
 .btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+.local-term-btn {
+  width: 100%;
+  margin-bottom: 4px;
+  text-align: left;
+  padding: 7px 10px;
 }
 </style>

@@ -172,14 +172,16 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => fitAddon?.fit())
   resizeObserver.observe(container.value!)
 
-  // 初始化 cwd 为远端 home（跟随功能以此为起点）
-  void window.api
-    .sftpRealpath(props.sessionId, '.')
-    .then((home) => {
-      store.setHome(props.sessionId, home)
-      if (!store.cwdBySession[props.sessionId]) store.setCwd(props.sessionId, home)
-    })
-    .catch(() => undefined)
+  // 初始化 cwd 为远端 home（跟随功能以此为起点）；本地终端无 SFTP，跳过
+  if (!props.sessionId.startsWith('local-')) {
+    void window.api
+      .sftpRealpath(props.sessionId, '.')
+      .then((home) => {
+        store.setHome(props.sessionId, home)
+        if (!store.cwdBySession[props.sessionId]) store.setCwd(props.sessionId, home)
+      })
+      .catch(() => undefined)
+  }
 
   term.focus()
 })

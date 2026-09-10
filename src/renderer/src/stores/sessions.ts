@@ -16,8 +16,10 @@ export type SplitDirection = 'none' | 'row' | 'column'
 export interface SessionTab {
   tabId: string
   title: string
-  /** 连接配置，分屏时用于克隆出新会话（密码等敏感信息本就经过渲染进程连接流程） */
-  config: SshSessionConfig
+  /** ssh = 远端会话；local = 本地终端（node-pty） */
+  kind: 'ssh' | 'local'
+  /** SSH 标签页的连接配置，分屏时用于克隆出新会话；本地标签页为 null */
+  config: SshSessionConfig | null
   split: SplitDirection
   panes: PaneState[]
   activePaneId: string
@@ -70,7 +72,11 @@ export const useSessionStore = defineStore('sessions', () => {
     pane.status = 'connecting'
     try {
       // shell 建立前先用 80x24，建立后 xterm 的 onResize 会立即修正
-      pane.sessionId = await window.api.connect(tab.config, { cols: 80, rows: 24 })
+      const size = { cols: 80, rows: 24 }
+      pane.sessionId =
+        tab.kind === 'local'
+          ? await window.api.connectLocal(size)
+          : await window.api.connect(tab.config!, size)
       pane.status = 'connected'
     } catch (err) {
       pane.status = 'error'
@@ -83,7 +89,25 @@ export const useSessionStore = defineStore('sessions', () => {
     const tab = reactive<SessionTab>({
       tabId: `tab-${++tabSeq}`,
       title: `${config.username}@${config.host}`,
+      kind: 'ssh',
       config,
+      split: 'none',
+      panes: [pane],
+      activePaneId: pane.paneId
+    })
+    tabs.value.push(tab)
+    activeTabId.value = tab.tabId
+    await connectPane(tab, pane)
+  }
+
+  /** 打开本地终端标签页（Wave 形态：应用启动的默认视图） */
+  async function connectLocal(): Promise<void> {
+    const pane = newPane()
+    const tab = reactive<SessionTab>({
+      tabId: `tab-${++tabSeq}`,
+      title: '本地终端',
+      kind: 'local',
+      config: null,
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -185,6 +209,7 @@ export const useSessionStore = defineStore('sessions', () => {
     setHome,
     connect,
     connectSaved,
+    connectLocal,
     splitActive,
     setActivePane,
     closePane,
