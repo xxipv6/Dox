@@ -376,6 +376,9 @@ export const useSessionStore = defineStore('sessions', () => {
     if (activeTabId.value === tab.tabId) {
       activeTabId.value = tabs.value.at(-1)?.tabId ?? null
     }
+    // 关到一空就自动开一个本地终端 —— 全空的界面没有「下一步去哪」，
+    // 与启动时无标签默认开本地终端（App.vue）是同一个取舍
+    if (tabs.value.length === 0) void connectLocal()
   }
 
   async function refreshSaved(): Promise<void> {
