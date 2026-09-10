@@ -30,7 +30,9 @@ win.on('dialog', (d) => d.accept())
 await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
-  { timeout: 10000 }
+  // 签名是 (fn, arg, options)：漏掉 arg 会把 timeout 当成页面函数参数，
+  // 静默退回默认的 30 秒 —— 写在代码里的值从来没生效过。
+  undefined, { timeout: 10000 }
 )
 
 // 布局是会持久化的：上一个脚本留下的标签会被自动恢复出来，导致这里的
@@ -40,7 +42,7 @@ await win.reload()
 await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
-  { timeout: 10000 }
+  undefined, { timeout: 10000 }
 )
 
 const check = (label, ok, detail = '') => {
@@ -92,7 +94,7 @@ await win.locator('.device .device-name').first().dblclick()
 try {
   await win.waitForFunction(
     () => document.querySelectorAll('.terminal-container').length >= 2,
-    { timeout: 25000 }
+    undefined, { timeout: 25000 }
   )
   check('SSH 连接建立', true)
 } catch {

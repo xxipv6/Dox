@@ -86,7 +86,9 @@ function tail(text, n = 8) {
 await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
-  { timeout: 10000 }
+  // 签名是 (fn, arg, options)：漏掉 arg 会把 timeout 当成页面函数参数，
+  // 静默退回默认的 30 秒 —— 写在代码里的值从来没生效过。
+  undefined, { timeout: 10000 }
 )
 // 设置现在存在主进程，改完要等它落盘再 reload，否则会读到旧值
 const originalSettings = await win.evaluate(() => window.api.getSettings())
@@ -100,7 +102,7 @@ await win.reload()
 await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
-  { timeout: 10000 }
+  undefined, { timeout: 10000 }
 )
 
 // 重连只要约 1 秒，靠轮询去抓「重连中」必然漏。改成记录每一次状态推送，
@@ -140,7 +142,7 @@ await win.locator('.device .device-name').first().dblclick()
 try {
   await win.waitForFunction(
     () => document.querySelectorAll('.terminal-container').length >= 2,
-    { timeout: 25000 }
+    undefined, { timeout: 25000 }
   )
 } catch {
   check('SSH 连接建立', false, '超时')

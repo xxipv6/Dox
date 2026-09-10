@@ -27,9 +27,24 @@ win.on('dialog', async (d) => {
 })
 
 await win.waitForLoadState('domcontentloaded')
+
+/*
+ * 先清掉上次运行留下的布局快照再重新加载。
+ *
+ * 本脚本上一轮会留下「密码错、连不上」的 SSH 标签，重启后布局恢复把它恢复
+ * 成活动标签 —— 那个标签没有终端，于是所有 .terminal-container 都是 v-show
+ * 隐藏的、clientWidth 为 0，下面这个等待必然超时。表现是「第一次能跑通、
+ * 第二次必挂」，与代码改动无关。
+ */
+await win.waitForTimeout(1200)
+await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+await win.reload()
+await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
-  { timeout: 10000 }
+  // 签名是 (fn, arg, options)：漏掉 arg 会把 timeout 当成页面函数参数，
+  // 静默退回默认的 30 秒 —— 写在代码里的值从来没生效过。
+  undefined, { timeout: 15000 }
 )
 
 const devices = () =>
@@ -97,4 +112,6 @@ for (let i = 0; i < 6; i++) {
 await win.screenshot({ path: join('shots', '21-ssh-result.png') })
 console.log('\n渲染进程报错:', consoleErrors.length ? consoleErrors.slice(0, 5) : '无')
 
+// 收尾：本脚本会留下一个连不上的 SSH 标签，别让它变成用户下次开机的布局
+await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 await app.close()

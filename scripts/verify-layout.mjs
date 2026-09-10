@@ -70,7 +70,9 @@ check('无快照时只开默认本地终端', initial.length === 1, JSON.stringi
 await win.locator('.device .device-name').first().dblclick()
 await win.waitForFunction(
   () => document.querySelectorAll('.terminal-container').length >= 2,
-  { timeout: 25000 }
+  // 签名是 (fn, arg, options)：漏掉 arg 会把 timeout 当成页面函数参数，
+  // 静默退回默认的 30 秒 —— 写在代码里的值从来没生效过。
+  undefined, { timeout: 25000 }
 )
 await win.waitForTimeout(1500)
 

@@ -19,7 +19,9 @@ await win.waitForTimeout(2000)
 try {
   await win.waitForFunction(
     () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
-    { timeout: 8000 }
+    // 签名是 (fn, arg, options)：漏掉 arg 会把 timeout 当成页面函数参数，
+    // 静默退回默认的 30 秒 —— 写在代码里的值从来没生效过。
+    undefined, { timeout: 8000 }
   )
 } catch {
   console.log('警告：终端容器始终未获得有效尺寸')

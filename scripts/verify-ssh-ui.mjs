@@ -16,9 +16,21 @@ mkdirSync('shots', { recursive: true })
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 await win.waitForLoadState('domcontentloaded')
+
+/*
+ * 先清掉上次运行留下的布局快照再重新加载 —— 本脚本上一轮会留下一个连不上的
+ * SSH 标签，布局恢复会把它恢复成活动标签；那种标签没有终端，所有
+ * .terminal-container 都是 v-show 隐藏的、clientWidth 为 0，下面必然超时。
+ */
+await win.waitForTimeout(1200)
+await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+await win.reload()
+await win.waitForLoadState('domcontentloaded')
 await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
-  { timeout: 10000 }
+  // 签名是 (fn, arg, options)：漏掉 arg 会把 timeout 当成页面函数参数，
+  // 静默退回默认的 30 秒 —— 写在代码里的值从来没生效过。
+  undefined, { timeout: 15000 }
 )
 
 // 打开添加设备弹窗
@@ -36,12 +48,21 @@ await win.locator('button:has-text("仅连接")').click()
 // 观察 8 秒内发生的事（可能先弹主机指纹确认，再报认证失败）
 for (const sec of [1, 3, 6, 9]) {
   await win.waitForTimeout(sec === 1 ? 1000 : 2000 + (sec === 9 ? 1000 : 0))
-  const state = await win.evaluate(() => ({
-    hostKeyDialog: !!document.querySelector('.overlay .dialog-header'),
-    hostKeyText: document.querySelector('.overlay .dialog-header')?.textContent?.trim() ?? null,
-    tabCount: document.querySelectorAll('.tab').length,
-    placeholder: document.querySelector('.tab-placeholder')?.textContent?.trim() ?? null
-  }))
+  const state = await win.evaluate(() => {
+    // 必须按标题内容认指纹弹窗：只用 '.overlay .dialog-header' 会把还开着的
+    // 「添加设备」弹窗也算进来，于是去点一个不存在的「信任并保存」而超时
+    const headers = [...document.querySelectorAll('.overlay .dialog-header')].map(
+      (e) => e.textContent?.trim() ?? ''
+    )
+    const hostKeyText = headers.find((t) => t.includes('主机')) ?? null
+    return {
+      hostKeyDialog: hostKeyText !== null,
+      hostKeyText,
+      anyDialog: headers[0] ?? null,
+      tabCount: document.querySelectorAll('.tab').length,
+      placeholder: document.querySelector('.tab-placeholder')?.textContent?.trim() ?? null
+    }
+  })
   console.log(`[${sec}s]`, JSON.stringify(state))
   if (state.hostKeyDialog) {
     await win.screenshot({ path: join('shots', '11-hostkey-dialog.png') })
