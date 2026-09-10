@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import type { ForwardRule } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
+import { errorText } from '../utils/errors'
 
 const api = window.api
 const store = useSessionStore()
@@ -14,6 +15,16 @@ const form = reactive({
   targetHost: '127.0.0.1',
   targetPort: 80
 })
+
+const validPort = (p: number): boolean => Number.isInteger(p) && p > 0 && p < 65536
+/** 端口清空会成为 NaN，落盘会被序列化成 null，必须挡住 */
+const formValid = computed(
+  () =>
+    !!store.activeSessionId &&
+    !!form.targetHost.trim() &&
+    validPort(form.listenPort) &&
+    validPort(form.targetPort)
+)
 
 let unsubscribe: (() => void) | null = null
 
@@ -35,16 +46,28 @@ onMounted(async () => {
 
 onBeforeUnmount(() => unsubscribe?.())
 
+const errorMsg = ref('')
+
 async function add(): Promise<void> {
   if (!store.activeSessionId) return
-  await api.addForward({
-    sessionId: store.activeSessionId,
-    type: form.type,
-    listenPort: form.listenPort,
-    targetHost: form.targetHost.trim(),
-    targetPort: form.targetPort
-  })
-  formVisible.value = false
+  if (!formValid.value) {
+    errorMsg.value = '请填写合法的监听端口与目标地址/端口'
+    return
+  }
+  errorMsg.value = ''
+  try {
+    await api.addForward({
+      sessionId: store.activeSessionId,
+      type: form.type,
+      listenPort: form.listenPort,
+      targetHost: form.targetHost.trim(),
+      targetPort: form.targetPort
+    })
+    formVisible.value = false
+  } catch (err) {
+    // 之前这里是 fire-and-forget：端口被占用等错误完全无声，用户只看到没反应
+    errorMsg.value = errorText(err)
+  }
 }
 
 const statusText: Record<ForwardRule['status'], string> = {
@@ -84,7 +107,8 @@ const statusText: Record<ForwardRule['status'], string> = {
         ? `本机 :${form.listenPort} → 经SSH→ ${form.targetHost || '…'}:${form.targetPort}`
         : `远端 :${form.listenPort} → 回传→ ${form.targetHost || '…'}:${form.targetPort}（本地可达地址）` }}
     </p>
-    <button class="btn primary" @click="add">启动转发</button>
+    <button class="btn primary" :disabled="!formValid" @click="add">启动转发</button>
+    <p v-if="errorMsg" class="form-error">{{ errorMsg }}</p>
   </div>
 
   <div v-if="!rules.length && !formVisible" class="empty-hint">
@@ -156,6 +180,12 @@ const statusText: Record<ForwardRule['status'], string> = {
   font-size: 11px;
   color: #565f89;
   margin: 0;
+}
+.form-error {
+  font-size: 11px;
+  color: #f7768e;
+  margin: 0;
+  word-break: break-all;
 }
 .btn {
   padding: 6px 0;

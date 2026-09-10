@@ -20,6 +20,8 @@ interface ActiveSession {
 export type JumpResolver = (id: string) => SshSessionConfig
 
 const MAX_JUMP_DEPTH = 3
+/** 指纹确认弹窗的最长等待时间：超时按拒绝处理，避免挂起的连接与待决记录泄漏 */
+const HOST_KEY_TIMEOUT_MS = 120_000
 
 /**
  * SSH 会话池：所有 ssh2 Client 由主进程持有，
@@ -47,12 +49,22 @@ export class SessionManager {
 
     return new Promise<string>((resolve, reject) => {
       let settled = false
+      // shell 通道可能一直不响应（远端 MaxSessions 打满等），readyTimeout 覆盖不到，
+      // 这里加整体超时，避免 UI 永远停在「正在连接」
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        cleanupJumps()
+        client.end()
+        reject(new Error('连接超时：SSH 已建立但未能在 30 秒内打开 shell 通道'))
+      }, 30_000)
 
       client.on('ready', () => {
         client.shell(
           { term: 'xterm-256color', cols: term.cols, rows: term.rows },
           (err, stream) => {
             if (err) {
+              clearTimeout(timer)
               client.end()
               cleanupJumps()
               if (!settled) {
@@ -61,6 +73,7 @@ export class SessionManager {
               }
               return
             }
+            clearTimeout(timer)
 
             const session: ActiveSession = { id, client, shell: stream, sftpClient: null, jumps, owner }
             this.sessions.set(id, session)
@@ -85,9 +98,11 @@ export class SessionManager {
         if (session) this.notifyStatus(session, 'error', err.message)
         if (!settled) {
           settled = true
+          clearTimeout(timer)
           cleanupJumps()
           reject(err)
         }
+        // 已 settled 时说明是会话中途出错：'close' 随后会到，由 cleanupSession 收尾
       })
 
       client.on('close', () => this.handleClosed(id))
@@ -111,8 +126,19 @@ export class SessionManager {
     if (!session) return
     this.sessions.delete(id)
     session.client.end()
+    this.cleanupSession(session)
+  }
+
+  /**
+   * 会话收尾：关闭跳板机连接链并通知外部。
+   * 掉线（'close' 事件）与主动 disconnect 都必须走这里 —— 跳板机的
+   * forwardOut 通道会随 client.end() 关闭，但跳板机那条已认证的 SSH
+   * 会话本身不会，必须显式 end，否则每掉线一次就泄漏一个跳板机登录。
+   */
+  private cleanupSession(session: ActiveSession): void {
     for (const jump of session.jumps) jump.end()
-    this.onClosed?.(id)
+    session.jumps = []
+    this.onClosed?.(session.id)
   }
 
   /**
@@ -138,7 +164,15 @@ export class SessionManager {
     const requestId = randomUUID()
 
     return new Promise<boolean>((resolve) => {
+      // 用户一直不回答（关窗、关标签、走开）时这条记录会永远留在表里，
+      // 连接也永远挂起。超时后按拒绝处理，既回收记录也让连接有个了断。
+      const timer = setTimeout(() => {
+        if (this.pendingVerify.delete(requestId)) resolve(false)
+      }, HOST_KEY_TIMEOUT_MS)
+      timer.unref?.()
+
       this.pendingVerify.set(requestId, (decision) => {
+        clearTimeout(timer)
         // 用户选择「信任并保存」或变更后「仍然信任」都更新指纹库
         if (decision === 'trust') this.knownHosts!.set(host, port, hash)
         resolve(decision !== 'reject')
@@ -197,7 +231,7 @@ export class SessionManager {
     if (!session) return
     this.sessions.delete(id)
     this.notifyStatus(session, 'closed')
-    this.onClosed?.(id)
+    this.cleanupSession(session)
   }
 
   private notifyStatus(session: ActiveSession, status: SessionStatus, error?: string): void {
@@ -231,8 +265,22 @@ export class SessionManager {
     )
     try {
       await new Promise<void>((resolve, reject) => {
-        jump.once('ready', resolve)
-        jump.once('error', reject)
+        let connected = false
+        // 必须用持久监听：once('error') 在首次 error 后就被移除，而跳板机是
+        // 长连接（keepalive 超时、网络抖动都会 emit error），第二次 error 时
+        // 无监听者，Node 会直接抛出并让整个主进程崩溃
+        jump.on('error', (err: Error) => {
+          if (!connected) {
+            connected = true
+            reject(err)
+          } else {
+            console.warn(`[ssh] 跳板机连接异常: ${err.message}`)
+          }
+        })
+        jump.once('ready', () => {
+          connected = true
+          resolve()
+        })
         jump.connect(jumpCfg)
       })
 

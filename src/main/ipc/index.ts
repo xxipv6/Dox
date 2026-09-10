@@ -30,7 +30,7 @@ export function registerIpc(
   localPtyManager: LocalPtyManager
 ): void {
   // ---- SSH 会话 ----
-  ipcMain.handle('ssh:connect', (event, config: SshSessionConfig, term: TermSize) =>
+  ipcMain.handle(IpcChannels.sshConnect, (event, config: SshSessionConfig, term: TermSize) =>
     sessionManager.connect(config, event.sender, term)
   )
   // ---- 本地终端 ----

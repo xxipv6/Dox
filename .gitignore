@@ -3,5 +3,7 @@ out/
 dist/
 dist-electron/
 *.log
+# 验证脚本截图产物（scripts/verify-*.mjs）
+shots/
 .DS_Store
 Thumbs.db

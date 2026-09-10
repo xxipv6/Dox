@@ -12,6 +12,11 @@ const activeCount = computed(
   () => tasks.value.filter((t) => t.status === 'pending' || t.status === 'active').length
 )
 
+/** 只渲染最近的任务：目录传输可能瞬间产生上千条，全量渲染会卡死界面 */
+const MAX_RENDERED = 200
+const visibleTasks = computed(() => [...tasks.value].reverse().slice(0, MAX_RENDERED))
+const hiddenCount = computed(() => Math.max(0, tasks.value.length - MAX_RENDERED))
+
 const statusText: Record<TransferTask['status'], string> = {
   pending: '排队中',
   active: '传输中',
@@ -45,7 +50,8 @@ function progress(t: TransferTask): number {
     </div>
 
     <div v-if="!collapsed" class="task-list">
-      <div v-for="task in [...tasks].reverse()" :key="task.id" class="task">
+      <div v-if="hiddenCount" class="more-hint">另有 {{ hiddenCount }} 条较早的任务未显示</div>
+      <div v-for="task in visibleTasks" :key="task.id" class="task">
         <span class="direction">{{ task.direction === 'upload' ? '⬆' : '⬇' }}</span>
         <div class="task-body">
           <div class="task-name" :title="task.localPath + ' ↔ ' + task.remotePath">
@@ -107,6 +113,12 @@ function progress(t: TransferTask): number {
 .task-list {
   max-height: 220px;
   overflow-y: auto;
+}
+.more-hint {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #565f89;
+  border-bottom: 1px solid #1f2335;
 }
 .task {
   display: flex;

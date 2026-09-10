@@ -7,6 +7,7 @@ import type {
   SshSessionConfig
 } from '@shared/types'
 import { useSettingsStore } from './settings'
+import { errorText } from '../utils/errors'
 
 export interface PaneState {
   paneId: string
@@ -90,27 +91,64 @@ export const useSessionStore = defineStore('sessions', () => {
     return undefined
   }
 
-  // 主进程状态推送：connected / closed / error
+  /**
+   * 主进程在 invoke 返回之前就会推送 connected（本地 shell 甚至可能紧接着推
+   * closed），那时 pane.sessionId 尚未赋值，事件会找不到归属而被丢弃 ——
+   * 后果是「进程已死但界面显示已连接」。这里先缓存，绑定 sessionId 后回放。
+   */
+  const pendingStatus = new Map<string, { status: SessionStatus; error?: string }>()
+
   window.api.onStatus(({ id, status, error }) => {
     const pane = findPane(id)
-    if (!pane) return
+    if (!pane) {
+      pendingStatus.set(id, { status, error })
+      return
+    }
     pane.status = status
     pane.error = error
   })
+
+  /** 该 pane 是否仍挂在某个标签下（连接在途时用户可能已关掉标签/窗格） */
+  function isPaneAlive(pane: PaneState): boolean {
+    return tabs.value.some((t) => t.panes.some((p) => p.paneId === pane.paneId))
+  }
+
+  /** 标签/窗格关闭时清掉该会话的附属状态，避免长期运行下无界增长 */
+  function clearSessionState(sessionId: string): void {
+    delete cwdBySession[sessionId]
+    delete homeBySession[sessionId]
+    delete exitCodeBySession[sessionId]
+    pendingStatus.delete(sessionId)
+  }
 
   async function connectPane(tab: SessionTab, pane: PaneState): Promise<void> {
     pane.status = 'connecting'
     try {
       // shell 建立前先用 80x24，建立后 xterm 的 onResize 会立即修正
       const size = { cols: 80, rows: 24 }
-      pane.sessionId =
+      const sessionId =
         tab.kind === 'local'
           ? await window.api.connectLocal(size, useSettingsStore().localShellId || undefined)
           : await window.api.connect(toPlainConfig(tab.config!), size)
-      pane.status = 'connected'
+
+      // 连接在途时用户可能已经关掉了标签/窗格：此时会话已建立但无人认领，
+      // 必须立刻断开，否则 ssh 连接（含整条跳板机链路）或本地 shell 进程
+      // 会一直留到应用退出
+      if (!isPaneAlive(pane)) {
+        window.api.disconnect(sessionId)
+        return
+      }
+
+      // 先取出绑定前到达的状态事件（如 shell 启动即失败），再清理缓存
+      const buffered = pendingStatus.get(sessionId)
+      pendingStatus.delete(sessionId)
+
+      pane.sessionId = sessionId
+      pane.status = buffered?.status ?? 'connected'
+      pane.error = buffered?.error
     } catch (err) {
       pane.status = 'error'
-      pane.error = err instanceof Error ? err.message : String(err)
+      pane.error = errorText(err)
     }
   }
 
@@ -178,7 +216,7 @@ export const useSessionStore = defineStore('sessions', () => {
       await connectPane(tab, pane)
     } catch (err) {
       pane.status = 'error'
-      pane.error = err instanceof Error ? err.message : String(err)
+      pane.error = errorText(err)
     }
   }
 
@@ -198,7 +236,10 @@ export const useSessionStore = defineStore('sessions', () => {
   }
 
   function closePane(tab: SessionTab, pane: PaneState): void {
-    if (pane.sessionId) window.api.disconnect(pane.sessionId)
+    if (pane.sessionId) {
+      window.api.disconnect(pane.sessionId)
+      clearSessionState(pane.sessionId)
+    }
     tab.panes = tab.panes.filter((p) => p.paneId !== pane.paneId)
     if (tab.panes.length === 0) {
       closeTab(tab)
@@ -212,7 +253,10 @@ export const useSessionStore = defineStore('sessions', () => {
 
   function closeTab(tab: SessionTab): void {
     for (const pane of tab.panes) {
-      if (pane.sessionId) window.api.disconnect(pane.sessionId)
+      if (pane.sessionId) {
+        window.api.disconnect(pane.sessionId)
+        clearSessionState(pane.sessionId)
+      }
     }
     tabs.value = tabs.value.filter((t) => t.tabId !== tab.tabId)
     if (activeTabId.value === tab.tabId) {

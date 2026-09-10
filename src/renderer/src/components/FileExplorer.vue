@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { DroppedFile, FileEntry } from '@shared/types'
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
+import { errorText } from '../utils/errors'
 
 const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
@@ -35,7 +36,7 @@ async function load(dir?: string): Promise<void> {
     // 与终端的 cwd 跟踪保持同步（作为下次 cd 相对路径的基准）
     store.setCwd(props.sessionId, cwd.value)
   } catch (err) {
-    errorMsg.value = err instanceof Error ? err.message : String(err)
+    errorMsg.value = errorText(err)
   } finally {
     loading.value = false
   }
@@ -69,7 +70,7 @@ async function submitNewDir(): Promise<void> {
       await window.api.sftpMkdir(props.sessionId, `${cwd.value}/${name}`)
       await load()
     } catch (err) {
-      alert(`新建文件夹失败：${err instanceof Error ? err.message : err}`)
+      alert(`新建文件夹失败：${errorText(err)}`)
     }
   }
   creatingDir.value = false
@@ -89,7 +90,7 @@ async function submitRename(entry: FileEntry): Promise<void> {
       await window.api.sftpRename(props.sessionId, entry.path, `${cwd.value}/${name}`)
       await load()
     } catch (err) {
-      alert(`重命名失败：${err instanceof Error ? err.message : err}`)
+      alert(`重命名失败：${errorText(err)}`)
     }
   }
   renamingPath.value = null
@@ -103,17 +104,30 @@ async function removeEntry(entry: FileEntry): Promise<void> {
     await window.api.sftpDelete(props.sessionId, entry.path, entry.isDir)
     await load()
   } catch (err) {
-    alert(`删除失败：${err instanceof Error ? err.message : err}`)
+    alert(`删除失败：${errorText(err)}`)
+  }
+}
+
+/** 统一收口：之前这些调用是 fire-and-forget，出错时界面上完全没反应 */
+async function guard(action: () => Promise<unknown>): Promise<void> {
+  try {
+    await action()
+    errorMsg.value = ''
+  } catch (err) {
+    errorMsg.value = errorText(err)
   }
 }
 
 async function downloadEntry(entry: FileEntry): Promise<void> {
-  if (entry.isDir) await window.api.downloadDir(props.sessionId, entry.path)
-  else await window.api.download(props.sessionId, entry.path, entry.name)
+  await guard(() =>
+    entry.isDir
+      ? window.api.downloadDir(props.sessionId, entry.path)
+      : window.api.download(props.sessionId, entry.path, entry.name)
+  )
 }
 
 async function pickUpload(): Promise<void> {
-  await window.api.pickUpload(props.sessionId, cwd.value)
+  await guard(() => window.api.pickUpload(props.sessionId, cwd.value))
 }
 
 /** 在终端中 cd 到当前目录（SFTP → 终端方向联动） */
@@ -130,7 +144,8 @@ function onDrop(e: DragEvent): void {
     name: f.name,
     size: f.size
   }))
-  if (files.length) void window.api.enqueueDropped(props.sessionId, cwd.value, files)
+  // 会话已断/远端不可写时不能静默失败，否则用户以为拖进去了
+  if (files.length) void guard(() => window.api.enqueueDropped(props.sessionId, cwd.value, files))
 }
 
 // 会话切换时重新加载

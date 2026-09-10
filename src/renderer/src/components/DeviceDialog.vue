@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import type { SavedSession } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
+import { errorText } from '../utils/errors'
 
 const store = useSessionStore()
 
@@ -50,10 +51,12 @@ watch(
   { immediate: true }
 )
 
+const validPort = computed(() => Number.isInteger(form.port) && form.port > 0 && form.port < 65536)
 const valid = computed(
   () =>
     !!form.host.trim() &&
     !!form.username.trim() &&
+    validPort.value &&
     (form.authType === 'password' ? true : !!form.privateKeyPath.trim())
 )
 
@@ -101,7 +104,7 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
     if (action === 'saveAndConnect') await store.connectSaved(saved)
     emit('close')
   } catch (err) {
-    errorMsg.value = err instanceof Error ? err.message : String(err)
+    errorMsg.value = errorText(err)
   } finally {
     busy.value = false
   }
@@ -120,7 +123,14 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
         <label>主机地址</label>
         <div class="row">
           <input v-model="form.host" placeholder="192.168.1.10 或 example.com" class="grow" />
-          <input v-model.number="form.port" type="number" min="1" max="65535" class="port" />
+          <input
+            v-model.number="form.port"
+            type="number"
+            min="1"
+            max="65535"
+            class="port"
+            :class="{ invalid: !validPort }"
+          />
         </div>
 
         <label>用户名</label>
@@ -261,6 +271,9 @@ select {
 input:focus,
 select:focus {
   border-color: #7aa2f7;
+}
+input.invalid {
+  border-color: #f7768e;
 }
 .segmented {
   display: flex;

@@ -29,6 +29,9 @@ declare module 'zmodem.js' {
     on(event: string, cb: (...args: never[]) => void): void
     start(): Promise<unknown>
     close(): Promise<void>
+    /** 中止协议会话（会触发 session_end）。已中止时调用会抛错，需自行判 aborted() */
+    abort(): void
+    aborted(): boolean
     send_offer(params: {
       name: string
       size: number

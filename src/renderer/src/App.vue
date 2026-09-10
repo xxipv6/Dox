@@ -23,6 +23,13 @@ function setPanelRef(sessionId: string, el: InstanceType<typeof TerminalPanel> |
   else delete panelRefs.value[sessionId]
 }
 
+/** 当前聚焦窗格上一条命令的退出码（shell integration，OSC 133 上报） */
+function activeExitCode(tab: SessionTab): number | undefined {
+  const sessionId = tab.panes.find((p) => p.paneId === tab.activePaneId)?.sessionId
+  const code = sessionId ? store.exitCodeBySession[sessionId] : undefined
+  return code ? code : undefined
+}
+
 /** 标签标题：本地终端显示当前目录（shell integration 上报） */
 function tabLabel(tab: SessionTab): string {
   const sessionId = tab.panes.find((p) => p.paneId === tab.activePaneId)?.sessionId
@@ -88,6 +95,12 @@ async function toggleSftp(): Promise<void> {
               :class="tab.panes.find((p) => p.paneId === tab.activePaneId)?.status"
             ></span>
             <span class="tab-title">{{ tabLabel(tab) }}</span>
+            <!-- 上一条命令失败时留个记号：滚屏后也能看出刚才那条命令挂了 -->
+            <span
+              v-if="activeExitCode(tab)"
+              class="exit-badge"
+              :title="`上一条命令退出码 ${activeExitCode(tab)}`"
+            >✗{{ activeExitCode(tab) }}</span>
             <button class="tab-close" title="关闭" @click.stop="store.closeTab(tab)">×</button>
           </div>
 
@@ -282,6 +295,14 @@ async function toggleSftp(): Promise<void> {
 .tab-new:hover {
   color: #7aa2f7;
   background: #1f2335;
+}
+.exit-badge {
+  font-size: 10px;
+  color: #f7768e;
+  background: rgba(247, 118, 142, 0.14);
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 15px;
 }
 .terminal-area {
   flex: 1;

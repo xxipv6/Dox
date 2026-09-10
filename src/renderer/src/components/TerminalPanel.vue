@@ -29,6 +29,8 @@ let searchAddon: SearchAddon | null = null
 let unsubscribeData: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
 let zmodem: ZmodemBridge | null = null
+/** 卸载后禁止再往已销毁的终端写入（ZMODEM 看门狗可能在卸载后触发） */
+let disposed = false
 
 /**
  * 安全 fit：容器不可见（v-show 隐藏的标签、分屏/面板切换的中间态、挂载瞬间
@@ -63,11 +65,20 @@ function normalizePosix(p: string): string {
   return '/' + out.join('/')
 }
 
+/** shell 侧不做 URI 编码，路径里的裸 % 会让 decodeURIComponent 抛错，这里兜住 */
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
 /** 把 OSC 7 的 file:// URI 转成本地显示路径 */
 function pathFromOsc7(uri: string): string | null {
   const m = /^file:\/\/([^/]*)(\/.*)$/.exec(uri)
   if (!m) return null
-  const raw = decodeURIComponent(m[2])
+  const raw = safeDecode(m[2])
   // Windows 下是 /C:/Users/... → C:\Users\...
   if (/^\/[A-Za-z]:/.test(raw)) return raw.slice(1).replace(/\//g, '\\')
   return raw
@@ -211,14 +222,22 @@ onMounted(() => {
   }
 
   // ZMODEM：数据流先过 Sentry，识别到 rz/sz 序列时自动接管会话
-  zmodem = createZmodemBridge(props.sessionId, (data) => term?.write(data))
+  zmodem = createZmodemBridge(props.sessionId, (data) => {
+    if (!disposed) term?.write(data)
+  })
 
   // ---- shell integration：cwd（OSC 7）----
   term.parser.registerOscHandler(7, (payload) => {
-    const path = pathFromOsc7(payload)
-    if (path) {
-      cwdFromIntegration = true
-      store.setCwd(props.sessionId, path)
+    // 必须包 try/catch：本回调在 xterm 的解析循环里同步执行，抛异常会让
+    // 整个数据块（含提示符）被丢弃，而且每次刷提示符都会再抛一次
+    try {
+      const path = pathFromOsc7(payload)
+      if (path) {
+        cwdFromIntegration = true
+        store.setCwd(props.sessionId, path)
+      }
+    } catch (err) {
+      console.warn('[terminal] 解析 OSC 7 失败', err)
     }
     return true
   })
@@ -235,6 +254,12 @@ onMounted(() => {
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     if (e.type !== 'keydown') return true
     const key = e.key.toLowerCase()
+
+    // ZMODEM 会话期间键盘被屏蔽，必须留一个逃生口，否则协议出错时终端假死
+    if (zmodem?.isActive()) {
+      if (key === 'escape') zmodem.abort()
+      return false
+    }
     if (e.ctrlKey && !e.shiftKey && key === 'f') {
       toggleSearch()
       return false
@@ -261,7 +286,7 @@ onMounted(() => {
   unsubscribeData = window.api.onData((id, chunk) => {
     if (id === props.sessionId) zmodem?.consume(chunk)
   })
-  // 键盘输入 → 远端；ZMODEM 会话期间屏蔽输入，避免污染协议流
+  // 键盘输入 → 远端；ZMODEM 会话期间屏蔽输入（Esc 中断由上面的 key handler 处理）
   term.onData((data) => {
     if (zmodem?.isActive()) return
     window.api.input(props.sessionId, data)
@@ -287,6 +312,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  zmodem?.abort() // 清掉看门狗定时器，避免卸载后触发
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
   resizeObserver?.disconnect()

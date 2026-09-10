@@ -6,6 +6,8 @@ import type { ForwardRule, ForwardRuleInput } from '../../shared/types'
 interface InternalRule extends ForwardRule {
   /** 本地转发的 TCP server */
   server?: net.Server
+  /** 本地转发已建立的连接：停止时必须主动销毁，否则 close() 永不回调 */
+  sockets?: Set<net.Socket>
   /** 远程转发在 client 上注册的 tcp connection 处理器 */
   tcpHandler?: (info: TcpConnectionDetails, accept: () => ClientChannel) => void
 }
@@ -65,8 +67,12 @@ export class ForwardManager {
     let changed = false
     for (const rule of this.rules.values()) {
       if (rule.sessionId === sessionId && rule.status === 'active') {
-        void this.stop(rule)
-        rule.status = 'stopped'
+        // 必须先 await 停止再改状态：否则监听端口可能仍在 listen，
+        // 同端口重新添加必然 EADDRINUSE，只有重启应用才能恢复
+        void this.stop(rule).then(() => {
+          rule.status = 'stopped'
+          this.emit()
+        })
         changed = true
       }
     }
@@ -76,7 +82,12 @@ export class ForwardManager {
   /** 本地转发：net.createServer → forwardOut 管道 */
   private startLocal(rule: InternalRule, client: Client): Promise<void> {
     return new Promise((resolve, reject) => {
+      const sockets = new Set<net.Socket>()
+      rule.sockets = sockets
+
       const server = net.createServer((socket) => {
+        sockets.add(socket)
+        socket.on('close', () => sockets.delete(socket))
         client.forwardOut(rule.listenHost, rule.listenPort, rule.targetHost, rule.targetPort, (err, stream) => {
           if (err) {
             socket.destroy()
@@ -87,8 +98,18 @@ export class ForwardManager {
           stream.on('error', () => socket.destroy())
         })
       })
-      server.once('error', reject)
-      server.listen(rule.listenPort, rule.listenHost, () => resolve())
+
+      // 持久监听而非 once：监听中的 server 后续仍可能 emit error（EMFILE 等），
+      // 那时没有监听者的话 Node 会直接抛出并崩掉主进程
+      let listening = false
+      server.on('error', (err: Error) => {
+        if (!listening) reject(err)
+        else console.warn(`[forward] 本地转发 ${rule.listenHost}:${rule.listenPort} 错误: ${err.message}`)
+      })
+      server.listen(rule.listenPort, rule.listenHost, () => {
+        listening = true
+        resolve()
+      })
       rule.server = server
     })
   }
@@ -116,7 +137,18 @@ export class ForwardManager {
 
   private async stop(rule: InternalRule): Promise<void> {
     if (rule.server) {
-      await new Promise<void>((resolve) => rule.server!.close(() => resolve()))
+      const server = rule.server
+      // 先销毁所有已建立的连接：net.Server.close() 只是停止接受新连接，
+      // 回调要等所有现存连接结束才触发。用户只要通过 -L 挂过一条长连接
+      // （浏览器 keep-alive、数据库连接），不销毁就会永远卡住 here，
+      // 调用方（IPC remove）永不返回，端口也一直占着。
+      for (const socket of rule.sockets ?? []) socket.destroy()
+      rule.sockets?.clear()
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve())
+        // 兜底：极少数情况下 close 回调仍可能不来，不能让调用方挂死
+        setTimeout(resolve, 1000).unref?.()
+      })
       rule.server = undefined
     }
     if (rule.tcpHandler) {

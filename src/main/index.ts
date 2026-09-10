@@ -8,6 +8,7 @@ import { SftpService } from './sftp/SftpService'
 import { TransferManager } from './sftp/TransferManager'
 import { ForwardManager } from './forward/ForwardManager'
 import { LocalPtyManager } from './local/LocalPtyManager'
+import { prewarmShells } from './local/shells'
 import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
 import { setupAutoUpdater } from './updater'
@@ -83,6 +84,9 @@ app.whenReady().then(() => {
   registerIpc(sessionManager, configStore, sftpService, transferManager, forwardManager, localPtyManager)
   createWindow()
   setupAutoUpdater()
+  // 异步预热 shell 列表（含 WSL）——wsl.exe 首次调用可能耗时数秒，
+  // 绝不能放在渲染进程的调用路径上同步执行，否则主进程连同所有 IPC 一起冻住
+  void prewarmShells()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

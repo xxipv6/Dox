@@ -70,6 +70,7 @@ await win.locator('input[placeholder="root"]').fill(user)
 await win.locator('input[placeholder="登录密码"]').fill('__wrong_password__')
 await win.locator('button:has-text("仅连接")').click()
 
+// 跑满全程不做提前退出：早期退出条件容易被「正在连接」或本地标签的终端误判
 for (let i = 0; i < 6; i++) {
   await win.waitForTimeout(1500)
   const state = await win.evaluate(() => {
@@ -80,6 +81,8 @@ for (let i = 0; i < 6; i++) {
       hostKey: hk ?? null,
       tabCount: document.querySelectorAll('.tab').length,
       placeholder: document.querySelector('.tab-placeholder')?.textContent?.trim() ?? null,
+      // 终端面板挂载 = shell 通道已建立（认证成功）
+      hasTerminal: !!document.querySelector('.terminal-container'),
       dialogOpen: !!document.querySelector('.overlay')
     }
   })
@@ -88,10 +91,7 @@ for (let i = 0; i < 6; i++) {
     await win.screenshot({ path: join('shots', '20-hostkey.png') })
     await win.locator('button:has-text("信任并保存")').click()
     console.log('  → 已点「信任并保存」')
-    await win.waitForTimeout(2500)
-    break
   }
-  if (state.placeholder) break
 }
 
 await win.screenshot({ path: join('shots', '21-ssh-result.png') })

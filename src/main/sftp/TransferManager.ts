@@ -8,9 +8,16 @@ import { mkdirRemoteRecursive, posix, readdirP, statP, toPosixRel, unlinkP } fro
 const CANCELED = '__transfer_canceled__'
 /** 进度事件节流间隔（ms），避免高频 IPC 刷爆渲染进程 */
 const EMIT_INTERVAL = 100
+/** 已结束任务在内存中保留的上限，防止长时间运行后任务表无界增长 */
+const MAX_FINISHED_TASKS = 500
 
 interface InternalTask extends TransferTask {
   _cancel?: () => void
+  /**
+   * 取消标记。任务在 await getSftp() 期间状态已是 active 但 _cancel 还没挂上，
+   * 这期间点取消不能丢 —— 只置位，等 pipe() 开头自己检查。
+   */
+  _cancelRequested?: boolean
 }
 
 interface LocalFileItem {
@@ -51,6 +58,7 @@ export class TransferManager {
   private activeCount = 0
   private readonly maxConcurrent = 2
   private lastEmitAt = 0
+  private emitScheduled = false
 
   constructor(
     private readonly getSftp: (sessionId: string) => Promise<SFTPWrapper>,
@@ -139,6 +147,15 @@ export class TransferManager {
       }
     }
     await walk(remotePath, rootLocal, '')
+
+    // 空目录不会展开出任何文件任务，队列里毫无动静会让用户以为没点成功。
+    // 补一条已完成记录代表「目录本身已创建」。
+    if (created.length === 0) {
+      const task = this.createTask(sessionId, 'download', rootLocal, remotePath, 0, `${rootName}/`)
+      task.status = 'done'
+      this.emit()
+      return [this.snapshot(task)]
+    }
     return created
   }
 
@@ -150,6 +167,7 @@ export class TransferManager {
       task.status = 'canceled'
       this.emit()
     } else if (task.status === 'active') {
+      task._cancelRequested = true
       task._cancel?.()
     }
   }
@@ -183,13 +201,43 @@ export class TransferManager {
       status: 'pending'
     }
     this.tasks.set(task.id, task)
+    this.pruneFinished()
     return task
+  }
+
+  /** 任务表超限时按插入顺序丢最老的已结束任务（Map 保持插入序） */
+  private pruneFinished(): void {
+    let finished = 0
+    for (const task of this.tasks.values()) {
+      if (task.status === 'done' || task.status === 'error' || task.status === 'canceled') finished++
+    }
+    let excess = finished - MAX_FINISHED_TASKS
+    if (excess <= 0) return
+    for (const [id, task] of this.tasks) {
+      if (excess <= 0) break
+      if (task.status === 'done' || task.status === 'error' || task.status === 'canceled') {
+        this.tasks.delete(id)
+        excess--
+      }
+    }
   }
 
   private push(task: InternalTask): void {
     this.queue.push(task.id)
-    this.emit()
+    // 用合并广播：目录展开时每个文件都会 push，若每次都全量广播，
+    // N 个文件会产生 O(N²) 次结构化克隆（5000 文件即千万级），
+    // 主进程与渲染进程同时卡死、所有 IPC 停摆
+    this.scheduleEmit()
     void this.pump()
+  }
+
+  private scheduleEmit(): void {
+    if (this.emitScheduled) return
+    this.emitScheduled = true
+    queueMicrotask(() => {
+      this.emitScheduled = false
+      this.emit()
+    })
   }
 
   private snapshot(task: InternalTask): TransferTask {
@@ -233,6 +281,11 @@ export class TransferManager {
 
   private pipe(task: InternalTask, sftp: SFTPWrapper): Promise<void> {
     return new Promise((resolve, reject) => {
+      // getSftp 期间被取消：那时 _cancel 还没挂上，这里补一次
+      if (task._cancelRequested) {
+        reject(new Error(CANCELED))
+        return
+      }
       const isUpload = task.direction === 'upload'
       const src = isUpload
         ? fs.createReadStream(task.localPath)
