@@ -149,6 +149,31 @@ export function localControlArgs(name: string, action: ContainerControlAction): 
 /** 依次尝试的候选 shell；容器里多半只有 sh，distroless 类一个都没有 */
 export const SHELL_CANDIDATES = ['bash', 'sh'] as const
 
+/**
+ * 从 `docker inspect` 的 JSON 输出抠容器的网桥 IP（端口转发建议用）。
+ *
+ * 容器没发布端口时，远端 127.0.0.1 摸不到它，但宿主机能直连网桥 IP ——
+ * SSH 转发的目标指过来就通了。host 网络 / 无 IP / 输出畸形都返回 null，
+ * 调用方回退 127.0.0.1。
+ */
+export function parseInspectIp(stdout: string): string | null {
+  try {
+    const data = JSON.parse(stdout) as Array<{
+      NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> }
+    }>
+    const networks = data?.[0]?.NetworkSettings?.Networks
+    if (!networks) return null
+    for (const net of Object.values(networks)) {
+      if (net.IPAddress && /^\d{1,3}(\.\d{1,3}){3}$/.test(net.IPAddress)) {
+        return net.IPAddress
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 export interface ParsedListing {
   /** runtime 可执行文件绝对路径；null = 远端没有 docker 也没有 podman */
   binary: string | null

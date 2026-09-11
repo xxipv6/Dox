@@ -51,6 +51,8 @@ export const IpcChannels = {
   containerLogs: 'container:logs',
   /** 容器生命周期：start / stop / unpause / remove（白名单动作，用户显式触发） */
   containerControl: 'container:control',
+  /** 解析容器网桥 IP（端口转发建议的目标地址；本机/无 IP 返回 null） */
+  containerIp: 'container:ip',
   // 传输队列
   transferPickUpload: 'transfer:pickUpload',
   transferEnqueueDropped: 'transfer:enqueueDropped',

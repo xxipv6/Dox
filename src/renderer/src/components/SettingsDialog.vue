@@ -102,6 +102,13 @@ onMounted(async () => {
         <p class="sub-note">
           连字需要切换到 DOM 渲染器，大数据量输出时性能低于 WebGL；切换后需重开标签页生效。
         </p>
+        <label class="checkbox">
+          <input v-model="settings.suggestPortForward" type="checkbox" />
+          检测到服务监听时建议端口转发
+        </label>
+        <p class="sub-note">
+          终端输出里出现 localhost:端口号 这类服务横幅时，右下角弹出「转发到本机」一键建议。
+        </p>
       </div>
 
       <div class="field">

@@ -18,7 +18,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   fontSize: 14,
   fontId: 'default',
   ligatures: false,
-  localShellId: ''
+  localShellId: '',
+  suggestPortForward: true
 }
 
 /** 界面主题三选。'system' 那一项的解释文案见设置弹窗 */
@@ -64,6 +65,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const fontId = ref(DEFAULT_SETTINGS.fontId)
   const ligatures = ref(DEFAULT_SETTINGS.ligatures)
   const localShellId = ref(DEFAULT_SETTINGS.localShellId)
+  const suggestPortForward = ref(DEFAULT_SETTINGS.suggestPortForward)
   const dialogVisible = ref(false)
   /** load() 完成前不写盘，否则会用默认值覆盖掉用户已保存的设置 */
   let loaded = false
@@ -126,6 +128,7 @@ export const useSettingsStore = defineStore('settings', () => {
     fontId.value = persisted?.fontId ?? DEFAULT_SETTINGS.fontId
     ligatures.value = persisted?.ligatures ?? DEFAULT_SETTINGS.ligatures
     localShellId.value = persisted?.localShellId ?? DEFAULT_SETTINGS.localShellId
+    suggestPortForward.value = persisted?.suggestPortForward ?? DEFAULT_SETTINGS.suggestPortForward
     uiTheme.value = persisted?.uiTheme ?? DEFAULT_SETTINGS.uiTheme
 
     /*
@@ -157,7 +160,8 @@ export const useSettingsStore = defineStore('settings', () => {
         fontSize: fontSize.value,
         fontId: fontId.value,
         ligatures: ligatures.value,
-        localShellId: localShellId.value
+        localShellId: localShellId.value,
+        suggestPortForward: suggestPortForward.value
       })
       .catch((err) => console.warn('[settings] 保存设置失败', err))
   }
@@ -173,7 +177,7 @@ export const useSettingsStore = defineStore('settings', () => {
     () => (FONT_PRESETS.find((f) => f.id === fontId.value) ?? FONT_PRESETS[0]).family
   )
 
-  watch([themeId, uiTheme, fontSize, fontId, ligatures, localShellId], persist)
+  watch([themeId, uiTheme, fontSize, fontId, ligatures, localShellId, suggestPortForward], persist)
 
   /** 一键切换（侧栏那个太阳/月亮按钮）：亮 ↔ 暗 */
   function toggleTheme(): void {
@@ -191,6 +195,7 @@ export const useSettingsStore = defineStore('settings', () => {
     fontId,
     ligatures,
     localShellId,
+    suggestPortForward,
     dialogVisible,
     resolvedTheme,
     currentPreset,

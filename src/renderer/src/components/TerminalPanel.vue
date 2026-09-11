@@ -7,10 +7,11 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
-import { isPlainSshId } from '@shared/sessionId'
+import { isPlainSshId, LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import { useSettingsStore } from '../stores/settings'
 import { useEditorStore } from '../stores/editor'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
+import { detectListenPorts } from '../utils/portSuggest'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ sessionId: string }>()
@@ -54,6 +55,100 @@ function separator(text: string, color = '33'): void {
 function quoteShellPath(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`
 }
+
+// ---- 端口转发建议：输出里出现服务横幅 → 一键 ssh -L ----
+interface PortSuggestion {
+  port: number
+  state: 'pending' | 'ok' | 'error'
+  error?: string
+}
+const suggestions = ref<PortSuggestion[]>([])
+/** 已建议过的端口（含被忽略/已转发的）：同一会话不重复打扰 */
+const suggestedPorts = new Set<number>()
+const MAX_SUGGESTIONS = 3
+
+/**
+ * 转发的落点。
+ *
+ * 普通 SSH 标签：本会话 + 远端 127.0.0.1。
+ * 远端容器标签：父会话 + 容器网桥 IP（容器没发布端口时 127.0.0.1 根本
+ * 摸不到它，但宿主机能直连网桥 IP，inspect 在点转发时才做）。
+ * 本地终端 / 本机容器不给建议：localhost 本来就能直接开，
+ * 本机容器的网桥 IP 藏在 VM 里，转发了也到不了。
+ */
+function forwardTarget(): { sessionId: string; containerName?: string } | null {
+  if (isPlainSshId(props.sessionId)) return { sessionId: props.sessionId }
+  const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
+  if (tab?.kind !== 'container' || !tab.container) return null
+  const parent = tab.container.parentSessionId
+  if (parent === LOCAL_CONTAINER_TARGET) return null
+  return { sessionId: parent, containerName: tab.container.containerName }
+}
+
+/**
+ * 每个数据块扫一次（字节门控，几乎零成本）。
+ * 命中端口后要查一次既有规则，异步 fire-and-forget —— 横幅会在连接保持
+ * 期间反复打印的情况很少，宁可晚一拍也不能把输出路径堵上。
+ */
+function scanForListenPorts(chunk: Uint8Array): void {
+  if (!settings.suggestPortForward) return
+  const target = forwardTarget()
+  if (!target) return
+  const fresh = detectListenPorts(chunk).filter((p) => !suggestedPorts.has(p))
+  if (!fresh.length) return
+  for (const p of fresh) suggestedPorts.add(p)
+  void (async () => {
+    // 已有活跃规则的端口不弹：用户早就转过了
+    const rules = await window.api.listForwards().catch(() => [])
+    for (const port of fresh) {
+      const exists = rules.some(
+        (r) =>
+          r.sessionId === target.sessionId &&
+          r.type === 'local' &&
+          r.targetPort === port &&
+          r.status === 'active'
+      )
+      if (exists || suggestions.value.length >= MAX_SUGGESTIONS) continue
+      suggestions.value.push({ port, state: 'pending' })
+    }
+  })()
+}
+
+async function confirmForward(s: PortSuggestion): Promise<void> {
+  const target = forwardTarget()
+  if (!target) return dismissForward(s)
+  let targetHost = '127.0.0.1'
+  if (target.containerName) {
+    targetHost =
+      (await window.api.containerIp(target.sessionId, target.containerName).catch(() => null)) ??
+      '127.0.0.1'
+  }
+  try {
+    const rule = await window.api.addForward({
+      sessionId: target.sessionId,
+      type: 'local',
+      listenPort: s.port,
+      targetHost,
+      targetPort: s.port
+    })
+    if (rule.status === 'error') {
+      s.state = 'error'
+      s.error = rule.error ?? '未知错误'
+    } else {
+      s.state = 'ok'
+    }
+  } catch (err) {
+    s.state = 'error'
+    s.error = err instanceof Error ? err.message : String(err)
+  }
+  // 成败都短暂停留后自己收掉
+  setTimeout(() => dismissForward(s), 3500)
+}
+
+function dismissForward(s: PortSuggestion): void {
+  suggestions.value = suggestions.value.filter((x) => x !== s)
+}
+
 
 /**
  * 终端输出里的绝对路径 → Ctrl/Cmd+点击分发：
@@ -457,7 +552,9 @@ onMounted(() => {
 
   // 远端输出 → ZMODEM Sentry → xterm（ZMODEM 会话期间数据被协议接管）
   unsubscribeData = window.api.onData((id, chunk) => {
-    if (id === props.sessionId) zmodem?.consume(chunk)
+    if (id !== props.sessionId) return
+    scanForListenPorts(chunk)
+    zmodem?.consume(chunk)
   })
 
   // 会话状态：断线 / 重连中 / 重连成功都往终端里留痕，并驱动顶部状态条
@@ -597,6 +694,26 @@ defineExpose({ refitAndFocus })
       <button title="上一个 (Shift+Enter)" @click="findPrevious"><Icon name="arrow-up" /></button>
       <button title="下一个 (Enter)" @click="findNext"><Icon name="arrow-down" /></button>
       <button title="关闭 (Esc)" @click="toggleSearch"><Icon name="x" /></button>
+    </div>
+
+    <!-- 端口转发建议：检测到服务横幅时浮在终端右下角，不挡输出 -->
+    <div class="port-suggestions">
+      <div v-for="s in suggestions" :key="s.port" class="port-toast" :class="s.state">
+        <template v-if="s.state === 'pending'">
+          <Icon name="zap" :size="13" />
+          <span>检测到服务监听 :{{ s.port }}</span>
+          <button class="act" @click="confirmForward(s)">转发到本机</button>
+          <button class="x" title="忽略" @click="dismissForward(s)"><Icon name="x" :size="12" /></button>
+        </template>
+        <template v-else-if="s.state === 'ok'">
+          <Icon name="check" :size="13" />
+          <span>已转发 → localhost:{{ s.port }}</span>
+        </template>
+        <template v-else>
+          <Icon name="x" :size="13" />
+          <span :title="s.error">转发失败：{{ s.error }}</span>
+        </template>
+      </div>
     </div>
 
     <!-- 右键菜单 -->
@@ -754,5 +871,54 @@ defineExpose({ refitAndFocus })
 .hint {
   color: var(--fg-muted);
   font-size: var(--fs-xs);
+}
+
+/* 端口转发建议气泡：右下浮层，不抢焦点不遮状态条 */
+.port-suggestions {
+  position: absolute;
+  right: 16px;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 60%;
+}
+.port-toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+}
+.port-toast.ok {
+  color: var(--success-text);
+}
+.port-toast.error {
+  color: var(--danger-text);
+}
+.port-toast .act {
+  padding: 2px 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  /* 约定：带白字的实底按钮用 --accent-text 而不是 --accent（见 styles.css） */
+  background: var(--accent-text);
+  color: var(--bg-panel);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.port-toast .x {
+  display: flex;
+  padding: 2px;
+  border: none;
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
 }
 </style>

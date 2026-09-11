@@ -135,6 +135,8 @@ export interface DoxApi {
     containerName: string,
     action: ContainerControlAction
   ): Promise<void>
+  /** 容器网桥 IP（端口转发建议的目标）；本机容器/无 IP/探测失败都返回 null */
+  containerIp(parentSessionId: string, containerName: string): Promise<string | null>
 
   // ---- 传输队列 ----
   /** 弹出本地文件选择框，选中文件上传到 remoteDir */

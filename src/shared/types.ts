@@ -111,6 +111,8 @@ export interface AppSettings {
   /** 连字需要 DOM 渲染器（WebGL 逐字形绘制，无法做字形替换） */
   ligatures: boolean
   localShellId: string
+  /** 终端输出里检测到服务监听横幅时，弹出「转发到本机」建议 */
+  suggestPortForward: boolean
 }
 
 /**

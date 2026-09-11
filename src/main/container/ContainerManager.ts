@@ -28,6 +28,7 @@ import {
   localLogsArgs,
   localShellProbeArgs,
   logsCommand,
+  parseInspectIp,
   parseListing,
   parseRows,
   shellProbeCommand,
@@ -293,6 +294,37 @@ export class ContainerManager {
 
     // 容器状态变了（甚至删了重建），shell 缓存不再可信
     this.shellByTarget.delete(`${parentSessionId} ${containerName}`)
+  }
+
+  /**
+   * 解析容器在 docker 网桥上的 IP（端口转发建议的目标地址）。
+   *
+   * 容器没发布端口时，远端 127.0.0.1 摸不到它，但宿主机能直连网桥 IP，
+   * 把 SSH 转发目标指过去就通。只读 `inspect`，与只读探测同类。
+   *
+   * 返回 null 的两种情况各有各的回退：本机容器（Mac 到不了 VM 里的网桥，
+   * 转发无意义）、host 网络或无 IP（回退 127.0.0.1 试试）。**不抛错** ——
+   * 这只是个建议功能的辅助查询，挂了不该打断终端。
+   */
+  async containerIp(parentSessionId: string, containerName: string): Promise<string | null> {
+    if (isLocalContainerTarget(parentSessionId)) return null
+    const client = this.getClient(parentSessionId)
+    if (!client) return null
+
+    try {
+      assertContainerTarget(containerName)
+      // runtime 缓存只在 list 之后有；面板没开过就补一次探测（只读）
+      if (!this.runtimeByParent.has(parentSessionId)) await this.list(parentSessionId)
+      const runtime = this.runtimeByParent.get(parentSessionId)
+      if (!runtime) return null
+
+      const res = await execCapture(client, `${runtime.binary} inspect ${containerName}`, {
+        timeoutMs: 10_000
+      })
+      return parseInspectIp(res.stdout)
+    } catch {
+      return null
+    }
   }
 
   /** 远端：父 SSH 连接上的 exec 通道 */
