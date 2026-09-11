@@ -56,6 +56,9 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-transfer-progress.mjs` | 进度条真的在走（不是静止装饰）+ 传完自动从队列消失 |
 | `verify-transfer-cancel.mjs` | 传输取消：状态真变、远端不留半截文件 |
 | `verify-folder-cancel.mjs` | 文件夹传输的「全部取消」不再被新冒出来的任务顶上 |
+| `verify-chunk-batcher.mjs` | 终端输出批处理器：保序合并、超量/定时 flush、dispose 静默 |
+| `verify-zmodem-prescan.mjs` | ZMODEM 触发序列预扫描（未命中绕过 Sentry 逐块复制）：纯输出零丢失、单块/跨块触发识别、retract 回退 |
+| `verify-transfer-speed.mjs` | 传输吞吐冒烟：64MB 随机文件上传+下载双向 sha256 比对，顺带实测两个方向的 MB/s（需主机参数） |
 | `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |
 | `verify-posix-integration.mjs` | 校验 POSIX 侧的同一契约：zsh（ZDOTDIR 注入）/ bash（--rcfile）/ fish（-C），装了哪个测哪个 |
 | `verify-posix-local-ui.mjs` | 端到端：真实应用里新建本地终端 → 敲 `cd` → 断言标签标题跟随 cwd（守着「zsh 打开即死」那个回归） |
@@ -116,6 +119,7 @@ src/
   - **标签栏**：标签从「等高矩形 + 竖线分割」改成有间距的圆角块，活动标签靠抬升的面 + 顶部高亮线 + 投影三重信号；右侧分屏/SFTP 按钮也改成圆角块 —— 它们和标签混成同一排「格子」时，分不清哪个是可切换的、哪个是动作
 - **自绘标题栏 ✅**：Windows / Linux 上 `frame: false`，最顶上那条由我们自己画 —— logo + Dox + − □ ✕，跟主题同色；macOS 保留系统红绿灯（`titleBarStyle: 'hiddenInset'`）。代价是失去「悬停最大化按钮弹出贴靠布局」，双击最大化与边缘拖拽缩放仍在
 - **应用图标重做 ✅**：`scripts/generate-icon.mjs` 生成，天蓝→草绿竖向渐变 + 白色 `>_`，3 倍超采样抗锯齿；`--preview` 出 16/32/64/128 原生并排图供肉眼核对（缩到 16px 才是真正要过的那关）。侧栏顶栏的品牌已并到标题栏，同一处不再出现两遍「Dox」
+- **性能优化 ✅**：终端输出 4ms/64KB 批处理合并（三处管理器共用 `chunkBatcher`，刷屏时 IPC 消息降 1-2 个数量级）；ZMODEM Sentry 改触发序列预扫描（常规输出不再逐块做 3 次 O(n) 复制）；SFTP 传输并发 2→4 + 高水位调大（读 1MB / 写 4MB，读了 ssh2 源码确认串行点）；渲染产物开 oxc 压缩 + FileEditor（CodeMirror）懒加载，首包 2.38MB → 0.58MB；更新检查延后 45s 退出启动关键路径；连接 ready 后后台预热 sftp 通道
 - **容器终端 ✅**：侧栏列出 Docker / Podman 容器（运行中/暂停/已停止全量展示，已停止淡一档），右键「进入」即在新标签页里得到该容器的 shell；右键「查看日志」开一个 `docker logs -f --tail 200` 标签（守护进程读日志驱动，不依赖容器内有 shell，已停止的容器也能看 —— 「它刚才为什么挂了」正是高频场景）；右键还可**启动 / 停止 / 恢复 / 删除**容器（`CONTROL_VERBS` 白名单，停止与删除落手前有确认）
   - **两种目标**：SSH 设备（列那台机器上的）与**本机**（本地终端标签下列本机的，Docker Desktop / Podman Desktop 都行）。上层完全一样，只有承载方式不同
   - 远端走**父 SSH 连接**上的一条 `docker exec` 通道；本机走一个 node-pty 跑 `docker exec -it`。两者共用 `container-` 前缀，所以在渲染层「容器里的一个 shell」就是一回事，不需要第二套 API

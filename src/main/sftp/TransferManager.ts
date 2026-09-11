@@ -73,7 +73,11 @@ export class TransferManager {
   private tasks = new Map<string, InternalTask>()
   private queue: string[] = []
   private activeCount = 0
-  private readonly maxConcurrent = 2
+  /*
+   * 并发 4：SFTP 跑在单条 SSH 连接的子系统上，多文件并发与 sshd 的
+   * MaxSessions 无关，只多吃几条通道。再高对本机磁盘就是随机写了。
+   */
+  private readonly maxConcurrent = 4
   private lastEmitAt = 0
   private emitScheduled = false
   /** taskId → 自动消失定时器，任务被提前移除时要顺手清掉 */
@@ -369,11 +373,21 @@ export class TransferManager {
         return
       }
       const isUpload = task.direction === 'upload'
+      /*
+       * 流的高水位不是内存洁癖问题，是吞吐问题（都读过 ssh2 源码确认过）：
+       * - ssh2 的 SFTP ReadStream 同一时刻只有一个在途 READ，大小跟着 highWaterMark
+       *   走（默认 64KB）——高延迟链路上下载 = 64KB/RTT 被钉死。给 1MB，单请求
+       *   顶到 OpenSSH 服务端 256KB 上限，往返数直接砍到 1/4。
+       * - ssh2 的 SFTP WriteStream 靠 _writev 把排队 chunk 全部并发打出去，
+       *   排多少取决于 hwm（默认 16KB，约等于串行）。给 4MB ≈ 几十个并发 WRITE。
+       * - 本地读侧给 256KB：请求数降到 1/4，配合写侧的并发排队刚好不断粮。
+       * 内存代价是每条活动传输多占几 MB，并发 4 封顶，可接受。
+       */
       const src = isUpload
-        ? fs.createReadStream(task.localPath)
-        : sftp.createReadStream(task.remotePath)
+        ? fs.createReadStream(task.localPath, { highWaterMark: 256 * 1024 })
+        : sftp.createReadStream(task.remotePath, { highWaterMark: 1024 * 1024 })
       const dst = isUpload
-        ? sftp.createWriteStream(task.remotePath)
+        ? sftp.createWriteStream(task.remotePath, { highWaterMark: 4 * 1024 * 1024 })
         : fs.createWriteStream(task.localPath)
 
       let failure: Error | null = null

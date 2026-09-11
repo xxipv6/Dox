@@ -17,6 +17,12 @@ export default defineConfig({
         '@shared': resolve('src/shared')
       }
     },
+    build: {
+      // 之前没显式开：产物 2.38MB 单 chunk、连 region 注释都在，
+      // 首屏要全文解析完才能跑 main.ts。用 rolldown 自带的 oxc 压缩
+      // （'esbuild' 在 vite 8 里要额外装 esbuild，oxc 效果同级）
+      minify: 'oxc'
+    },
     plugins: [vue()]
   }
 })

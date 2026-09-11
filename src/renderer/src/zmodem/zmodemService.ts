@@ -1,4 +1,9 @@
-import { Sentry, type ZDetection, type ZSession } from 'zmodem.js'
+import zmodemPkg from 'zmodem.js'
+import type { ZDetection, ZSession } from 'zmodem.js'
+
+// 运行时是 CJS（Object.assign 挂导出）：Node 原生 ESM 解不出 named exports，
+// 只能 default 导入再解构 —— 打包器和 Node 单测两条路都走这条（见 zmodem.d.ts）
+const { Sentry } = zmodemPkg
 
 /**
  * ZMODEM 桥接：拦截终端数据流，识别 rz/sz 发起序列并接管会话。
@@ -39,6 +44,58 @@ export function createZmodemBridge(
   let session: ZSession | null = null
   let watchdog: ReturnType<typeof setTimeout> | null = null
 
+  /*
+   * 触发序列预扫描。
+   *
+   * zmodem.js 的 Sentry 对每个 chunk 要做 2-3 次 O(n) 数组复制（zsentry.js），
+   * 全部终端输出都为「可能有人敲 rz/sz」付这份税 —— 10MB/s 的输出就是
+   * 30MB/s 的复制 + GC 压力。而检测其实只需要找 4 个字节：ZPAD ZPAD ZDLE 'B'
+   * （`**\x18B`，rz/sz 的 ZRQINIT/ZSINIT 头都以它开头）。
+   *
+   * 所以未激活时每块先做一次零分配扫描：没扫到（99.99% 的输出）直接写终端，
+   * 扫到才把数据交给 Sentry 走原来的完整路径。误触发（二进制输出里碰巧出现
+   * 该序列）由 Sentry 自己的 confirm/retract 兜底，输出不会丢。
+   */
+  const TRIGGER = [0x2a, 0x2a, 0x18, 0x42] as const
+  /** 上一个 chunk 的末 3 字节：触发序列可能横跨两块，边界情况靠它认出来 */
+  let tail: Uint8Array = new Uint8Array(0)
+  /** true = 已扫到触发、数据一律交 Sentry（直到会话收尾或 retract 回到预扫描） */
+  let engaged = false
+
+  /** 0 = 没扫到；1 = 完整命中在当前块内；2 = 跨块命中（前几个字节在 tail 里） */
+  function scanTrigger(bytes: Uint8Array): 0 | 1 | 2 {
+    outer: for (let i = 0; i + TRIGGER.length <= bytes.length; i++) {
+      for (let j = 0; j < TRIGGER.length; j++) {
+        if (bytes[i + j] !== TRIGGER[j]) continue outer
+      }
+      return 1
+    }
+    for (let k = 1; k < TRIGGER.length; k++) {
+      if (tail.length < k || bytes.length < TRIGGER.length - k) continue
+      let ok = true
+      for (let j = 0; j < k; j++) {
+        if (tail[tail.length - k + j] !== TRIGGER[j]) { ok = false; break }
+      }
+      if (!ok) continue
+      for (let j = 0; j < TRIGGER.length - k; j++) {
+        if (bytes[j] !== TRIGGER[k + j]) { ok = false; break }
+      }
+      if (ok) return 2
+    }
+    return 0
+  }
+
+  /** 更新跨块尾巴：只需留下流末尾 3 字节 */
+  function updateTail(bytes: Uint8Array): void {
+    if (bytes.length >= 3) {
+      tail = bytes.slice(bytes.length - 3)
+      return
+    }
+    // 极小 chunk：尾巴补不满 3 字节，把旧尾巴拼进来再截
+    const joined = concat([tail, bytes], tail.length + bytes.length)
+    tail = joined.slice(Math.max(0, joined.length - 3))
+  }
+
   const print = (msg: string, color = '36'): void =>
     writeToTerm(encoder.encode(`\r\n\x1b[${color}m[zmodem]\x1b[0m ${msg}\r\n`))
 
@@ -62,6 +119,8 @@ export function createZmodemBridge(
       }
     }
     session = null
+    // 回到预扫描模式：下一个 rz/sz 仍要能识别
+    engaged = false
     if (active) {
       active = false
       print(reason ? `会话已中止（${reason}），终端恢复交互` : '会话结束，终端恢复交互')
@@ -172,11 +231,35 @@ export function createZmodemBridge(
     on_retract: () => {
       active = false
       session = null
+      // 误触发 retract：回到预扫描模式
+      engaged = false
     }
   })
 
   return {
-    consume: (chunk) => sentry.consume(toBytes(chunk)),
+    consume: (chunk) => {
+      const bytes = toBytes(chunk)
+      // 已接管（或已扫到触发、等待 confirm/retract）：维持 Sentry 完整路径
+      if (active || engaged) {
+        sentry.consume(bytes)
+        return
+      }
+      const hit = scanTrigger(bytes)
+      if (hit === 0) {
+        // 常规输出：绕过 Sentry 的层层复制，直接写终端
+        writeToTerm(bytes)
+        updateTail(bytes)
+        return
+      }
+      /*
+       * 扫到触发。跨块命中（hit === 2）时触发序列的前几个字节在 tail 里、
+       * 已经写过屏了 —— 必须把它们一起喂给 Sentry 它才认得出完整触发，
+       * 代价是极端罕见地重复输出 ≤3 字节（只在 rz/sz 启动瞬间，无害）。
+       */
+      engaged = true
+      sentry.consume(hit === 2 ? concat([tail, bytes], tail.length + bytes.length) : bytes)
+      tail = new Uint8Array(0)
+    },
     isActive: () => active,
     abort: () => finish('用户中断')
   }

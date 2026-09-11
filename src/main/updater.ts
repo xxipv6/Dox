@@ -16,5 +16,12 @@ export function setupAutoUpdater(): void {
   autoUpdater.on('update-available', (info) => console.info('[updater] 发现新版本:', info.version))
   // 下载完成后 checkForUpdatesAndNotify 会弹系统通知，用户重启即安装
 
-  void autoUpdater.checkForUpdatesAndNotify().catch(() => undefined)
+  /*
+   * 延后 45s 再查：启动头几秒是连接恢复、首屏渲染最吃资源的时候，
+   * 更新检查（网络请求 + 可能的后台下载）不该挤在这条关键路径上。
+   */
+  const timer = setTimeout(() => {
+    void autoUpdater.checkForUpdatesAndNotify().catch(() => undefined)
+  }, 45_000)
+  timer.unref?.()
 }

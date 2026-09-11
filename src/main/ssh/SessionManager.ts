@@ -5,6 +5,7 @@ import type { WebContents } from 'electron'
 import { IpcChannels } from '../../shared/ipc'
 import type { HostKeyDecision, SessionStatus, SshSessionConfig, TermSize } from '../../shared/types'
 import type { KnownHostsStore } from '../store/knownHosts'
+import { createChunkBatcher } from '../chunkBatcher'
 
 interface ActiveSession {
   id: string
@@ -158,6 +159,11 @@ export class SessionManager {
     this.sessions.set(id, session)
     this.wireSession(session, client, shell)
     this.notifyStatus(session, 'connected')
+    /*
+     * 后台预热 sftp 通道：面板首次列目录少一次通道往返。
+     * 失败静默 —— sftp() 在首次真实调用时照旧重试，预热只是顺手。
+     */
+    void this.sftp(id).catch(() => undefined)
     return id
   }
 
@@ -341,16 +347,23 @@ export class SessionManager {
     // 这是区分「用户敲了 exit」和「网络断了」的唯一可靠依据。
     const ctx = { shellExited: false }
 
-    shell.on('data', (chunk: Buffer) => {
-      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, chunk)
+    // 输出合并：刷屏时一条网络包一条 IPC 会烧穿主进程（见 chunkBatcher）。
+    // stdout/stderr 共用同一个 batcher —— 两条流本就发同一通道，
+    // 事件循环的到达顺序就是合并后的字节顺序。
+    const batcher = createChunkBatcher((data) => {
+      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, data)
     })
-    shell.stderr.on('data', (chunk: Buffer) => {
-      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, chunk)
-    })
+    shell.on('data', (chunk: Buffer) => batcher.push(chunk))
+    shell.stderr.on('data', (chunk: Buffer) => batcher.push(chunk))
     shell.on('exit', () => {
       ctx.shellExited = true
     })
-    shell.on('close', () => this.handleClosed(id, client, ctx.shellExited))
+    shell.on('close', () => {
+      // close 前必须落盘：否则通道最后几毫秒的输出会跟着定时器进坟墓
+      batcher.flush()
+      batcher.dispose()
+      this.handleClosed(id, client, ctx.shellExited)
+    })
 
     client.on('error', (err: Error) => {
       // 会话中途出错：'close' 随后会到，统一由 handleClosed 收尾。
@@ -467,6 +480,8 @@ export class SessionManager {
 
       this.notifyStatus(session, 'connected', undefined, { reconnected: true })
       this.onReconnected?.(session.id)
+      // 同 connect：后台预热 sftp 通道，重连后的首次列目录少一次往返
+      void this.sftp(session.id).catch(() => undefined)
     } catch (err) {
       const kind = classifyFailure(err)
       if (kind !== 'retryable') {

@@ -14,6 +14,7 @@ import {
 import type { ContainerControlAction, ContainerInfo, ContainerProbeResult, TermSize } from '../../shared/types'
 import { execCapture } from '../ssh/remoteExec'
 import { CommandError, outputsOf } from '../execError'
+import { createChunkBatcher } from '../chunkBatcher'
 import { isNotFound, runLocal } from './localRun'
 import {
   assertContainerTarget,
@@ -481,20 +482,28 @@ export class ContainerManager {
     let startupStderr = ''
     let exitCode: number | null = null
 
+    // 输出合并（见 chunkBatcher）；stdout/stderr 共用，顺序即事件循环到达顺序
+    const batcher = createChunkBatcher((data) => {
+      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, data)
+    })
     channel.on('data', (chunk: Buffer) => {
       stdoutBytes += chunk.length
-      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, chunk)
+      batcher.push(chunk)
     })
     // 正常跑起来时 `-t` 会把容器里的 stderr 并进 tty（这条流是空的）；
     // 只有 docker 自己在分配 tty 之前就报错（容器没在跑之类）才会走到这里
     channel.stderr?.on('data', (chunk: Buffer) => {
       if (startupStderr.length < 400) startupStderr += chunk.toString('utf8')
-      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, chunk)
+      batcher.push(chunk)
     })
     channel.on('exit', (code: number | null) => {
       exitCode = code
     })
-    channel.on('close', () => this.handleClosed(id, channel, { stdoutBytes, startupStderr, exitCode }))
+    channel.on('close', () => {
+      batcher.flush()
+      batcher.dispose()
+      this.handleClosed(id, channel, { stdoutBytes, startupStderr, exitCode })
+    })
   }
 
   /**
@@ -512,10 +521,15 @@ export class ContainerManager {
   private wireLocal(session: ContainerSession, proc: IPty): void {
     const { id, owner } = session
 
+    const batcher = createChunkBatcher((data) => {
+      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, data)
+    })
     proc.onData((chunk) => {
-      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, Buffer.from(chunk, 'utf8'))
+      batcher.push(Buffer.from(chunk, 'utf8'))
     })
     proc.onExit(({ exitCode }) => {
+      batcher.flush()
+      batcher.dispose()
       const current = this.sessions.get(id)
       if (!current || current.carrier.kind !== 'local' || current.carrier.pty !== proc) return
       this.sessions.delete(id)
@@ -706,6 +720,8 @@ function exitHint(exitCode: number): string | undefined {
  * 那是这一层存在之前的行为，不会比它更差。
  */
 async function resolveExecutable(binary: string): Promise<string> {
+  const cached = resolvedBinaryCache.get(binary)
+  if (cached) return cached
   const finder = process.platform === 'win32' ? 'where' : 'which'
   const found = await new Promise<string[]>((resolve) => {
     execFile(finder, [binary], { windowsHide: true }, (err, stdout) => {
@@ -720,11 +736,21 @@ async function resolveExecutable(binary: string): Promise<string> {
     })
   })
 
-  if (!found.length) return binary
+  let resolved: string
+  if (!found.length) resolved = binary
   // POSIX 下 execvp 认 shebang 脚本，哪个在前就用哪个
-  if (process.platform !== 'win32') return found[0]
-  return found.find((p) => /\.exe$/i.test(p)) ?? binary
+  else if (process.platform !== 'win32') resolved = found[0]
+  else resolved = found.find((p) => /\.exe$/i.test(p)) ?? binary
+  resolvedBinaryCache.set(binary, resolved)
+  return resolved
 }
+
+/*
+ * 解析结果缓存：本机 PATH 在应用活着期间不会变，之前每次开容器终端
+ * 都 spawn 一次 which/where 是白送的进程开销。不设上限 —— binary
+ * 名字就 docker/podman 两个。
+ */
+const resolvedBinaryCache = new Map<string, string>()
 
 /** 关掉本机 pty，并确保不留孤儿进程（同 LocalPtyManager 的 Windows 处理） */
 function killLocalPty(proc: IPty): void {

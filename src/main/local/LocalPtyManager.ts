@@ -10,6 +10,7 @@ import { IpcChannels } from '../../shared/ipc'
 import type { LocalShellInfo, TermSize } from '../../shared/types'
 import { LOCAL_ID_PREFIX } from '../../shared/sessionId'
 import { detectShells, resolveShell } from './shells'
+import { createChunkBatcher } from '../chunkBatcher'
 
 // 前缀定义在 shared/sessionId.ts（渲染层也要用同一份），这里转出去保持既有导入可用
 export { LOCAL_ID_PREFIX }
@@ -50,13 +51,20 @@ export class LocalPtyManager {
     const session: LocalSession = { id, pty: proc, owner }
     this.sessions.set(id, session)
 
+    // 输出合并：本地刷屏（编译输出、`yes`）时一 chunk 一条 IPC 同样烧（见 chunkBatcher）
+    const batcher = createChunkBatcher((data) => {
+      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, data)
+    })
+    const debugPty = !!process.env['DOX_DEBUG_PTY']
     proc.onData((chunk) => {
       // 必须发字节而不是字符串：渲染侧的 ZMODEM Sentry 会把非 Array 输入
       // 转成 Uint8Array，而 new Uint8Array(原始字符串) 恒为空数组，会吞掉全部输出
-      if (process.env['DOX_DEBUG_PTY']) this.debugLog(`OUT ${JSON.stringify(chunk.slice(0, 300))}`)
-      if (!owner.isDestroyed()) owner.send(IpcChannels.sshData, id, Buffer.from(chunk, 'utf8'))
+      if (debugPty) this.debugLog(`OUT ${JSON.stringify(chunk.slice(0, 300))}`)
+      batcher.push(Buffer.from(chunk, 'utf8'))
     })
     proc.onExit(({ exitCode }) => {
+      batcher.flush()
+      batcher.dispose()
       this.sessions.delete(id)
       if (!owner.isDestroyed()) {
         owner.send(IpcChannels.sshStatus, {

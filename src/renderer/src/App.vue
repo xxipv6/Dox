@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { defineAsyncComponent, nextTick, onMounted, ref } from 'vue'
 import { useSessionStore, type SessionTab } from './stores/sessions'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
@@ -7,11 +7,17 @@ import SessionSidebar from './components/SessionSidebar.vue'
 import TitleBar from './components/TitleBar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
 import FileExplorer from './components/FileExplorer.vue'
-import FileEditor from './components/FileEditor.vue'
 import TransferQueue from './components/TransferQueue.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
 import Icon from './components/Icon.vue'
+
+/*
+ * 编辑器懒加载：CodeMirror + 15 个语言包是首包里最大的一块死重 ——
+ * 只有真打开文件时才用得着。defineAsyncComponent 让它进独立 chunk，
+ * 首次双击文件时才下载解析。
+ */
+const FileEditor = defineAsyncComponent(() => import('./components/FileEditor.vue'))
 
 const store = useSessionStore()
 const editor = useEditorStore()

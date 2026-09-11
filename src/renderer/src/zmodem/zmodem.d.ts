@@ -55,4 +55,13 @@ declare module 'zmodem.js' {
     })
     consume(input: number[] | Uint8Array | ArrayBuffer): void
   }
+
+  /*
+   * 运行时是 CJS 且用 Object.assign(module.exports, …) 挂导出 ——
+   * 打包器能静态解出 named exports，Node 原生 ESM 不能（cjs-module-lexer
+   * 认不出 Object.assign）。所以消费侧走 default 导入再解构，
+   * 这样打包产物和 Node 直跑（单测）两条路都通。
+   */
+  const _default: { Sentry: typeof Sentry }
+  export default _default
 }
