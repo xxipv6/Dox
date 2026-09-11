@@ -7,6 +7,7 @@ import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
+import Spinner from './Spinner.vue'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 
 const props = defineProps<{
@@ -31,6 +32,10 @@ const dragOver = ref(false)
 const agentMissing = ref(false)
 /** 容器助手版本过旧（没有 fs_* 方法）：指路去升级（空串 = 不过旧） */
 const agentOutdated = ref('')
+/** 是否真的持有过 agent 通道（只释放持有过的，盲 release 会误关别人的通道） */
+const holdAcquired = ref(false)
+/** 打包进行中（远端 tar 最长 5 分钟，没反馈就像卡死） */
+const archiving = ref(false)
 
 // 内联新建文件夹 / 重命名
 const creatingDir = ref(false)
@@ -95,13 +100,17 @@ async function load(dir?: string): Promise<void> {
   errorMsg.value = ''
   // 换目录后旧路径已经没意义，留着会选中一个看不见的东西
   clearSelection()
+  const prev = cwd.value
   try {
     if (dir) cwd.value = dir
     entries.value = await window.api.sftpList(fsSessionId.value, cwd.value, ctrName.value)
     // 与终端的 cwd 跟踪保持同步（作为下次 cd 相对路径的基准）
     store.setCwd(props.sessionId, cwd.value)
   } catch (err) {
-    errorMsg.value = errorText(err)
+    // 进不去目标目录：回滚路径、保留旧列表 —— 否则面包屑指着新路径、
+    // 行却是旧目录的，用户会以为自己在删/改另一个目录的东西
+    cwd.value = prev
+    errorMsg.value = (dir ? '无法进入目录：' : '') + errorText(err)
   } finally {
     loading.value = false
   }
@@ -124,7 +133,11 @@ async function init(): Promise<void> {
     }
     agentOutdated.value = ''
     agentMissing.value = false
-    void window.api.agentFsHold(props.container.parentSessionId, props.container.containerName)
+    // 只持有一次：stamp 监听会重复触发 init，重复 hold 会在 unmount 时留一个没释放
+    if (!holdAcquired.value) {
+      holdAcquired.value = true
+      void window.api.agentFsHold(props.container.parentSessionId, props.container.containerName)
+    }
   }
   try {
     // 以远端 home 目录为起点（容器落地 /，由主进程 realpath 分路处理）
@@ -162,7 +175,7 @@ async function submitNewDir(): Promise<void> {
       await window.api.sftpMkdir(fsSessionId.value, `${cwd.value}/${name}`, ctrName.value)
       await load()
     } catch (err) {
-      alert(`新建文件夹失败：${errorText(err)}`)
+      errorMsg.value = `新建文件夹失败：${errorText(err)}`
     }
   }
   creatingDir.value = false
@@ -182,7 +195,7 @@ async function submitRename(entry: FileEntry): Promise<void> {
       await window.api.sftpRename(fsSessionId.value, entry.path, `${cwd.value}/${name}`, ctrName.value)
       await load()
     } catch (err) {
-      alert(`重命名失败：${errorText(err)}`)
+      errorMsg.value = `重命名失败：${errorText(err)}`
     }
   }
   renamingPath.value = null
@@ -196,7 +209,7 @@ async function removeEntry(entry: FileEntry): Promise<void> {
     await window.api.sftpDelete(fsSessionId.value, entry.path, entry.isDir, ctrName.value)
     await load()
   } catch (err) {
-    alert(`删除失败：${errorText(err)}`)
+    errorMsg.value = `删除失败：${errorText(err)}`
   }
 }
 
@@ -284,19 +297,24 @@ async function onMenuSelect(id: string): Promise<void> {
 
 /**
  * 就地打包：远端在当前目录生成 .tar.gz，完事刷新列表让包露出来。
- * 大目录要等远端 tar 跑完（主进程给了 5 分钟上限），期间没有进度条 ——
- * 失败原因会落在 errorMsg 里，成功就是列表里多一个包。
+ * 大目录要等远端 tar 跑完（主进程给了 5 分钟上限）——期间顶部出
+ * 不确定进度条，不然慢目录上看着就像卡死；失败原因落在 errorMsg 里。
  */
 async function archiveTargets(targets: FileEntry[]): Promise<void> {
-  await guard(async () => {
-    await window.api.sftpArchive(
-      fsSessionId.value,
-      targets.map((t) => t.path),
-      ctrName.value
-    )
-    clearSelection()
-    await load()
-  })
+  archiving.value = true
+  try {
+    await guard(async () => {
+      await window.api.sftpArchive(
+        fsSessionId.value,
+        targets.map((t) => t.path),
+        ctrName.value
+      )
+      clearSelection()
+      await load()
+    })
+  } finally {
+    archiving.value = false
+  }
 }
 
 async function downloadTargets(targets: FileEntry[]): Promise<void> {
@@ -328,7 +346,7 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
       await window.api.sftpDelete(fsSessionId.value, t.path, t.isDir, ctrName.value)
     }
   } catch (err) {
-    alert(`删除过程中出错：${errorText(err)}`)
+    errorMsg.value = `删除过程中出错：${errorText(err)}`
   } finally {
     clearSelection()
     await load()
@@ -436,7 +454,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   unsubscribeTransfers?.()
   if (refreshTimer !== null) window.clearTimeout(refreshTimer)
-  if (props.container && !agentMissing.value) {
+  // 只释放真的持有过的通道：版本过旧等路径从没 hold 过，
+  // 盲 release 会把别人（终端标签）在用的 agent 通道误关
+  if (props.container && holdAcquired.value) {
+    holdAcquired.value = false
     void window.api.agentFsRelease(props.container.parentSessionId, props.container.containerName)
   }
   entries.value = []
@@ -471,13 +492,20 @@ onBeforeUnmount(() => {
       ><Icon name="follow" /></button>
     </div>
 
-    <!-- 面包屑：根单独渲染一次，其余每级前面补分隔符 -->
+    <!-- 面包屑：容器模式先给容器名徽章（这是哪个容器的文件系统一眼得见），根单独渲染一次 -->
     <div class="breadcrumb">
+      <span v-if="props.container" class="ctr-badge" :title="`容器 ${props.container.containerName} 内的文件（经容器助手）`">
+        <Icon name="box" :size="12" />{{ props.container.containerName }}
+      </span>
       <a class="crumb" title="/" @click="load('/')">/</a>
       <template v-for="(crumb, i) in breadcrumbs" :key="crumb.path">
         <span v-if="i > 0" class="sep">/</span>
         <a class="crumb" @click="load(crumb.path)">{{ crumb.name }}</a>
       </template>
+      <!-- 打包期间的不确定进度：远端 tar 最长 5 分钟，没反馈就像卡死 -->
+      <span v-if="archiving" class="archiving" title="正在远端打包…">
+        <Spinner :size="12" />打包中…
+      </span>
     </div>
 
     <div v-if="errorMsg" class="error-banner">{{ errorMsg }}</div>
@@ -494,7 +522,7 @@ onBeforeUnmount(() => {
       请在侧栏「远程助手」点「升级到 v{{ BUNDLED_AGENT_VERSION }}」。
     </div>
 
-    <div v-else-if="loading" class="hint">加载中…</div>
+    <div v-else-if="loading" class="hint"><Spinner text="加载中…" /></div>
 
     <!-- 文件列表；点空白处取消选中（和资源管理器一致） -->
     <div
@@ -592,12 +620,36 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
 }
 .breadcrumb {
+  display: flex;
+  align-items: center;
   padding: 6px 10px;
   font-size: var(--fs-sm);
   color: var(--fg-muted);
   overflow-x: auto;
   white-space: nowrap;
   border-bottom: 1px solid var(--border);
+}
+/* 容器模式的身份徽章：宿主机视图和容器视图原来肉眼分不出 */
+.ctr-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-right: 8px;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.archiving {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 10px;
+  color: var(--accent-text);
+  font-size: var(--fs-xs);
 }
 .crumb {
   color: var(--accent-text);

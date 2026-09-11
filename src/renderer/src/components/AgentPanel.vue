@@ -5,6 +5,7 @@ import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
+import Spinner from './Spinner.vue'
 import SidebarSection from './SidebarSection.vue'
 
 interface AgentStatus {
@@ -17,6 +18,8 @@ const store = useSessionStore()
 const status = ref<AgentStatus | null>(null)
 const installing = ref(false)
 const errorMsg = ref('')
+/** 查询本身失败（连接问题）：和「未安装」是两回事，断线机器不该看到安装游说 */
+const probeFailed = ref(false)
 
 /*
  * 远程助手（dox-agent）面板。
@@ -48,11 +51,13 @@ const target = computed<{ sessionId: string; containerName?: string } | null>(()
 async function refresh(): Promise<void> {
   status.value = null
   errorMsg.value = ''
+  probeFailed.value = false
   if (!target.value) return
   try {
     status.value = await window.api.agentStatus(target.value.sessionId, target.value.containerName)
-  } catch {
-    status.value = { installed: false }
+  } catch (err) {
+    probeFailed.value = true
+    errorMsg.value = errorText(err)
   }
 }
 
@@ -88,9 +93,17 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
     <div v-if="!target" class="empty-hint">连接 SSH 会话后可安装远程助手</div>
 
     <template v-else>
-      <div v-if="status === null" class="empty-hint">查询中…</div>
+      <div v-if="status === null && !probeFailed" class="empty-hint">
+        <Spinner text="查询中…" />
+      </div>
 
-      <template v-else-if="status.installed">
+      <!-- 查询失败（连接问题）：给重试，而不是摆出「未安装」的安装游说 -->
+      <div v-else-if="probeFailed" class="agent-probe-fail">
+        <span class="probe-fail-text">查询失败：{{ errorMsg }}</span>
+        <button class="btn" @click="refresh">重试</button>
+      </div>
+
+      <template v-else-if="status?.installed">
         <div class="agent-ok">
           <Icon name="check" :size="13" />
           <span>
@@ -102,6 +115,7 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
         <!-- 版本过旧：新应用 + 老助手，新能力（文件管理等）在老二进制上不存在 -->
         <div v-if="outdated" class="agent-upgrade">
           <button class="btn primary" :disabled="installing" @click="install">
+            <Spinner v-if="installing" :size="12" />
             {{ installing ? '升级中…' : `升级到 v${BUNDLED_AGENT_VERSION}` }}
           </button>
         </div>
@@ -109,20 +123,28 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
 
       <template v-else>
         <p class="agent-desc">
-          把 dox-agent（~2MB，Go 静态二进制）安装到<template v-if="target.containerName">容器「{{ target.containerName }}」的 <code>/tmp/dox-agent</code></template><template v-else>远端 <code>~/.dox/dox-agent</code></template>，
-          解锁自动端口发现、GPU 监控等能力。
-          不装系统目录、不要 root、不开机自启<template v-if="!target.containerName">；删除该目录即完全卸载</template>。
+          装一个小助手到<template v-if="target.containerName">容器「{{ target.containerName }}」里</template><template v-else>这台机器上</template>，
+          解锁文件浏览上传、自动端口发现和系统状态监控。
+          不装系统目录、不要 root、不开机自启。
         </p>
-        <p v-if="target.containerName" class="agent-desc">
-          与 VS Code Dev Containers 同款：二进制经 docker cp 注入，容器删除即消失；
-          容器 stop/start 不影响，rm/重建后需重装。
-        </p>
+        <details class="agent-details">
+          <summary>详情</summary>
+          <p v-if="target.containerName" class="agent-desc">
+            dox-agent（~2MB Go 静态二进制）经 docker cp 注入容器的 <code>/tmp/dox-agent</code>；
+            容器删除即消失，stop/start 不影响，rm/重建后需重装。
+          </p>
+          <p v-else class="agent-desc">
+            dox-agent（~2MB Go 静态二进制）安装到远端 <code>~/.dox/dox-agent</code>；
+            删除该目录即完全卸载。
+          </p>
+        </details>
         <button class="btn primary" :disabled="installing" @click="install">
+          <Spinner v-if="installing" :size="12" />
           {{ installing ? '安装中…' : target.containerName ? `安装到容器 ${target.containerName}` : '安装到这台机器' }}
         </button>
       </template>
 
-      <p v-if="errorMsg" class="form-error">{{ errorMsg }}</p>
+      <p v-if="errorMsg && !probeFailed" class="form-error">{{ errorMsg }}</p>
     </template>
   </SidebarSection>
 </template>
@@ -154,8 +176,34 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
   font-family: Consolas, monospace;
   color: var(--fg);
 }
+.agent-details {
+  margin: 0 0 6px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.agent-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+.agent-probe-fail {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px 2px;
+}
+.probe-fail-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--danger-text);
+  word-break: break-all;
+}
 .btn {
-  padding: 6px 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
   border-radius: var(--r-sm);
   border: 1px solid var(--border);
   background: var(--bg-hover);

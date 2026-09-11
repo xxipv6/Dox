@@ -21,6 +21,11 @@ export interface OpenFile {
   loading: boolean
   saving: boolean
   error: string
+  /**
+   * true = 上次保存被 mtime 冲突拒绝（远端在编辑期间被别处改过）。
+   * 界面据此给「强制覆盖 / 重新加载」而不是一句普通错误。
+   */
+  conflict: boolean
 }
 
 /** 每个会话各自维护一份打开列表：切会话不该看到别人打开的文件 */
@@ -84,7 +89,8 @@ export const useEditorStore = defineStore('editor', () => {
       mtime: 0,
       loading: true,
       saving: false,
-      error: ''
+      error: '',
+      conflict: false
     })
     list.push(file)
     activePathBySession[sessionId] = path
@@ -114,14 +120,16 @@ export const useEditorStore = defineStore('editor', () => {
   /**
    * 丢弃本地修改，重新从远端读取。
    * 不能复用 open()：它发现文件已在列表中就直接切过去，不会真的重读。
+   * discard=true 跳过未保存确认（冲突横幅的「重新加载」——用户已经在横幅里做过选择了）。
    */
-  async function reload(sessionId: string, path: string): Promise<void> {
+  async function reload(sessionId: string, path: string, opts?: { discard?: boolean }): Promise<void> {
     const file = filesOf(sessionId).find((f) => f.path === path)
     if (!file) return
-    if (isDirty(file) && !confirm(`「${file.name}」有未保存的修改，重新加载将丢弃它们，确定？`)) return
+    if (!opts?.discard && isDirty(file) && !confirm(`「${file.name}」有未保存的修改，重新加载将丢弃它们，确定？`)) return
 
     file.loading = true
     file.error = ''
+    file.conflict = false
     try {
       const res = await window.api.sftpReadText(file.fsSessionId ?? sessionId, path, file.containerName)
       if (res.binary) {
@@ -138,25 +146,32 @@ export const useEditorStore = defineStore('editor', () => {
     }
   }
 
-  /** 保存回远端。返回是否成功 */
-  async function save(sessionId: string, path: string): Promise<boolean> {
+  /**
+   * 保存回远端。返回是否成功。
+   * force=true 不做 mtime 冲突检测（用户在冲突横幅里显式选了「强制覆盖」）。
+   */
+  async function save(sessionId: string, path: string, opts?: { force?: boolean }): Promise<boolean> {
     const file = filesOf(sessionId).find((f) => f.path === path)
     if (!file || file.saving) return false
 
     file.saving = true
     file.error = ''
+    file.conflict = false
     try {
       file.mtime = await window.api.sftpWriteText(
         file.fsSessionId ?? sessionId,
         path,
         file.content,
-        file.mtime,
+        opts?.force ? undefined : file.mtime,
         file.containerName
       )
       file.savedContent = file.content
       return true
     } catch (err) {
-      file.error = errorText(err)
+      const text = errorText(err)
+      // 宿主机（已被外部修改）与容器 agent（已被他人修改）两种文案都认
+      file.conflict = /已被.*修改/.test(text)
+      file.error = text
       return false
     } finally {
       file.saving = false
@@ -189,9 +204,9 @@ export const useEditorStore = defineStore('editor', () => {
     activePathBySession[sessionId] = path
   }
 
-  /** 整个编辑器面板收起（有未保存改动时拦截） */
+  /** 整个编辑器面板收起（有未保存改动时提示一句 —— 只是提示，内容并不丢） */
   function hide(sessionId: string): void {
-    if (hasDirty(sessionId) && !confirm('有未保存的修改，收起面板将丢弃它们，确定继续？')) return
+    if (hasDirty(sessionId) && !confirm('有未保存的修改（收起不会丢失，重新展开可继续编辑）。确定收起？')) return
     visible.value = false
   }
 

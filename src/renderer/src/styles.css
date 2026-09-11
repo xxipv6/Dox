@@ -235,7 +235,8 @@ body {
 }
 
 .icon-btn.active {
-  color: var(--accent);
+  /* --accent 在亮底上对比度不够 AA；文字/图标场景一律用 --accent-text */
+  color: var(--accent-text);
   background: var(--bg-hover);
 }
 

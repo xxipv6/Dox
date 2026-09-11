@@ -36,6 +36,8 @@ onMounted(async () => {
 onBeforeUnmount(() => unsubscribe?.())
 
 function progress(t: TransferTask): number {
+  // 结束的任务恒满格：空文件（size=0）算出来是 0%，显示成「完成但 0%」像坏了
+  if (t.status === 'done') return 100
   return t.size > 0 ? Math.min(100, (t.transferred / t.size) * 100) : 0
 }
 </script>
@@ -58,7 +60,7 @@ function progress(t: TransferTask): number {
         >
           <Icon name="x" />
         </button>
-        <button class="icon-btn" title="清除已完成" @click.stop="api.clearFinishedTransfers()">
+        <button class="icon-btn" title="清除已结束（完成/失败/取消）" @click.stop="api.clearFinishedTransfers()">
           <Icon name="check-square" />
         </button>
         <button class="icon-btn">
@@ -86,6 +88,10 @@ function progress(t: TransferTask): number {
               :class="task.status"
               :style="{ width: progress(task) + '%' }"
             ></div>
+          </div>
+          <!-- 失败原因内联：tooltip 要悬停才看得见，还会被截断 -->
+          <div v-if="task.status === 'error' && task.error" class="task-error" :title="task.error">
+            {{ task.error }}
           </div>
         </div>
         <span class="task-status" :class="task.status" :title="task.error">
@@ -190,6 +196,15 @@ function progress(t: TransferTask): number {
   text-overflow: ellipsis;
   white-space: nowrap;
   margin-bottom: 4px;
+}
+/* 失败原因内联在进度条下面（一行截断，全文在 title） */
+.task-error {
+  margin-top: 3px;
+  font-size: var(--fs-xs);
+  color: var(--danger-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .progress-track {
   height: 6px;

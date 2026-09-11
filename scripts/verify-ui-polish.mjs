@@ -106,6 +106,62 @@ await win.keyboard.press('Escape')
 await win.waitForTimeout(400)
 check('Esc 关掉了添加设备弹窗', (await win.locator('.overlay').count()) === 0)
 
+// ---------- I. 状态点语义 + 死 pane 原地复活 ----------
+console.log('\nI. 状态点与复活')
+// 本地终端敲 exit：pane 死了但标签还在 —— 复活覆盖层必须出现，
+// 状态点必须是「灰」（主动结束不是「出事了」，红色只留给 error）
+await win.locator('.terminal-container:visible').first().click()
+await win.keyboard.type('exit')
+await win.keyboard.press('Enter')
+let reviveVisible = false
+try {
+  await win.locator('.pane-revive').waitFor({ timeout: 8000 })
+  reviveVisible = true
+} catch { /* 未出现 */ }
+check('exit 后死 pane 出现复活覆盖层（不是只能关标签）', reviveVisible)
+const dotInfo = await win.evaluate(() => {
+  const dot = document.querySelector('.tab.active .status-dot')
+  if (!dot) return null
+  const probe = document.createElement('div')
+  probe.style.background = 'var(--fg-muted)'
+  document.body.appendChild(probe)
+  const muted = getComputedStyle(probe).backgroundColor
+  probe.remove()
+  return { cls: dot.className, bg: getComputedStyle(dot).backgroundColor, muted }
+})
+check(
+  'closed 状态点是灰色（--fg-muted），不是红色',
+  !!dotInfo && dotInfo.cls.includes('closed') && dotInfo.bg === dotInfo.muted,
+  JSON.stringify(dotInfo)
+)
+await win.screenshot({ path: join(outDir, '14-pane-revive.png') })
+
+// 「重新连接」原地复活：覆盖层消失、终端重新可用
+await win.locator('.pane-revive button:has-text("重新连接")').click()
+let revived = false
+for (let i = 0; i < 20 && !revived; i++) {
+  await win.waitForTimeout(500)
+  revived = await win.evaluate(
+    () =>
+      document.querySelectorAll('.pane-revive').length === 0 &&
+      [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200)
+  )
+}
+check('点「重新连接」后 pane 复活（覆盖层消失、终端回来）', revived)
+
+// 中键关标签：新开一个本地标签，auxclick(middle) 关掉它
+await win.locator('.tab-new').click()
+await win.waitForTimeout(1200)
+const tabsBefore = await win.locator('.tab').count()
+check('新标签已开出（中键测试前置）', tabsBefore >= 2, String(tabsBefore))
+await win.locator('.tab.active').click({ button: 'middle' })
+await win.waitForTimeout(600)
+check(
+  '中键关闭标签',
+  (await win.locator('.tab').count()) === tabsBefore - 1,
+  `${tabsBefore} -> ${await win.locator('.tab').count()}`
+)
+
 // ---------- 连上设备，检查 SFTP ----------
 const deviceCount = await win.locator('.device').count()
 if (!deviceCount) {
@@ -267,8 +323,11 @@ await win.screenshot({ path: join(outDir, '13-selection.png') })
 await clickThenPark(3)
 check('普通点击是单选（前一个取消）', (await selection()).count === 1)
 
-await clickThenPark(5, { modifiers: ['Control'] })
-check('Ctrl+点击 加到选区', (await selection()).count === 2, JSON.stringify((await selection()).names))
+// macOS 上 Ctrl+点击 = 系统级右键（会开出上下文菜单，backdrop 随即拦截后续点击），
+// 真实用户在 Mac 上多选就是 Cmd —— 应用代码 ctrlKey||metaKey 都认，脚本按平台给
+const MULTI = process.platform === 'darwin' ? 'Meta' : 'Control'
+await clickThenPark(5, { modifiers: [MULTI] })
+check('Ctrl/Cmd+点击 加到选区', (await selection()).count === 2, JSON.stringify((await selection()).names))
 
 // Shift 连选 = 锚点(5) 到目标(8) 的闭区间，再并上已有的选区。
 // 锚点在第 5 项已经选中，所以并集是 5 项而不是 4 项。
@@ -282,8 +341,8 @@ check(
   `${JSON.stringify(s.names)} 期望 ${JSON.stringify(expected)}`
 )
 
-await clickThenPark(5, { modifiers: ['Control'] })
-check('Ctrl+点击已选中项是取消它', (await selection()).count === 4, JSON.stringify((await selection()).names))
+await clickThenPark(5, { modifiers: [MULTI] })
+check('Ctrl/Cmd+点击已选中项是取消它', (await selection()).count === 4, JSON.stringify((await selection()).names))
 
 /*
  * 点列表空白处清空。
@@ -376,6 +435,16 @@ await win.waitForTimeout(2500)
 
 const all = await devices()
 check('起点：假设备都在', all.length >= 2, all.join(' | '))
+
+// 直连容器的展开箭头必须常驻可见（hover 才显形 = 功能等于不存在）。
+// 先把鼠标挪开：悬停在行上时本来就是全亮的，量不出「常驻」。
+await win.mouse.move(2, 2)
+await win.waitForTimeout(200)
+const chevronOpacity = await win.evaluate(() => {
+  const el = document.querySelector('.device-expand')
+  return el ? getComputedStyle(el).opacity : null
+})
+check('容器展开箭头不悬停也可见（opacity > 0）', Number(chevronOpacity) > 0, String(chevronOpacity))
 
 const type = async (t) => {
   await win.locator('.search-input').fill(t)

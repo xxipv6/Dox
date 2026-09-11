@@ -6,6 +6,7 @@ import { errorText } from '../utils/errors'
 import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import Icon from './Icon.vue'
+import Spinner from './Spinner.vue'
 import SidebarSection from './SidebarSection.vue'
 
 /**
@@ -81,8 +82,12 @@ const runtimeLabel = computed(() =>
 
 async function refresh(): Promise<void> {
   const sessionId = parentSessionId.value
-  result.value = null
-  if (!sessionId) return
+  if (!sessionId) {
+    result.value = null
+    return
+  }
+  // 刷新期间**保留**旧列表（降透明度，见 .container-list.refreshing）：
+  // 先清空再加载的话，每次切标签/点刷新面板都要闪一下空态
   loading.value = true
   try {
     result.value = await api.listContainers(sessionId)
@@ -219,7 +224,9 @@ async function onMenuSelect(id: string): Promise<void> {
   <div v-if="!parentSessionId" class="empty-hint">
     打开一个本地终端，或连接一台设备，这里会列出它们上面的容器
   </div>
-  <div v-else-if="loading" class="empty-hint">正在探测远端容器…</div>
+  <div v-else-if="loading && !containers.length" class="empty-hint">
+    <Spinner text="正在探测远端容器…" />
+  </div>
 
   <div v-else-if="result && !result.ok" class="empty-hint error">
     {{ result.message }}
@@ -227,7 +234,7 @@ async function onMenuSelect(id: string): Promise<void> {
   </div>
 
   <div v-else-if="!containers.length" class="empty-hint">
-    没有任何容器
+    这台设备上没有容器
   </div>
 
   <template v-else>
@@ -235,7 +242,7 @@ async function onMenuSelect(id: string): Promise<void> {
       远端 {{ runtimeLabel }} 版本较旧，状态信息不可用
     </div>
     <!-- 父会话断开时列表变灰不可点：还能看见有什么，但不能假装进得去 -->
-    <div class="container-list" :class="{ stale: !parentReady }">
+    <div class="container-list" :class="{ stale: !parentReady, refreshing: loading }">
       <div
         v-for="box in containers"
         :key="box.id"
@@ -292,6 +299,11 @@ async function onMenuSelect(id: string): Promise<void> {
 }
 .container-list.stale {
   opacity: 0.5;
+}
+/* 刷新中：旧列表降透明度留在原地（不闪空态），但不可点 */
+.container-list.refreshing {
+  opacity: 0.55;
+  pointer-events: none;
 }
 /* 已停止的容器淡一档：还在列表里（能启动/删除），但视觉上不和在跑的抢 */
 .container.stopped {

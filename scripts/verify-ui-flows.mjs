@@ -61,7 +61,7 @@ const devices = () =>
 console.log('初始设备:', JSON.stringify(await devices()))
 
 // ---------- 1. 保存一个设备 ----------
-await win.locator('.add-btn').click()
+await win.locator('button[title="添加设备"]').click()
 await win.waitForTimeout(400)
 await win.locator('input[placeholder^="192.168"]').fill(host)
 await win.locator('input[placeholder="root"]').fill(user)
@@ -84,7 +84,7 @@ if (before.length) {
 }
 
 // ---------- 3. SSH 连接（假密码，验证错误可见） ----------
-await win.locator('.add-btn').click()
+await win.locator('button[title="添加设备"]').click()
 await win.waitForTimeout(400)
 await win.locator('input[placeholder^="192.168"]').fill(host)
 await win.locator('input[placeholder="root"]').fill(user)

@@ -153,7 +153,10 @@ await win.waitForTimeout(300)
 check('编辑后出现未保存标记 ●', (await win.locator('.dirty-dot').count()) === 1)
 
 // ---------- 6. Ctrl+S 保存 ----------
-await win.keyboard.press('Control+s')
+// CodeMirror 的 Mod-s 在 macOS 上是 ⌘S（Meta），Control+s 不会触发 ——
+// 曾长期表现为「脏标记不消失但重载内容却是新的」的灵异失败
+const SAVE_KEY = process.platform === 'darwin' ? 'Meta+s' : 'Control+s'
+await win.keyboard.press(SAVE_KEY)
 await win.waitForTimeout(1200)
 check('保存后未保存标记消失', (await win.locator('.dirty-dot').count()) === 0)
 check('出现「已保存」提示', (await win.locator('.saved-hint').count()) === 1)
@@ -205,9 +208,13 @@ check('换行结构保持（两行，不是粘成一行）', (reloaded ?? '').sp
 await win.locator('.editor-panel .cm-content').click()
 await win.keyboard.press('Control+End')
 await win.keyboard.type('-again')
-await win.keyboard.press('Control+s')
+await win.keyboard.press(SAVE_KEY)
 await win.waitForTimeout(1200)
-check('连续保存不误报外部改动冲突', (await win.locator('.editor-error').count()) === 0)
+check(
+  '连续保存不误报外部改动冲突',
+  (await win.locator('.editor-panel .editor-banner').count()) === 0,
+  await win.locator('.editor-panel .editor-banner').textContent().catch(() => '')
+)
 check('第二次保存也未保存标记清零', (await win.locator('.dirty-dot').count()) === 0)
 
 // ---------- 9. 二进制文件必须被挡住 ----------

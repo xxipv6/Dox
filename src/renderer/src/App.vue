@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { defineAsyncComponent, computed, nextTick, onMounted, ref } from 'vue'
+import { defineAsyncComponent, computed, nextTick, onMounted, ref, watch } from 'vue'
 import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import { useSessionStore, type SessionTab } from './stores/sessions'
 import { useEditorStore } from './stores/editor'
@@ -64,6 +64,40 @@ function tabLabel(tab: SessionTab): string {
   }
   return tab.title
 }
+
+/**
+ * 分屏标签的状态点取**所有** pane 中最差的状态：
+ * 后台 pane（没聚焦的那半个）死了不能无声无息 —— 原来状态点只读
+ * activePane，后台 pane 挂了要等用户切过去才发现屏幕早就冻住了。
+ */
+const STATUS_RANK: Record<string, number> = {
+  error: 0,
+  reconnecting: 1,
+  connecting: 2,
+  connected: 3,
+  closed: 4
+}
+function tabStatus(tab: SessionTab): string {
+  let worst = 'closed'
+  for (const p of tab.panes) {
+    if ((STATUS_RANK[p.status] ?? 4) < (STATUS_RANK[worst] ?? 4)) worst = p.status
+  }
+  return worst
+}
+
+/*
+ * 激活标签变化（点击/关闭相邻/键盘）后：
+ * 滚进可视区 —— 标签多到溢出时，store 里变了用户却看不见它；
+ * refit —— 关标签触发的切换原来不 refit，终端行列是关标签前算的旧值。
+ */
+watch(
+  () => store.activeTabId,
+  async () => {
+    await nextTick()
+    document.querySelector('.tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    if (store.activeTab) refitTab(store.activeTab)
+  }
+)
 
 async function activate(tab: SessionTab): Promise<void> {
   store.activeTabId = tab.tabId
@@ -137,11 +171,9 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
             class="tab"
             :class="{ active: tab.tabId === store.activeTabId }"
             @click="activate(tab)"
+            @auxclick.middle.prevent="store.closeTab(tab)"
           >
-            <span
-              class="status-dot"
-              :class="tab.panes.find((p) => p.paneId === tab.activePaneId)?.status"
-            ></span>
+            <span class="status-dot" :class="tabStatus(tab)"></span>
             <span class="tab-title">{{ tabLabel(tab) }}</span>
             <!-- 上一条命令失败时留个记号：滚屏后也能看出刚才那条命令挂了 -->
             <span
@@ -220,9 +252,36 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
                   :ref="(el) => setPanelRef(pane.sessionId!, el as InstanceType<typeof TerminalPanel> | null)"
                   :session-id="pane.sessionId"
                 />
-                <div v-else class="tab-placeholder">
+                <!--
+                  会话还在但已经死了（重连耗尽/对端关闭/本地 exit）：
+                  覆盖一个原地复活入口 —— 不然唯一的出路是关掉标签去侧栏重新找设备。
+                  自动重连进行中（reconnecting）不出现，不和重连条打架。
+                -->
+                <div
+                  v-if="pane.sessionId && (pane.status === 'closed' || pane.status === 'error')"
+                  class="pane-revive"
+                >
+                  <p class="revive-text">
+                    {{ pane.status === 'error' && pane.error ? `连接失败：${pane.error}` : '连接已断开' }}
+                  </p>
+                  <div class="revive-actions">
+                    <button class="btn primary" @click="store.reconnectPane(tab, pane)">重新连接</button>
+                    <button class="btn" @click="store.closePane(tab, pane)">关闭标签</button>
+                  </div>
+                </div>
+                <div v-else-if="!pane.sessionId" class="tab-placeholder">
                   <template v-if="pane.status === 'connecting'">正在连接 {{ tab.title }} …</template>
-                  <template v-else-if="pane.status === 'error'">连接失败：{{ pane.error }}</template>
+                  <template v-else-if="pane.status === 'error'">
+                    <div class="placeholder-error">
+                      <p>连接失败：{{ pane.error }}</p>
+                      <!-- 未保存的恢复标签没有凭证，重试无意义 —— 它有自己的重新认证入口 -->
+                      <button
+                        v-if="tab.kind !== 'ssh' || tab.config"
+                        class="btn primary"
+                        @click="store.reconnectPane(tab, pane)"
+                      >重试</button>
+                    </div>
+                  </template>
                   <!-- 重启后恢复出来的临时连接：没有凭证，必须用户重新认证 -->
                   <template v-else-if="tab.pendingPrefill">
                     <div class="resume-hint">
@@ -424,9 +483,12 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 .status-dot.connected {
   background: var(--success-text);
 }
-.status-dot.error,
-.status-dot.closed {
+/* 只有 error 配红：主动 exit/对端关闭的 closed 用灰——红色留给「出事了」 */
+.status-dot.error {
   background: var(--danger-text);
+}
+.status-dot.closed {
+  background: var(--fg-muted);
 }
 @keyframes pulse {
   from {
@@ -606,5 +668,72 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 .resume-btn:hover {
   border-color: var(--accent-text);
   background: var(--bg-hover);
+}
+/*
+ * 死 pane 的原地复活覆盖层：居中浮在冻住的终端上。
+ * 半透明底 + 模糊，看得出后面是死掉的终端内容（那是上下文，不该遮没）。
+ */
+.pane-revive {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(2px);
+}
+.revive-text {
+  margin: 0;
+  max-width: 70%;
+  font-size: var(--fs-md);
+  color: var(--fg);
+  text-align: center;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.revive-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+.pane-revive .btn,
+.placeholder-error .btn {
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--fg);
+  border-radius: var(--r-sm);
+  padding: 6px 16px;
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+.pane-revive .btn:hover,
+.placeholder-error .btn:hover {
+  background: var(--bg-hover);
+}
+.pane-revive .btn.primary,
+.placeholder-error .btn.primary {
+  background: var(--accent-text);
+  border-color: var(--accent-text);
+  color: var(--bg-panel);
+  font-weight: 600;
+}
+.placeholder-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 70%;
+  text-align: center;
+}
+.placeholder-error p {
+  margin: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 </style>

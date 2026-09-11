@@ -14,6 +14,9 @@ const props = defineProps<{ sessionId: string }>()
 const store = useEditorStore()
 const settings = useSettingsStore()
 
+/** 快捷键提示按平台显示：CodeMirror 的 Mod-s 在 macOS 上是 ⌘S */
+const saveShortcut = window.api.platform === 'darwin' ? '⌘S' : 'Ctrl+S'
+
 const files = computed(() => store.filesOf(props.sessionId))
 const active = computed(() => store.activeFile(props.sessionId))
 
@@ -120,8 +123,11 @@ function teardown(): void {
 
 function sync(): void {
   const file = active.value
-  // 内容还没到（或读失败/是二进制）时不建视图，模板里的 v-if 也不会给容器
-  if (!file || file.loading || file.error || !hostEl.value) {
+  // 内容还没到（或打开就失败/是二进制）时不建视图，模板里的 v-if 也不会给容器。
+  // 注意「保存级错误」不在此列：文件已成功读过（有内容），保存被拒只是
+  // 顶上一道横幅，编辑器必须留在原地 —— 那是用户未保存的工作。
+  const loadFailed = !!file?.error && file.content === '' && file.savedContent === ''
+  if (!file || file.loading || loadFailed || !hostEl.value) {
     teardown()
     return
   }
@@ -172,6 +178,30 @@ async function save(): Promise<void> {
   if (await store.save(props.sessionId, file.path)) savedAt.value = Date.now()
 }
 
+/** 冲突横幅的「强制覆盖」：用户已明确选择，跳过 mtime 检测 */
+async function forceSave(): Promise<void> {
+  const file = active.value
+  if (!file || file.saving) return
+  if (await store.save(props.sessionId, file.path, { force: true })) savedAt.value = Date.now()
+}
+
+/** 冲突横幅的「重新加载」：放弃本地改动重读远端（选择已在横幅里做过，不再二次确认） */
+async function discardReload(): Promise<void> {
+  const file = active.value
+  if (!file) return
+  cachedStates.delete(file.path)
+  teardown()
+  await store.reload(props.sessionId, file.path, { discard: true })
+  await nextTick()
+  sync()
+}
+
+/** 普通保存错误横幅的关闭：错误看完就散，编辑器本来就没动 */
+function dismissError(): void {
+  const file = active.value
+  if (file) file.error = ''
+}
+
 async function reload(): Promise<void> {
   const file = active.value
   if (!file) return
@@ -219,7 +249,7 @@ function dirty(file: OpenFile | null | undefined): boolean {
       <button
         class="bar-btn"
         :disabled="!active || active.saving || !dirty(active)"
-        :title="dirty(active) ? '保存到远端 (Ctrl+S)' : '没有未保存的修改'"
+        :title="dirty(active) ? `保存到远端 (${saveShortcut})` : '没有未保存的修改'"
         @click="save"
       >
         保存
@@ -236,13 +266,34 @@ function dirty(file: OpenFile | null | undefined): boolean {
     </div>
 
     <div v-if="active?.loading" class="editor-hint">读取中…</div>
-    <div v-else-if="active?.error" class="editor-error">
+    <!-- 打开就失败/二进制：没有内容可编，整个区域给错误 + 重试 -->
+    <div
+      v-else-if="active?.error && !active?.content && !active?.savedContent"
+      class="editor-error"
+    >
       {{ active.error }}
       <button class="bar-btn" @click="reload">重试</button>
     </div>
-    <div v-else ref="hostEl" class="editor-host"></div>
+    <template v-else>
+      <!--
+        保存级问题不动编辑器：冲突给「强制覆盖 / 重新加载」两个明确出路，
+        普通保存错误给可关的横幅 —— 编辑器里是一屏没保存的工作，不能替用户藏起来。
+      -->
+      <div v-if="active?.conflict" class="editor-banner conflict">
+        <span class="banner-text">远端文件在你编辑期间已被修改，直接保存会覆盖掉别人的改动。</span>
+        <span class="banner-actions">
+          <button class="banner-btn danger" :disabled="active.saving" @click="forceSave">强制覆盖</button>
+          <button class="banner-btn" :disabled="active.saving" @click="discardReload">放弃本地并重新加载</button>
+        </span>
+      </div>
+      <div v-else-if="active?.error" class="editor-banner">
+        <span class="banner-text">{{ active.error }}</span>
+        <button class="banner-btn" @click="dismissError">知道了</button>
+      </div>
+      <div ref="hostEl" class="editor-host"></div>
+    </template>
 
-    <div v-if="active && !active.error && !active.loading && active.saving" class="editor-hint">
+    <div v-if="active && active.saving" class="editor-hint">
       保存中…
     </div>
   </div>
@@ -360,5 +411,50 @@ function dirty(file: OpenFile | null | undefined): boolean {
   flex-direction: column;
   gap: 10px;
   align-items: center;
+}
+/* 保存级问题的内联横幅：编辑器保持挂载，横幅只是顶上一条 */
+.editor-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+}
+.editor-banner.conflict {
+  background: color-mix(in srgb, var(--warning-text) 12%, var(--bg-panel));
+}
+.banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.banner-actions {
+  display: flex;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+.banner-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--fg);
+  border-radius: var(--r-sm);
+  padding: 3px 10px;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.banner-btn:hover {
+  background: var(--bg-hover);
+}
+.banner-btn.danger {
+  border-color: var(--danger-text);
+  color: var(--danger-text);
+}
+.banner-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 </style>

@@ -276,6 +276,15 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
   `v-if="outdated"` 升级按钮，再后面的 `<template v-else>` 就绑到了升级按钮上 ——
   结果「已安装且不需升级」时安装按钮照样渲染（用户：装完了怎么还显示「安装到 xxx」）。
   条件分支一多就用嵌套 template 显式分组，别靠 v-else 链条的隐式绑定。
+- **CodeMirror 的 `Mod-s` 在 macOS 上是 ⌘S。** Playwright 脚本按
+  `Control+s` 在 Mac 上不会触发保存 —— 曾经表现为「脏标记不消失、但下一步
+  重载出来的内容却是改过的」这种灵异组合（重载被 confirm 挡住/读的是编辑器
+  残留内容，把「保存根本没发生」遮住了）。脚本按平台选键
+  （`process.platform === 'darwin' ? 'Meta+s' : 'Control+s'`），
+  验证「写回远端」要直接读远端内容，别读编辑器 DOM。
+- **UI 验证脚本的选择器会随界面改版过期。** verify-ui-flows 的 `.add-btn`
+  在侧栏改版后不复存在（改成 `button[title="添加设备"]`），超时才暴露。
+  界面结构改动时顺手 grep 一遍 scripts/ 里的对应选择器。
 
 ---
 

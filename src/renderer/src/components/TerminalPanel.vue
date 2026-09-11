@@ -7,6 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
+import { useEscapeToClose } from '../composables/useEscapeToClose'
 import { isPlainSshId, LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import type { AgentStatsPayload } from '@shared/types'
 import { useSettingsStore } from '../stores/settings'
@@ -631,12 +632,21 @@ function findPrevious(): void {
 // ---- 右键菜单（不再盲目粘贴）----
 function openMenu(e: MouseEvent): void {
   hasSelection.value = !!term?.hasSelection()
-  menu.value = { x: e.clientX, y: e.clientY }
+  // 钳在视口内：贴边右键时菜单不能探出屏幕（菜单约 180×140）
+  const x = Math.min(e.clientX, window.innerWidth - 190)
+  const y = Math.min(e.clientY, window.innerHeight - 150)
+  menu.value = { x, y }
 }
 
 function closeMenu(): void {
   menu.value = null
 }
+
+// 与其他浮层同一个 Esc 关闭栈：原来只有 window click 能关它
+useEscapeToClose(
+  () => menu.value !== null,
+  () => closeMenu()
+)
 
 async function copySelection(): Promise<void> {
   const sel = term?.getSelection()
@@ -953,13 +963,19 @@ defineExpose({ refitAndFocus })
       </div>
     </div>
 
-    <!-- 远端系统状态条：agent 推送活着才显示（装了助手即视为同意看这些数） -->
-    <div v-if="agentStats && statsLive" class="agent-stats" :title="statsTooltip">
-      <span>CPU {{ agentStats.cpu_percent.toFixed(0) }}%</span>
-      <span>MEM {{ memPercent }}%</span>
-      <span v-for="(g, i) in agentStats.gpus ?? []" :key="i">
-        GPU{{ (agentStats.gpus ?? []).length > 1 ? i : '' }} {{ g.util_percent }}%
-      </span>
+    <!--
+      远端系统状态条：收到过帧就常驻。通道掉线时**不撤条**——数值变灰 + 连接中，
+      凭空消失读起来像 bug；从没收过帧（没装助手）才不渲染。
+    -->
+    <div v-if="agentStats" class="agent-stats" :class="{ offline: !statsLive }" :title="statsTooltip">
+      <template v-if="statsLive">
+        <span>CPU {{ agentStats.cpu_percent.toFixed(0) }}%</span>
+        <span>MEM {{ memPercent }}%</span>
+        <span v-for="(g, i) in agentStats.gpus ?? []" :key="i">
+          GPU{{ (agentStats.gpus ?? []).length > 1 ? i : '' }} {{ g.util_percent }}%
+        </span>
+      </template>
+      <span v-else>助手连接中…</span>
     </div>
 
     <!-- 右键菜单 -->
@@ -1185,5 +1201,10 @@ defineExpose({ refitAndFocus })
   color: var(--fg-muted);
   white-space: pre-line;
   pointer-events: auto;
+}
+/* 通道掉线：条还在、数值收起来，一句话说清状态（凭空消失读起来像 bug） */
+.agent-stats.offline {
+  opacity: 0.65;
+  font-style: italic;
 }
 </style>

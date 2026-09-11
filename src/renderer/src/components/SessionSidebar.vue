@@ -4,12 +4,15 @@ import { useSessionStore } from '../stores/sessions'
 import { useSettingsStore } from '../stores/settings'
 import DeviceDialog from './DeviceDialog.vue'
 import Icon from './Icon.vue'
+import Spinner from './Spinner.vue'
 import SidebarSection from './SidebarSection.vue'
 import ForwardPanel from './ForwardPanel.vue'
 import SnippetPanel from './SnippetPanel.vue'
 import ContainerPanel from './ContainerPanel.vue'
 import AgentPanel from './AgentPanel.vue'
-import type { SavedSession } from '@shared/types'
+import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
+import { errorText } from '../utils/errors'
+import type { ContainerInfo, SavedSession } from '@shared/types'
 
 const store = useSessionStore()
 const settings = useSettingsStore()
@@ -85,6 +88,87 @@ async function remove(s: SavedSession): Promise<void> {
   if (!confirm(`删除设备「${s.name}」？`)) return
   await store.deleteSaved(s.id)
 }
+
+// ---- 设备行展开的容器列表：右键菜单（与 ContainerPanel 同一套动作）----
+
+/** 容器行的右键菜单状态：哪台设备、哪个容器、在哪 */
+const ctrMenu = ref<{ x: number; y: number; saved: SavedSession; box: ContainerInfo } | null>(null)
+/** 正在做生命周期操作的容器名（启动/停止/恢复/删除） */
+const ctrControlling = ref<string | null>(null)
+
+/** 与 ContainerPanel 相同：按容器状态出菜单，stop/remove 落手前有确认 */
+const ctrMenuItems = computed<ContextMenuItem[]>(() => {
+  const box = ctrMenu.value?.box
+  if (!box) return []
+  const busy = ctrControlling.value === box.name
+  const items: ContextMenuItem[] = []
+  if (box.state === 'running') {
+    items.push(
+      { id: 'enter', label: '进入', icon: 'terminal', disabled: busy },
+      { id: 'logs', label: '查看日志', icon: 'file', disabled: busy },
+      { id: 'stop', label: '停止', icon: 'square', disabled: busy }
+    )
+  } else if (box.state === 'paused') {
+    items.push(
+      { id: 'unpause', label: '恢复', icon: 'play', disabled: busy },
+      { id: 'logs', label: '查看日志', icon: 'file', disabled: busy }
+    )
+  } else {
+    items.push(
+      { id: 'start', label: '启动', icon: 'play', disabled: busy },
+      { id: 'logs', label: '查看日志', icon: 'file', disabled: busy },
+      { id: 'remove', label: '删除', icon: 'trash', danger: true, disabled: busy }
+    )
+  }
+  return items
+})
+
+const CTR_CONFIRMS: Record<string, (name: string) => string> = {
+  stop: (n) => `停止容器「${n}」？其中运行的服务会中断。`,
+  remove: (n) => `删除容器「${n}」？此操作不可恢复（镜像与数据卷不受影响）。`
+}
+
+function onCtrRowMenu(e: MouseEvent, saved: SavedSession, box: ContainerInfo): void {
+  ctrMenu.value = { x: e.clientX, y: e.clientY, saved, box }
+}
+
+async function onCtrMenuSelect(id: string): Promise<void> {
+  const target = ctrMenu.value
+  ctrMenu.value = null
+  if (!target) return
+  const { saved, box } = target
+  // 容器操作骑在这台设备的传输会话上（就是列它们用的那条）
+  const tid = store.transports[saved.id]
+  if (!tid) return
+
+  if (id === 'enter') {
+    await store.enterContainerDirect(saved, box)
+    return
+  }
+  if (id === 'logs') {
+    try {
+      await store.viewContainerLogs(tid, box, saved.id)
+    } catch (err) {
+      alert(`查看日志失败：${errorText(err)}`)
+    }
+    return
+  }
+
+  const ask = CTR_CONFIRMS[id]
+  if (ask && !confirm(ask(box.name))) return
+  ctrControlling.value = box.name
+  try {
+    await window.api.controlContainer(tid, box.name, id as 'start' | 'stop' | 'unpause' | 'remove')
+    // 状态变化异步体现在 docker ps 里，稍等再刷
+    await new Promise((r) => setTimeout(r, 600))
+    await store.loadDeviceContainers(saved.id)
+  } catch (err) {
+    alert(`操作失败：${errorText(err)}`)
+    await store.loadDeviceContainers(saved.id)
+  } finally {
+    ctrControlling.value = null
+  }
+}
 </script>
 
 <template>
@@ -151,10 +235,16 @@ async function remove(s: SavedSession): Promise<void> {
         </template>
 
         <div class="device-list">
-          <div v-if="!store.savedSessions.length" class="empty-hint">
-            还没有设备，点右侧 ＋ 添加
+          <!-- 「一台都没有」和「都被过滤掉了」是两回事，文案不能共用；
+               空态整行可点 —— 「点右侧 ＋」那个按钮 hover 才显形，新用户未必找得到 -->
+          <div
+            v-if="!store.savedSessions.length"
+            class="empty-hint clickable"
+            title="添加设备"
+            @click="openAdd"
+          >
+            还没有设备，点这里添加
           </div>
-          <!-- 「一台都没有」和「都被过滤掉了」是两回事，文案不能共用 -->
           <div v-else-if="!filteredSessions.length" class="empty-hint">
             没有匹配「{{ filter.trim() }}」的设备
           </div>
@@ -207,8 +297,19 @@ async function remove(s: SavedSession): Promise<void> {
 
             <!-- 直连容器：不开宿主机终端标签，点容器名直接进（后台传输会话承载） -->
             <div v-if="store.expandedDevices.has(s.id)" class="device-containers">
+              <div class="containers-head">
+                <span class="containers-title">容器</span>
+                <button
+                  class="icon-btn"
+                  :class="{ dim: store.deviceContainers[s.id]?.status === 'loading' }"
+                  title="刷新容器列表"
+                  @click="store.loadDeviceContainers(s.id)"
+                >
+                  <Icon name="refresh" :size="12" />
+                </button>
+              </div>
               <div v-if="store.deviceContainers[s.id]?.status === 'loading'" class="container-hint">
-                正在列出容器…
+                <Spinner text="正在列出容器…" />
               </div>
               <div v-else-if="store.deviceContainers[s.id]?.status === 'error'" class="container-hint">
                 <span class="container-error">{{ store.deviceContainers[s.id].error }}</span>
@@ -218,18 +319,21 @@ async function remove(s: SavedSession): Promise<void> {
               </div>
               <template v-else>
                 <div v-if="!store.deviceContainers[s.id]?.list.length" class="container-hint">
-                  没有运行中的容器
+                  这台设备上没有容器
                 </div>
                 <div
                   v-for="c in store.deviceContainers[s.id]?.list ?? []"
                   :key="c.id"
                   class="device-container"
-                  :title="`进入容器 ${c.name}（${c.image}）`"
-                  @click="store.enterContainerDirect(s, c)"
+                  :class="{ paused: c.state === 'paused' }"
+                  :title="`${c.name}\n${c.image}\n${c.status}\n单击进入 · 右键更多操作`"
+                  @click="c.state === 'running' && store.enterContainerDirect(s, c)"
+                  @contextmenu.prevent="onCtrRowMenu($event, s, c)"
                 >
-                  <Icon class="container-icon" name="box" :size="13" />
+                  <span class="dot" :class="[c.state, c.health]"></span>
                   <span class="container-name">{{ c.name }}</span>
-                  <span class="container-image">{{ c.image }}</span>
+                  <span v-if="ctrControlling === c.name" class="container-image">处理中…</span>
+                  <span v-else class="container-image">{{ c.image }}</span>
                 </div>
               </template>
             </div>
@@ -248,6 +352,15 @@ async function remove(s: SavedSession): Promise<void> {
       :editing="editing"
       :prefill="prefill"
       @close="closeDialog"
+    />
+
+    <ContextMenu
+      v-if="ctrMenu"
+      :x="ctrMenu.x"
+      :y="ctrMenu.y"
+      :items="ctrMenuItems"
+      @select="onCtrMenuSelect"
+      @close="ctrMenu = null"
     />
   </aside>
 </template>
@@ -381,8 +494,8 @@ async function remove(s: SavedSession): Promise<void> {
   background: var(--bg-hover);
 }
 /*
- * 行首的容器展开箭头：默认淡到几乎看不见（不是每台设备都有 docker），
- * 悬停行/已展开时才显形。展开后箭头顺时针倒下（▸ → ▾）。
+ * 行首的容器展开箭头：常驻低透明度（hover 才显形 = 这个功能等于不存在），
+ * 悬停行/已展开时全亮。展开后箭头顺时针倒下（▸ → ▾）。
  */
 .device-expand {
   width: 16px;
@@ -390,7 +503,7 @@ async function remove(s: SavedSession): Promise<void> {
   padding: 0;
   flex-shrink: 0;
   color: var(--fg-muted);
-  opacity: 0;
+  opacity: 0.45;
   transition:
     opacity var(--dur-fast) var(--ease-out),
     transform var(--dur-fast) var(--ease-out);
@@ -409,6 +522,26 @@ async function remove(s: SavedSession): Promise<void> {
   gap: 1px;
   margin: 1px 0 3px 26px;
 }
+.containers-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--sp-2) 1px;
+}
+.containers-title {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.containers-head .icon-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: var(--fg-muted);
+}
+.containers-head .icon-btn.dim {
+  opacity: 0.4;
+  pointer-events: none;
+}
 .device-container {
   display: flex;
   align-items: center;
@@ -421,9 +554,27 @@ async function remove(s: SavedSession): Promise<void> {
 .device-container:hover {
   background: var(--bg-hover);
 }
-.container-icon {
-  color: var(--fg-muted);
+/* 暂停的容器进不去：淡一档 + 恢复默认光标（右键菜单里有「恢复」） */
+.device-container.paused {
+  opacity: 0.62;
+  cursor: context-menu;
+}
+.device-container .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-pill);
   flex-shrink: 0;
+  background: var(--fg-muted);
+}
+.device-container .dot.running {
+  background: var(--success-text);
+}
+.device-container .dot.paused,
+.device-container .dot.starting {
+  background: var(--warning-text);
+}
+.device-container .dot.unhealthy {
+  background: var(--danger-text);
 }
 .container-name {
   font-size: var(--fs-sm);
@@ -521,5 +672,13 @@ async function remove(s: SavedSession): Promise<void> {
   color: var(--fg-muted);
   padding: var(--sp-2);
   line-height: 1.6;
+}
+.empty-hint.clickable {
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.empty-hint.clickable:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
 }
 </style>

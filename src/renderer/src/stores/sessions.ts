@@ -33,6 +33,11 @@ export interface ContainerTabInfo {
   image: string
   /** true = 日志标签（docker logs -f）；缺省/false = 容器内 shell。复用与标题都靠它区分 */
   logs?: boolean
+  /**
+   * 直连容器才有：父会话是按需建的传输会话，这里记它的设备 id。
+   * 传输会话死掉后重连容器 pane 靠它重建承载（ensureTransport 换新父）。
+   */
+  originSavedId?: string
 }
 
 export interface SessionTab {
@@ -198,13 +203,57 @@ export const useSessionStore = defineStore('sessions', () => {
   /**
    * 直连进容器：不开宿主机终端标签，传输会话当承载。
    * 传输会话由这里按需建立，标签关掉后由 releaseTransportIfIdle 回收。
+   * 承载都建不起来时也要让错误**看得见**：开一个错误态标签，
+   * 占位区的「重新连接」按钮（reconnectPane 按 originSavedId 重建承载）就是退路。
    */
   async function enterContainerDirect(
     saved: SavedSession,
     box: Pick<ContainerInfo, 'name' | 'image'>
   ): Promise<void> {
-    const tid = await ensureTransport(saved.id)
-    await enterContainer(tid, box)
+    try {
+      const tid = await ensureTransport(saved.id)
+      await enterContainer(tid, box, saved.id)
+    } catch (err) {
+      const pane = newPane()
+      pane.status = 'error'
+      pane.error = errorText(err)
+      const tab = reactive<SessionTab>({
+        tabId: `tab-${++tabSeq}`,
+        title: `容器 · ${box.name}`,
+        kind: 'container',
+        config: null,
+        container: { parentSessionId: '', containerName: box.name, image: box.image, originSavedId: saved.id },
+        split: 'none',
+        panes: [pane],
+        activePaneId: pane.paneId
+      })
+      tabs.value.push(tab)
+      activeTabId.value = tab.tabId
+    }
+  }
+
+  /**
+   * 原地复活一个死 pane（标签占位区/复活覆盖层的「重新连接」）。
+   * 先清掉旧会话残迹，再走正常连接流程 —— 与当初建 pane 同一条路，
+   * 只是这次用户不用关掉标签去侧栏重新找设备。
+   */
+  async function reconnectPane(tab: SessionTab, pane: PaneState): Promise<void> {
+    if (pane.sessionId) {
+      window.api.disconnect(pane.sessionId)
+      clearSessionState(pane.sessionId)
+      pane.sessionId = null
+    }
+    // 直连容器：父传输会话可能已随标签死亡被回收，按原籍重建承载再换父
+    if (tab.kind === 'container' && tab.container?.originSavedId) {
+      try {
+        tab.container.parentSessionId = await ensureTransport(tab.container.originSavedId)
+      } catch (err) {
+        pane.status = 'error'
+        pane.error = errorText(err)
+        return
+      }
+    }
+    await connectPane(tab, pane)
   }
 
   /** 保存的密码解密失败时，请求侧栏打开该设备的编辑框（重输密码即自愈） */
@@ -398,13 +447,27 @@ export const useSessionStore = defineStore('sessions', () => {
   /**
    * 进入一个容器：在父 SSH 会话的连接上开一条 docker exec 通道。
    *
-   * 同一个容器的标签如果已经关掉/断掉了，**复用那个标签**而不是再堆一个 ——
-   * 反复进出同一个容器不该把标签栏塞满。
+   * 同一个容器已有标签时**复用/聚焦**而不是再堆一个 ——
+   * 反复进出同一个容器不该把标签栏塞满：活着的标签直接聚焦，
+   * 死掉的标签复用重连。
    */
   async function enterContainer(
     parentSessionId: string,
-    box: Pick<ContainerInfo, 'name' | 'image'>
+    box: Pick<ContainerInfo, 'name' | 'image'>,
+    originSavedId?: string
   ): Promise<void> {
+    const live = tabs.value.find(
+      (t) =>
+        t.kind === 'container' &&
+        !t.container?.logs &&
+        t.container?.parentSessionId === parentSessionId &&
+        t.container.containerName === box.name &&
+        t.panes.some((p) => p.status === 'connected' || p.status === 'connecting')
+    )
+    if (live) {
+      activeTabId.value = live.tabId
+      return
+    }
     const dead = tabs.value.find(
       (t) =>
         t.kind === 'container' &&
@@ -425,7 +488,7 @@ export const useSessionStore = defineStore('sessions', () => {
       title: `容器 · ${box.name}`,
       kind: 'container',
       config: null,
-      container: { parentSessionId, containerName: box.name, image: box.image },
+      container: { parentSessionId, containerName: box.name, image: box.image, originSavedId },
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -442,7 +505,8 @@ export const useSessionStore = defineStore('sessions', () => {
    */
   async function viewContainerLogs(
     parentSessionId: string,
-    box: Pick<ContainerInfo, 'name' | 'image'>
+    box: Pick<ContainerInfo, 'name' | 'image'>,
+    originSavedId?: string
   ): Promise<void> {
     const existing = tabs.value.find(
       (t) =>
@@ -465,7 +529,7 @@ export const useSessionStore = defineStore('sessions', () => {
       title: `日志 · ${box.name}`,
       kind: 'container',
       config: null,
-      container: { parentSessionId, containerName: box.name, image: box.image, logs: true },
+      container: { parentSessionId, containerName: box.name, image: box.image, logs: true, originSavedId },
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -553,6 +617,7 @@ export const useSessionStore = defineStore('sessions', () => {
         clearSessionState(pane.sessionId)
       }
     }
+    const idx = tabs.value.indexOf(tab)
     tabs.value = tabs.value.filter((t) => t.tabId !== tab.tabId)
     // 直连容器标签关掉后，承载它的传输会话若已无人使用（侧栏也没展开）顺手断掉
     if (tab.kind === 'container' && tab.container) {
@@ -561,7 +626,8 @@ export const useSessionStore = defineStore('sessions', () => {
       if (savedId) releaseTransportIfIdle(savedId)
     }
     if (activeTabId.value === tab.tabId) {
-      activeTabId.value = tabs.value.at(-1)?.tabId ?? null
+      // 落到相邻标签（右邻优先，没有则左邻），不是无脑跳去最后一个
+      activeTabId.value = tabs.value[idx]?.tabId ?? tabs.value[idx - 1]?.tabId ?? null
     }
     // 关到一空就自动开一个本地终端 —— 全空的界面没有「下一步去哪」，
     // 与启动时无标签默认开本地终端（App.vue）是同一个取舍
@@ -643,11 +709,13 @@ export const useSessionStore = defineStore('sessions', () => {
     viewContainerLogs,
     expandedDevices,
     deviceContainers,
+    transports,
     toggleDeviceContainers,
     loadDeviceContainers,
     connectLocal,
     restoreUnsavedTab,
     splitActive,
+    reconnectPane,
     setActivePane,
     closePane,
     closeTab,
