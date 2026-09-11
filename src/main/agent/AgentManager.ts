@@ -43,7 +43,10 @@ function binaryDir(): string {
 export class AgentManager {
   private cache = new Map<string, AgentStatus>()
 
-  constructor(private readonly sessions: SessionManager) {}
+  constructor(private readonly sessions: SessionManager) {
+    // SSH 断线重连成功 → 按订阅意图重建 serve 通道（agent 保活的核心钩子）
+    this.sessions.onStatus(this.onSessionStatus)
+  }
 
   /** 查 agent 是否已装（按会话缓存；装/卸以我们的操作为准，外部手删了刷新即知） */
   async status(sessionId: string): Promise<AgentStatus> {
@@ -124,15 +127,10 @@ export class AgentManager {
   /** 会话断开时清缓存（重连后重新探，外部手删也能如实反映） */
   invalidate(sessionId: string): void {
     this.cache.delete(sessionId)
-    // serve 通道随连接一起死：关掉并通知渲染层降级
+    // serve 通道随连接一起死：关掉并通知渲染层降级。
+    // 订阅意图（portWatchers）不清 —— SSH 自动重连成功后按意图重建。
     const ch = this.channels.get(sessionId)
-    if (ch) {
-      this.channels.delete(sessionId)
-      try { ch.stream.close() } catch { /* 已死 */ }
-      for (const owner of ch.owners) {
-        if (!owner.isDestroyed()) owner.send(IpcChannels.agentPorts, sessionId, { event: 'agent_closed' })
-      }
-    }
+    if (ch) this.dropChannel(sessionId, ch)
   }
 
   // ---- serve 通道（长连接 NDJSON，端口推送等流式能力的承载）----
@@ -141,19 +139,83 @@ export class AgentManager {
     stream: ClientChannel
     nextId: number
     pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>
-    /** 订阅端口事件的渲染进程（分屏/多面板可多个，归零即关通道） */
-    owners: Set<WebContents>
   }>()
 
   /**
+   * 端口推送的**订阅意图**：谁订阅了、watch 是否在活通道上跑着。
+   * 与通道记录分离 —— 通道随 SSH 断线死掉时意图保留，
+   * SessionManager 报「重连成功」后按它重建通道并重发 watch_ports，
+   * 渲染层不用重开标签（agent_closed 期间 /proc 轮询顶班）。
+   */
+  private portWatchers = new Map<string, {
+    owners: Set<WebContents>
+    /** watch_ports 是否跑在当前活通道上（通道死即归 false） */
+    active: boolean
+  }>()
+
+  /** 断线重连成功 → 按订阅意图重建 serve 通道 */
+  private onSessionStatus = (e: { id: string; status: string; reconnected?: boolean }): void => {
+    if (e.status !== 'connected' || !e.reconnected) return
+    const watcher = this.portWatchers.get(e.id)
+    if (!watcher || watcher.active) return
+    void this.rebuildWatch(e.id, watcher)
+  }
+
+  private async rebuildWatch(
+    sessionId: string,
+    watcher: { owners: Set<WebContents>; active: boolean }
+  ): Promise<void> {
+    // 重建期间渲染层可能已全部退订/窗口已关：意图没了就别开通道
+    for (const owner of watcher.owners) {
+      if (owner.isDestroyed()) watcher.owners.delete(owner)
+    }
+    if (watcher.owners.size === 0 || this.portWatchers.get(sessionId) !== watcher) {
+      if (watcher.owners.size === 0) this.portWatchers.delete(sessionId)
+      return
+    }
+    try {
+      const ch = await this.connect(sessionId)
+      // connect 等待期间意图被撤（最后一个订阅者退订）→ 通道白建了，关掉
+      if (this.portWatchers.get(sessionId) !== watcher) {
+        this.dropChannel(sessionId, ch)
+        return
+      }
+      await this.callOn(ch, 'watch_ports', { interval_ms: 3000 })
+      watcher.active = true
+    } catch {
+      // 重建失败：留在降级态（渲染层 /proc 轮询顶着），下次重连再试
+      this.broadcast(sessionId, { event: 'agent_closed' })
+    }
+  }
+
+  /** 统一广播：端口事件/agent_closed 都走这里（订阅者以意图表为准） */
+  private broadcast(sessionId: string, payload: object): void {
+    const watcher = this.portWatchers.get(sessionId)
+    if (!watcher) return
+    for (const owner of watcher.owners) {
+      if (!owner.isDestroyed()) owner.send(IpcChannels.agentPorts, sessionId, payload)
+    }
+  }
+
+  /** 通道死的统一处理：摘表、清空 pending、标记意图待重建、通知渲染层降级 */
+  private dropChannel(sessionId: string, ch: { stream: ClientChannel; pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }> }): void {
+    if (this.channels.get(sessionId) === ch) this.channels.delete(sessionId)
+    for (const p of ch.pending.values()) p.reject(new Error('agent 通道已断开'))
+    ch.pending.clear()
+    try { ch.stream.close() } catch { /* 已死 */ }
+    const watcher = this.portWatchers.get(sessionId)
+    if (watcher) watcher.active = false
+    this.broadcast(sessionId, { event: 'agent_closed' })
+  }
+
+  /**
    * 建立（或复用）serve 通道：启动 agent 进程、完成 hello 握手。
-   * 通道死的统一处理：清空 pending、通知所有订阅方降级（agent_closed）。
+   * 通道死一律走 dropChannel（意图保留，重连后重建）。
    */
   private async connect(sessionId: string): Promise<{
     stream: ClientChannel
     nextId: number
     pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>
-    owners: Set<WebContents>
   }> {
     const existing = this.channels.get(sessionId)
     if (existing) return existing
@@ -171,7 +233,6 @@ export class AgentManager {
       stream,
       nextId: 1,
       pending: new Map(),
-      owners: new Set<WebContents>()
     }
     this.channels.set(sessionId, ch)
 
@@ -192,10 +253,7 @@ export class AgentManager {
           // 端口事件广播给所有订阅的渲染进程。
           // agent 的行格式是 {event, data:{listening,added,removed}}，这里拍平成
           // {event, listening, added, removed} —— 渲染层（shared/api.ts 的契约）不嵌套。
-          const flat = { event: msg.event, ...((msg as { data?: object }).data ?? {}) }
-          for (const owner of ch.owners) {
-            if (!owner.isDestroyed()) owner.send(IpcChannels.agentPorts, sessionId, flat)
-          }
+          this.broadcast(sessionId, { event: msg.event, ...((msg as { data?: object }).data ?? {}) })
           continue
         }
         if (msg.id !== undefined) {
@@ -207,20 +265,17 @@ export class AgentManager {
         }
       }
     })
-    const onDead = (): void => {
-      if (this.channels.get(sessionId) !== ch) return
-      this.channels.delete(sessionId)
-      for (const p of ch.pending.values()) p.reject(new Error('agent 通道已断开'))
-      ch.pending.clear()
-      for (const owner of ch.owners) {
-        if (!owner.isDestroyed()) owner.send(IpcChannels.agentPorts, sessionId, { event: 'agent_closed' })
-      }
-    }
+    const onDead = (): void => this.dropChannel(sessionId, ch)
     stream.on('close', onDead)
     stream.on('error', onDead)
 
     // hello 握手：确认对面真是 agent 而不是 shell 报错
-    await this.callOn(ch, 'hello', {})
+    try {
+      await this.callOn(ch, 'hello', {})
+    } catch (err) {
+      this.dropChannel(sessionId, ch)
+      throw err
+    }
     return ch
   }
 
@@ -237,22 +292,34 @@ export class AgentManager {
   }
 
   /**
-   * 订阅端口推送：首次调用建立通道并开启 watch_ports；
-   * 渲染进程退订归零后给 agent 发 stop 并关通道（远端不留闲进程）。
+   * 订阅端口推送：登记意图（首个订阅者建通道并开 watch_ports）；
+   * 退订归零后给 agent 发 stop 并关通道（远端不留闲进程）。
+   * 通道死不代表退订 —— 重连后自动重建，渲染层无需重订。
    */
   async watchPorts(sessionId: string, owner: WebContents): Promise<void> {
+    let watcher = this.portWatchers.get(sessionId)
+    if (!watcher) {
+      watcher = { owners: new Set(), active: false }
+      this.portWatchers.set(sessionId, watcher)
+    }
+    watcher.owners.add(owner)
+    if (watcher.active) return
     const ch = await this.connect(sessionId)
-    const first = ch.owners.size === 0
-    ch.owners.add(owner)
-    if (first) await this.callOn(ch, 'watch_ports', { interval_ms: 3000 })
+    await this.callOn(ch, 'watch_ports', { interval_ms: 3000 })
+    // connect/callOn 等待期间可能已退订归零：意图没了就不标 active
+    if (this.portWatchers.get(sessionId) === watcher && watcher.owners.size > 0) {
+      watcher.active = true
+    }
   }
 
   unwatchPorts(sessionId: string, owner: WebContents): void {
+    const watcher = this.portWatchers.get(sessionId)
+    if (!watcher) return
+    watcher.owners.delete(owner)
+    if (watcher.owners.size > 0) return
+    this.portWatchers.delete(sessionId)
     const ch = this.channels.get(sessionId)
     if (!ch) return
-    ch.owners.delete(owner)
-    if (ch.owners.size > 0) return
-    this.channels.delete(sessionId)
     // stop 是尽力而为：通道可能 already 半死，关流兜底
     void this.callOn(ch, 'stop', {}).catch(() => undefined)
     setTimeout(() => {

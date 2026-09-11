@@ -1,29 +1,26 @@
 /**
- * 转发建议接入 agent watch_ports 的集成验证：
- *  脚本直连预装 agent（跳过 UI 安装，verify-agent 已覆盖那条路）→
- *  应用连接（TerminalPanel 自动走 agent 长连接）→ 静默起 nc（无横幅）→
- *  气泡应在 ~4s 内出现（agent 3s 推送；/proc 轮询要 ~10s，时序即路径证明）→
- *  转发 → 本机连通 → 清理（还原未安装状态）
+ * agent serve 通道断线自动重建的端到端验证：
+ *  预装 agent → 应用连接（agent 推送生效中，先推一个端口证明）→
+ *  杀掉应用的 sshd 会话进程（只杀 pty 会话，脚本自己的 notty 连接不受影响）→
+ *  应用自动重连 → AgentManager 按订阅意图重建 serve 通道 →
+ *  再静默起一个 nc：气泡应仍在 <8s 出现（agent 推送；若掉回 /proc 轮询要 ~10s）→
+ *  清理。
  *
- * 用法：node scripts/verify-agent-watch.mjs <host> [port] [user] [password]
+ * 用法：node scripts/verify-agent-keepalive.mjs [host] [port] [user] [password]
  * 前置：npm run build && node scripts/build-agent.mjs
  */
 import { _electron as electron } from 'playwright'
 import { Client } from 'ssh2'
-import { execFileSync } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { mkdirSync } from 'node:fs'
 
-const host = process.argv[2]
-if (!host) {
-  console.error('用法: node scripts/verify-agent-watch.mjs <host> [port] [user] [password]')
-  process.exit(2)
-}
-const port = Number(process.argv[3] ?? 22)
-const user = process.argv[4] ?? 'root'
-const password = process.argv[5] ?? ''
+const host = process.argv[2] ?? 'localhost'
+const port = Number(process.argv[3] ?? 2222)
+const user = process.argv[4] ?? 'doxtest'
+const password = process.argv[5] ?? 'doxtest123'
 mkdirSync('shots', { recursive: true })
-const FRESH_PORT = 8328
+const PORT_A = 8361
+const PORT_B = 8362
 
 let failed = false
 const check = (name, cond, extra = '') => {
@@ -50,32 +47,20 @@ const remoteExec = (c) =>
 const machine = (await remoteExec('uname -m')).trim()
 const goarch = machine === 'x86_64' ? 'amd64' : 'arm64'
 await remoteExec('rm -rf ~/.dox && mkdir -p ~/.dox')
+const home = (await remoteExec('echo $HOME')).trim()
 await new Promise((res, rej) => {
   ssh.sftp((err, sftp) => {
     if (err) return rej(err)
     const src = createReadStream(`build/agent/dox-agent-linux-${goarch}`)
-    const dst = sftp.createWriteStream(`${''}/root/.dox/dox-agent`)
+    const dst = sftp.createWriteStream(`${home}/.dox/dox-agent`)
     src.on('error', rej)
     dst.on('error', rej)
     dst.on('close', res)
     src.pipe(dst)
   })
-}).catch(async () => {
-  // HOME 不一定是 /root：走 sh 解析
-  const home = (await remoteExec('echo $HOME')).trim()
-  await new Promise((res, rej) => {
-    ssh.sftp((err, sftp) => {
-      if (err) return rej(err)
-      const src = createReadStream(`build/agent/dox-agent-linux-${goarch}`)
-      const dst = sftp.createWriteStream(`${home}/.dox/dox-agent`)
-      src.on('error', rej)
-      dst.on('error', rej)
-      dst.on('close', res)
-      src.pipe(dst)
-    })
-  })
 })
 await remoteExec('chmod 755 ~/.dox/dox-agent && ~/.dox/dox-agent version')
+await remoteExec(`pkill -f "nc -lk" 2>/dev/null; true`).catch(() => {})
 check('agent 预装完成', true)
 
 const cleanup = async () => {
@@ -96,11 +81,15 @@ await win.evaluate(async () => {
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(2000)
 
-// 事件埋点：等 agent watch 首帧（基线）到达再动夹具 —— 否则 nc 会被首帧收进基线，永远不弹
+// 事件埋点：失败时能说清是主进程没发还是组件没弹
 await win.evaluate(() => {
   window.__agentEvents = []
-  window.api.onAgentPorts((sid, data) => window.__agentEvents.push(JSON.stringify(data)))
+  window.api.onAgentPorts((sid, data) =>
+    window.__agentEvents.push([Math.round(performance.now() / 1000), JSON.stringify(data)])
+  )
 })
+const dumpEvents = () =>
+  win.evaluate(() => window.__agentEvents).then((ev) => console.log('  agent 事件流:', JSON.stringify(ev)))
 
 await win.locator('button[title="添加设备"]').click()
 await win.waitForTimeout(400)
@@ -120,6 +109,7 @@ for (let i = 0; i < 8; i++) {
   }
 }
 await win.locator('.terminal-container:visible').first().click()
+// 等 agent watch 的首帧（基线）到达再动夹具 —— 否则 nc 会被首帧收进基线，永远不弹（实测踩过）
 {
   const deadline = Date.now() + 12000
   let frames = 0
@@ -131,45 +121,41 @@ await win.locator('.terminal-container:visible').first().click()
 }
 await win.keyboard.press('Escape')
 
-// 静默起 nc（无横幅），agent 3s 推送应在 ~8s 内出气泡
+// ---- 阶段 1：agent 推送生效中（基线外的静默 nc 应推上来）----
+// 宽限 15s：nc 经 exec 通道绑定可能错过 1-2 个扫描周期（每周期 3s），
+// 本阶段只证「agent → 气泡」端到端通路；路径甄别（agent vs /proc）是阶段 3 的事
+ssh.exec(`nc -lk -p ${PORT_A}`, () => {})
+const toastA = win.locator('.port-toast').filter({ hasText: String(PORT_A) }).first()
+let aMs = -1
 const t0 = Date.now()
-ssh.exec(`nc -lk -p ${FRESH_PORT}`, () => {})
-const toast = win.locator('.port-toast').filter({ hasText: String(FRESH_PORT) }).first()
-let latencyMs = -1
 try {
-  await toast.waitFor({ timeout: 8000 })
-  latencyMs = Date.now() - t0
+  await toastA.waitFor({ timeout: 15000 })
+  aMs = Date.now() - t0
 } catch { /* 未出现 */ }
-check(
-  '静默监听被 agent 推送发现（<8s，/proc 轮询要 ~10s）',
-  latencyMs >= 0,
-  `latency=${latencyMs}`
-)
-if (latencyMs >= 0) console.log(`  气泡延迟 ${(latencyMs / 1000).toFixed(1)}s`)
-await win.screenshot({ path: 'shots/65-agent-watch-toast.png' })
+check('阶段1：agent 推送生效（静默 nc 秒推）', aMs >= 0, `latency=${aMs}`)
+if (aMs < 0) await dumpEvents()
+await toastA.locator('button[title="忽略"], .close, button:has-text("×")').first().click().catch(() => {})
 
-// 转发 → 本机连通
-await toast.locator('button.act', { hasText: '转发到本机' }).click()
-await win.waitForTimeout(3000)
-const rules = await win.evaluate(() => window.api.listForwards())
-const rule = rules.find((r) => r.targetPort === FRESH_PORT && r.status === 'active')
-check('转发规则 active', !!rule, JSON.stringify(rules))
-let reachable = false
-if (rule) {
-  for (let i = 0; i < 5; i++) {
-    try {
-      execFileSync('nc', ['-z', '127.0.0.1', String(rule.listenPort)], { timeout: 3000 })
-      reachable = true
-      break
-    } catch {
-      await new Promise((r) => setTimeout(r, 500))
-    }
-  }
-}
-check('本机经转发连通', reachable)
+// ---- 阶段 2：杀掉应用的 sshd 会话（只杀 pty 会话；脚本的 notty 连接免疫）----
+await remoteExec(`pkill -f "sshd: ${user}@pts" 2>/dev/null; true`).catch(() => {})
+console.log('  已杀应用的 SSH 会话，等待自动重连 + agent 通道重建…')
+// 重连（退避 + 建连 + shell + agentStatus + 通道重建）给足时间
+await win.waitForTimeout(15000)
 
-// ---- 清理 ----
-if (rule) await win.evaluate((id) => window.api.removeForward(id), rule.id)
+// ---- 阶段 3：重连后再静默起 nc，仍应 agent 秒推（掉回 /proc 就要 ~10s）----
+const t1 = Date.now()
+ssh.exec(`nc -lk -p ${PORT_B}`, () => {})
+const toastB = win.locator('.port-toast').filter({ hasText: String(PORT_B) }).first()
+let bMs = -1
+try {
+  await toastB.waitFor({ timeout: 8000 })
+  bMs = Date.now() - t1
+} catch { /* 未出现 */ }
+check('阶段3：重连后 agent 推送自动恢复（<8s）', bMs >= 0, `latency=${bMs}`)
+if (bMs < 0) await dumpEvents()
+if (bMs >= 0) console.log(`  重连后气泡延迟 ${(bMs / 1000).toFixed(1)}s`)
+await win.screenshot({ path: 'shots/67-agent-keepalive.png' })
+
 await cleanup()
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 await app.close()

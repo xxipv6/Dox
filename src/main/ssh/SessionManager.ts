@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { Client, type ClientChannel, type ConnectConfig, type SFTPWrapper } from 'ssh2'
 import type { WebContents } from 'electron'
 import { IpcChannels } from '../../shared/ipc'
-import type { HostKeyDecision, SessionStatus, SshSessionConfig, TermSize } from '../../shared/types'
+import type { HostKeyDecision, SessionStatus, SessionStatusEvent, SshSessionConfig, TermSize } from '../../shared/types'
 import type { KnownHostsStore } from '../store/knownHosts'
 import { createChunkBatcher } from '../chunkBatcher'
 import { execCapture } from './remoteExec'
@@ -607,14 +607,25 @@ export class SessionManager {
     pending(decision)
   }
 
+  /** 主进程内部的状态监听者（AgentManager 靠它感知重连成功，重建 serve 通道） */
+  private statusListeners = new Set<(event: SessionStatusEvent) => void>()
+
+  /** 订阅会话状态（connected/closed/reconnecting…），返回退订函数 */
+  onStatus(cb: (event: SessionStatusEvent) => void): () => void {
+    this.statusListeners.add(cb)
+    return () => this.statusListeners.delete(cb)
+  }
+
   private notifyStatus(
     session: ActiveSession,
     status: SessionStatus,
     error?: string,
     extra?: { attempt?: number; delayMs?: number; reconnected?: boolean }
   ): void {
+    const event: SessionStatusEvent = { id: session.id, status, error, ...extra }
+    for (const cb of this.statusListeners) cb(event)
     if (session.owner.isDestroyed()) return
-    session.owner.send(IpcChannels.sshStatus, { id: session.id, status, error, ...extra })
+    session.owner.send(IpcChannels.sshStatus, event)
   }
 
   /**

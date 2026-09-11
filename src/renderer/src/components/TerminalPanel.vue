@@ -167,9 +167,11 @@ function stopProcPoll(): void {
   }
 }
 
-// ---- agent 端口推送：装了 agent 走长连接，通道死了自动退回 /proc 轮询 ----
+// ---- agent 端口推送：装了 agent 走长连接；通道死了 /proc 轮询顶班，重建成功自动切回 ----
 let unsubscribeAgentPorts: (() => void) | null = null
 let agentWatchActive = false
+/** 是否已在主进程登记订阅（卸载时据此退订；降级期意图仍在主进程，不能漏退） */
+let agentSubscribed = false
 
 /** agent 差分帧：首帧全量即基线（不弹），之后 added 才是「新起的服务」 */
 function handleAgentPorts(data: { listening?: number[]; added?: number[] }): void {
@@ -205,16 +207,23 @@ async function startPortWatch(): Promise<void> {
         void window.api.agentUnwatchPorts(props.sessionId)
         return
       }
+      agentSubscribed = true
       agentWatchActive = true
       unsubscribeAgentPorts = window.api.onAgentPorts((id, data) => {
         if (id !== props.sessionId) return
         if (data.event === 'agent_closed') {
+          // 通道死了（SSH 断线/agent 被杀）：/proc 轮询顶班，订阅保留 ——
+          // 主进程会在重连后自动重建，帧回来了就切回去
           agentWatchActive = false
-          unsubscribeAgentPorts?.()
-          unsubscribeAgentPorts = null
           listenerBaseline = null // 换路径重建基线，别把 /proc 全量当差分弹了
           startProcPoll()
           return
+        }
+        if (!agentWatchActive) {
+          // agent 重建成功：停顶班轮询，首帧即新基线
+          agentWatchActive = true
+          stopProcPoll()
+          listenerBaseline = null
         }
         handleAgentPorts(data)
       })
@@ -742,7 +751,7 @@ onBeforeUnmount(() => {
   zmodem?.abort() // 清掉看门狗定时器，避免卸载后触发
   stopProcPoll()
   unsubscribeAgentPorts?.()
-  if (agentWatchActive) void window.api.agentUnwatchPorts(props.sessionId)
+  if (agentSubscribed) void window.api.agentUnwatchPorts(props.sessionId)
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
   unsubscribeStatus?.()
