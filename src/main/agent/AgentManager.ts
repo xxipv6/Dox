@@ -1,10 +1,12 @@
 import fs from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app } from 'electron'
+import { app, type WebContents } from 'electron'
+import type { ClientChannel } from 'ssh2'
 import type { SessionManager } from '../ssh/SessionManager'
 import { execCapture } from '../ssh/remoteExec'
 import { mkdirRemoteRecursive } from '../sftp/sftpUtils'
+import { IpcChannels } from '../../shared/ipc'
 
 const REMOTE_BIN = '.dox/dox-agent'
 
@@ -122,5 +124,139 @@ export class AgentManager {
   /** 会话断开时清缓存（重连后重新探，外部手删也能如实反映） */
   invalidate(sessionId: string): void {
     this.cache.delete(sessionId)
+    // serve 通道随连接一起死：关掉并通知渲染层降级
+    const ch = this.channels.get(sessionId)
+    if (ch) {
+      this.channels.delete(sessionId)
+      try { ch.stream.close() } catch { /* 已死 */ }
+      for (const owner of ch.owners) {
+        if (!owner.isDestroyed()) owner.send(IpcChannels.agentPorts, sessionId, { event: 'agent_closed' })
+      }
+    }
+  }
+
+  // ---- serve 通道（长连接 NDJSON，端口推送等流式能力的承载）----
+
+  private channels = new Map<string, {
+    stream: ClientChannel
+    nextId: number
+    pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>
+    /** 订阅端口事件的渲染进程（分屏/多面板可多个，归零即关通道） */
+    owners: Set<WebContents>
+  }>()
+
+  /**
+   * 建立（或复用）serve 通道：启动 agent 进程、完成 hello 握手。
+   * 通道死的统一处理：清空 pending、通知所有订阅方降级（agent_closed）。
+   */
+  private async connect(sessionId: string): Promise<{
+    stream: ClientChannel
+    nextId: number
+    pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>
+    owners: Set<WebContents>
+  }> {
+    const existing = this.channels.get(sessionId)
+    if (existing) return existing
+
+    const client = this.sessions.getClient(sessionId)
+    if (!client) throw new Error('会话已断开')
+
+    const stream = await new Promise<ClientChannel>((resolve, reject) => {
+      client.exec('~/.dox/dox-agent serve', { pty: false }, (err, ch) =>
+        err ? reject(err) : resolve(ch)
+      )
+    })
+
+    const ch = {
+      stream,
+      nextId: 1,
+      pending: new Map(),
+      owners: new Set<WebContents>()
+    }
+    this.channels.set(sessionId, ch)
+
+    let buf = ''
+    stream.on('data', (d: Buffer) => {
+      buf += d.toString('utf8')
+      let idx: number
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx)
+        buf = buf.slice(idx + 1)
+        let msg: { id?: number; event?: string; result?: unknown; error?: string }
+        try {
+          msg = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (msg.event) {
+          // 端口事件广播给所有订阅的渲染进程。
+          // agent 的行格式是 {event, data:{listening,added,removed}}，这里拍平成
+          // {event, listening, added, removed} —— 渲染层（shared/api.ts 的契约）不嵌套。
+          const flat = { event: msg.event, ...((msg as { data?: object }).data ?? {}) }
+          for (const owner of ch.owners) {
+            if (!owner.isDestroyed()) owner.send(IpcChannels.agentPorts, sessionId, flat)
+          }
+          continue
+        }
+        if (msg.id !== undefined) {
+          const p = ch.pending.get(msg.id)
+          if (p) {
+            ch.pending.delete(msg.id)
+            msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg.result)
+          }
+        }
+      }
+    })
+    const onDead = (): void => {
+      if (this.channels.get(sessionId) !== ch) return
+      this.channels.delete(sessionId)
+      for (const p of ch.pending.values()) p.reject(new Error('agent 通道已断开'))
+      ch.pending.clear()
+      for (const owner of ch.owners) {
+        if (!owner.isDestroyed()) owner.send(IpcChannels.agentPorts, sessionId, { event: 'agent_closed' })
+      }
+    }
+    stream.on('close', onDead)
+    stream.on('error', onDead)
+
+    // hello 握手：确认对面真是 agent 而不是 shell 报错
+    await this.callOn(ch, 'hello', {})
+    return ch
+  }
+
+  private callOn(
+    ch: { stream: ClientChannel; nextId: number; pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }> },
+    method: string,
+    params: unknown
+  ): Promise<unknown> {
+    const id = ch.nextId++
+    return new Promise((resolve, reject) => {
+      ch.pending.set(id, { resolve, reject })
+      ch.stream.write(JSON.stringify({ id, method, params }) + '\n')
+    })
+  }
+
+  /**
+   * 订阅端口推送：首次调用建立通道并开启 watch_ports；
+   * 渲染进程退订归零后给 agent 发 stop 并关通道（远端不留闲进程）。
+   */
+  async watchPorts(sessionId: string, owner: WebContents): Promise<void> {
+    const ch = await this.connect(sessionId)
+    const first = ch.owners.size === 0
+    ch.owners.add(owner)
+    if (first) await this.callOn(ch, 'watch_ports', { interval_ms: 3000 })
+  }
+
+  unwatchPorts(sessionId: string, owner: WebContents): void {
+    const ch = this.channels.get(sessionId)
+    if (!ch) return
+    ch.owners.delete(owner)
+    if (ch.owners.size > 0) return
+    this.channels.delete(sessionId)
+    // stop 是尽力而为：通道可能 already 半死，关流兜底
+    void this.callOn(ch, 'stop', {}).catch(() => undefined)
+    setTimeout(() => {
+      try { ch.stream.close() } catch { /* 已死 */ }
+    }, 500).unref?.()
   }
 }

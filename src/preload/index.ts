@@ -99,6 +99,17 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.remoteListeners, sessionId),
   agentStatus: (sessionId) => ipcRenderer.invoke(IpcChannels.agentStatus, sessionId),
   agentInstall: (sessionId) => ipcRenderer.invoke(IpcChannels.agentInstall, sessionId),
+  agentWatchPorts: (sessionId) => ipcRenderer.invoke(IpcChannels.agentWatchPorts, sessionId),
+  agentUnwatchPorts: (sessionId) => ipcRenderer.invoke(IpcChannels.agentUnwatchPorts, sessionId),
+  onAgentPorts: (cb) => {
+    const listener = (
+      _e: IpcRendererEvent,
+      sessionId: string,
+      data: { event: string; listening?: number[]; added?: number[]; removed?: number[] }
+    ): void => cb(sessionId, data)
+    ipcRenderer.on(IpcChannels.agentPorts, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.agentPorts, listener)
+  },
   listTransfers: () => ipcRenderer.invoke(IpcChannels.transferList),
   cancelTransfer: (id) => ipcRenderer.invoke(IpcChannels.transferCancel, id),
   clearFinishedTransfers: () => ipcRenderer.invoke(IpcChannels.transferClearFinished),

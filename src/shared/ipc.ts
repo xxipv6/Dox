@@ -44,6 +44,10 @@ export const IpcChannels = {
   /** 远程助手：查询安装状态 / 显式安装（opt-in，永不静默） */
   agentStatus: 'agent:status',
   agentInstall: 'agent:install',
+  /** 订阅/退订 agent 端口推送（watch_ports 事件经 agent:ports 下行） */
+  agentWatchPorts: 'agent:watchPorts',
+  agentUnwatchPorts: 'agent:unwatchPorts',
+  agentPorts: 'agent:ports',
   /*
    * 容器终端（Docker / Podman）。
    *

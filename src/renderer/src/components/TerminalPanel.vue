@@ -164,6 +164,60 @@ function stopProcPoll(): void {
   }
 }
 
+// ---- agent 端口推送：装了 agent 走长连接，通道死了自动退回 /proc 轮询 ----
+let unsubscribeAgentPorts: (() => void) | null = null
+let agentWatchActive = false
+
+/** agent 差分帧：首帧全量即基线（不弹），之后 added 才是「新起的服务」 */
+function handleAgentPorts(data: { listening?: number[]; added?: number[] }): void {
+  if (!settings.suggestPortForward) return
+  if (listenerBaseline === null) {
+    listenerBaseline = new Set(data.listening ?? data.added ?? [])
+    return
+  }
+  const target = forwardTarget()
+  if (!target) return
+  for (const port of data.added ?? []) {
+    if (listenerBaseline.has(port) || port < MIN_SUGGEST_PORT || suggestedPorts.has(port)) continue
+    suggestedPorts.add(port)
+    listenerBaseline.add(port)
+    void pushSuggestion(port, target)
+  }
+}
+
+/** 端口监视的统一入口：优先 agent 长连接，装不了/起不来都退回 /proc 轮询 */
+async function startPortWatch(): Promise<void> {
+  if (!isPlainSshId(props.sessionId)) return
+  const st = await window.api.agentStatus(props.sessionId).catch(() => null)
+  if (st?.installed) {
+    try {
+      await window.api.agentWatchPorts(props.sessionId)
+      // 挂载期间异步返回的：面板可能已卸载，立即退订别漏通道
+      if (disposed) {
+        void window.api.agentUnwatchPorts(props.sessionId)
+        return
+      }
+      agentWatchActive = true
+      unsubscribeAgentPorts = window.api.onAgentPorts((id, data) => {
+        if (id !== props.sessionId) return
+        if (data.event === 'agent_closed') {
+          agentWatchActive = false
+          unsubscribeAgentPorts?.()
+          unsubscribeAgentPorts = null
+          listenerBaseline = null // 换路径重建基线，别把 /proc 全量当差分弹了
+          startProcPoll()
+          return
+        }
+        handleAgentPorts(data)
+      })
+      return
+    } catch {
+      // agent 起不来（二进制被删/权限变化）：走老路
+    }
+  }
+  if (!disposed) startProcPoll()
+}
+
 async function confirmForward(s: PortSuggestion): Promise<void> {
   const target = forwardTarget()
   if (!target) return dismissForward(s)
@@ -607,8 +661,8 @@ onMounted(() => {
     zmodem?.consume(chunk)
   })
 
-  // /proc 静默监听轮询（首查只建基线；非 Linux 或会话不可用时自动停）
-  startProcPoll()
+  // 端口监视：agent 长连接优先，/proc 轮询兜底（内部自选）
+  void startPortWatch()
 
   // 会话状态：断线 / 重连中 / 重连成功都往终端里留痕，并驱动顶部状态条
   unsubscribeStatus = window.api.onStatus((e) => {
@@ -679,6 +733,8 @@ onBeforeUnmount(() => {
   disposed = true
   zmodem?.abort() // 清掉看门狗定时器，避免卸载后触发
   stopProcPoll()
+  unsubscribeAgentPorts?.()
+  if (agentWatchActive) void window.api.agentUnwatchPorts(props.sessionId)
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
   unsubscribeStatus?.()

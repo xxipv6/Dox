@@ -153,6 +153,12 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.agentInstall, (_event, sessionId: string) =>
     agentManager.install(sessionId)
   )
+  ipcMain.handle(IpcChannels.agentWatchPorts, (event, sessionId: string) =>
+    agentManager.watchPorts(sessionId, event.sender)
+  )
+  ipcMain.handle(IpcChannels.agentUnwatchPorts, (event, sessionId: string) =>
+    agentManager.unwatchPorts(sessionId, event.sender)
+  )
 
   // ---- 容器终端 ----
   ipcMain.handle(IpcChannels.containerList, (_event, parentSessionId: string) =>

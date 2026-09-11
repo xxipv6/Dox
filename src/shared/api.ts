@@ -165,6 +165,16 @@ export interface DoxApi {
   /** 远程助手状态（installed/version/osArch）与显式安装（opt-in） */
   agentStatus(sessionId: string): Promise<{ installed: boolean; version?: string; osArch?: string }>
   agentInstall(sessionId: string): Promise<{ installed: boolean; version?: string; osArch?: string }>
+  /** 订阅/退订 agent 端口推送（首个订阅者建立通道，归零自动 stop） */
+  agentWatchPorts(sessionId: string): Promise<void>
+  agentUnwatchPorts(sessionId: string): Promise<void>
+  /** agent 端口事件：listening/added/removed 差分帧，或 agent_closed（通道死，应降级） */
+  onAgentPorts(
+    cb: (
+      sessionId: string,
+      data: { event: string; listening?: number[]; added?: number[]; removed?: number[] }
+    ) => void
+  ): () => void
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>
   clearFinishedTransfers(): Promise<void>

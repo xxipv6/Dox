@@ -220,6 +220,14 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
 - **断言后果之前先确认前因。** 例如「父会话断开 → 容器标签变 closed」，
   得先确认父会话**真的断了**；否则命令没送进去会伪装成功能坏了。
   但反过来也别用状态点轮询去确认 —— 自动重连很快，中转态会在两次轮询之间溜走，改用**事件流**。
+- **「事件到了渲染层但 UI 没反应」先查载荷形状。** agent 的 NDJSON 事件行是
+  `{event, data:{…}}` **嵌套**结构，而 `shared/api.ts` 的 `onAgentPorts` 契约是
+  拍平的 `{event, listening, added, removed}` —— AgentManager 广播前必须拍平
+  （踩过：直接转发原始行，渲染层 `data.listening` 永远 undefined，两条检测路径
+  静默全灭，连兜底的 /proc 轮询都被「agent 路径已成功」挡住不启动）。排查套路：
+  写个跳过 UI 的 IPC 级小脚本直连 `window.api`（connect → agentStatus → watchPorts
+  → onAgentPorts 打印原始事件），先分清是主进程没发、preload 没转、还是组件没处理，
+  再往下挖。
 - **改了真实配置就必须还原。** 验证脚本跑的是真实应用、读写的是真实
   `%APPDATA%/dox/`——在一次设备/指纹/布局之外，**设置项**也是共享状态。
   脚本里拨了一个开关测「关掉会怎样」，测完没拨回去，用户下次开应用功能就是关的，
