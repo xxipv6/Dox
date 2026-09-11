@@ -111,8 +111,9 @@ export interface DoxApi {
    *
    * `parentSessionId` 有三种取值：真实 SSH 会话 id（列那台机器上的）、
    * `LOCAL_CONTAINER_TARGET`（列**本机**的）、以及 null（没有可列的目标）。
+   * `chain` 给了就是**嵌套列表**：列链末端容器里面的容器（docker exec 链，可任意深）。
    */
-  listContainers(parentSessionId: string): Promise<ContainerProbeResult>
+  listContainers(parentSessionId: string, chain?: string[]): Promise<ContainerProbeResult>
   /**
    * 进入容器，返回 `container-` 前缀的会话 id；之后的输入/resize/断开走通用通道。
    *
@@ -125,7 +126,8 @@ export interface DoxApi {
   connectContainer(
     parentSessionId: string,
     containerName: string,
-    term: TermSize
+    term: TermSize,
+    chain?: string[]
   ): Promise<string>
   /**
    * 查看容器日志（docker logs -f），返回 `container-` 前缀会话 id。
@@ -135,7 +137,8 @@ export interface DoxApi {
   connectContainerLogs(
     parentSessionId: string,
     containerName: string,
-    term: TermSize
+    term: TermSize,
+    chain?: string[]
   ): Promise<string>
   /**
    * 容器生命周期操作（启动/停止/恢复/删除，白名单见 shared/types.ts）。
@@ -144,7 +147,8 @@ export interface DoxApi {
   controlContainer(
     parentSessionId: string,
     containerName: string,
-    action: ContainerControlAction
+    action: ContainerControlAction,
+    chain?: string[]
   ): Promise<void>
   /** 容器网桥 IP（端口转发建议的目标）；本机容器/无 IP/探测失败都返回 null */
   containerIp(parentSessionId: string, containerName: string): Promise<string | null>

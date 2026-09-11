@@ -51,6 +51,8 @@ export interface AgentStatsPayload {
   mem_total_mb: number
   mem_used_mb: number
   gpus?: AgentGpuStat[]
+  /** 帧间 CPU 差分 top3（0.5.0 起；老 agent 没有这帧字段） */
+  top_procs?: { pid: number; command: string; cpu_percent: number; mem_percent: number }[]
 }
 
 /** 持久化到本地的会话配置（敏感字段经 safeStorage 加密，base64 存储） */
@@ -335,7 +337,7 @@ export type ContainerProbeReason =
  */
 export type ContainerProbeResult =
   | { ok: true; list: ContainerList }
-  | { ok: false; reason: ContainerProbeReason; message: string }
+  | { ok: false; reason: ContainerProbeReason; message: string; detail?: string }
 
 /** 本地终端可用的 shell */
 export interface LocalShellInfo {

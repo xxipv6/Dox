@@ -40,6 +40,7 @@ const AGENT_CALL_ALLOW = new Set([
   'ps_kill',
   'exec',
   'fs_usage',
+  'fs_du',
   'fs_read_chunk',
   'fs_write_begin',
   'fs_write_chunk',
@@ -234,23 +235,27 @@ export function registerIpc(
   )
 
   // ---- 容器终端 ----
-  ipcMain.handle(IpcChannels.containerList, (_event, parentSessionId: string) =>
-    containerManager.list(parentSessionId)
+  /*
+   * chain = 嵌套链（从宿主到目标外层的逐跳容器名）。渲染层传什么进来
+   * 都先过 ContainerManager 里每一跳的 assertContainerTarget 字符集校验。
+   */
+  ipcMain.handle(IpcChannels.containerList, (_event, parentSessionId: string, chain?: string[]) =>
+    containerManager.list(parentSessionId, chain)
   )
   ipcMain.handle(
     IpcChannels.containerConnect,
-    (event, parentSessionId: string, containerName: string, term: TermSize) =>
-      containerManager.open(parentSessionId, containerName, term, event.sender)
+    (event, parentSessionId: string, containerName: string, term: TermSize, chain?: string[]) =>
+      containerManager.open(parentSessionId, containerName, term, event.sender, chain)
   )
   ipcMain.handle(
     IpcChannels.containerLogs,
-    (event, parentSessionId: string, containerName: string, term: TermSize) =>
-      containerManager.openLogs(parentSessionId, containerName, term, event.sender)
+    (event, parentSessionId: string, containerName: string, term: TermSize, chain?: string[]) =>
+      containerManager.openLogs(parentSessionId, containerName, term, event.sender, chain)
   )
   ipcMain.handle(
     IpcChannels.containerControl,
-    (_event, parentSessionId: string, containerName: string, action: ContainerControlAction) =>
-      containerManager.control(parentSessionId, containerName, action)
+    (_event, parentSessionId: string, containerName: string, action: ContainerControlAction, chain?: string[]) =>
+      containerManager.control(parentSessionId, containerName, action, chain)
   )
   ipcMain.handle(IpcChannels.containerIp, (_event, parentSessionId: string, containerName: string) =>
     containerManager.containerIp(parentSessionId, containerName)

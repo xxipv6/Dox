@@ -8,7 +8,7 @@
 package main
 
 import (
-	"crypto/rand"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,8 +17,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type fsEntry struct {
@@ -264,6 +266,9 @@ func dispatchFS(method string, params json.RawMessage) (interface{}, bool, error
 	case "fs_usage":
 		r, err := fsUsage(params)
 		return r, true, err
+	case "fs_du":
+		r, err := fsDu(params)
+		return r, true, err
 	case "fs_read_chunk":
 		r, err := fsReadChunk(params)
 		return r, true, err
@@ -330,6 +335,133 @@ func mountPointOf(path string) string {
 	return best
 }
 
+// ---- fs_du：目录占用分解（「磁盘满了，谁占的？」）----
+
+type duEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"is_dir"`
+	Size  int64  `json:"size"`
+}
+
+/*
+ * fs_du 把 path 的直接子项按子树大小排序返回（top N）。
+ *
+ * 防线（serve 是单线程分发，一次慢遍历不能把 watch_ports/stats 全堵死）：
+ *  - 访问条目上限 50 万，耗时上限 15s，撞线就返回**部分结果**（truncated）
+ *  - 不跨文件系统（du -x 口径）：/proc /sys /dev 这些虚拟 FS 不进树
+ *  - 权限错误/中途消失的条目跳过，不让一个坏目录毁掉整个扫描
+ *  - 符号链接算自身大小，不跟随（跟随会有环）
+ */
+const (
+	duMaxVisited = 500_000
+	duMaxElapsed = 15 * time.Second
+	duTopN       = 50
+)
+
+func fsDu(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Path == "" || !filepath.IsAbs(p.Path) {
+		return nil, errors.New("fs_du 需要绝对路径 path")
+	}
+	root, err := os.Stat(p.Path)
+	if err != nil {
+		return nil, err
+	}
+	if !root.IsDir() {
+		return nil, errors.New("fs_du 的目标是目录")
+	}
+	rootDev := uint64(0)
+	if st, ok := root.Sys().(*syscall.Stat_t); ok {
+		rootDev = uint64(st.Dev)
+	}
+
+	children, err := os.ReadDir(p.Path)
+	if err != nil {
+		return nil, err
+	}
+	started := time.Now()
+	visited := 0
+	truncated := false
+
+	// 子树累加器：返回该子树总大小；超限置 truncated 并提前收手
+	var walk func(dir string) int64
+	walk = func(dir string) int64 {
+		if truncated {
+			return 0
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return 0 // 权限/消失：跳过
+		}
+		var sum int64
+		for _, e := range entries {
+			visited++
+			if visited > duMaxVisited || time.Since(started) > duMaxElapsed {
+				truncated = true
+				return sum
+			}
+			full := filepath.Join(dir, e.Name())
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				sum += info.Size()
+				continue
+			}
+			if !info.IsDir() {
+				sum += info.Size()
+				continue
+			}
+			if st, ok := info.Sys().(*syscall.Stat_t); ok && uint64(st.Dev) != rootDev {
+				sum += info.Size() // 挂载点目录本身算一个条目大小，子树不进
+				continue
+			}
+			sum += info.Size() + walk(full)
+		}
+		return sum
+	}
+
+	var items []duEntry
+	var total int64
+	for _, c := range children {
+		visited++
+		info, err := c.Info()
+		if err != nil {
+			continue
+		}
+		size := info.Size()
+		if info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+			if st, ok := info.Sys().(*syscall.Stat_t); !ok || uint64(st.Dev) == rootDev {
+				size += walk(filepath.Join(p.Path, c.Name()))
+			}
+		}
+		items = append(items, duEntry{
+			Name:  c.Name(),
+			Path:  filepath.Join(p.Path, c.Name()),
+			IsDir: info.IsDir() && info.Mode()&os.ModeSymlink == 0,
+			Size:  size,
+		})
+		total += size
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Size > items[j].Size })
+	if len(items) > duTopN {
+		items = items[:duTopN]
+	}
+	if items == nil {
+		items = []duEntry{}
+	}
+	return map[string]interface{}{
+		"path":      p.Path,
+		"total":     total,
+		"entries":   items,
+		"truncated": truncated,
+	}, nil
+}
+
 // ---- 分块流式读写：大文件传输直走 agent 通道（替代 SFTP+中转+docker cp 接力）----
 
 const fsChunkMaxLen = 4 << 20 // 单块 4MB 上限
@@ -380,6 +512,21 @@ func guardTmpPath(tmp string) error {
 	return nil
 }
 
+/*
+ * fs_write_begin 的临时名是**确定性**的（path 的 sha1 前 8 位）：
+ * 同一个目标路径的两次上传拿到同一个 tmp —— 上次传到一半失败留下的
+ * 半截 tmp 就能被这次续上（existing_size 告诉调用方从哪儿继续）。
+ * 随机名 + O_EXCL 做不到这件事：每次 begin 都是新文件，半截永远是垃圾。
+ *
+ * 代价：同一目标路径的并发上传会写同一个 tmp（字节交错损坏）。
+ * 传输队列对同目标的并发上传本来就是反常操作，按「不支持」处理，
+ * 不为此放弃续传。注意 marker 仍在，guardTmpPath 语义不变。
+ */
+func tmpPathFor(path string) string {
+	sum := sha1.Sum([]byte(path))
+	return path + doxTmpMarker + hex.EncodeToString(sum[:4])
+}
+
 func fsWriteBegin(params json.RawMessage) (interface{}, error) {
 	var p struct {
 		Path string `json:"path"`
@@ -387,18 +534,18 @@ func fsWriteBegin(params json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(params, &p); err != nil || p.Path == "" || !filepath.IsAbs(p.Path) {
 		return nil, errors.New("fs_write_begin 需要绝对路径 path")
 	}
-	rand4 := make([]byte, 4)
-	if _, err := rand.Read(rand4); err != nil {
-		return nil, err
+	tmp := tmpPathFor(p.Path)
+	var existing int64
+	if info, err := os.Stat(tmp); err == nil {
+		existing = info.Size()
 	}
-	tmp := p.Path + doxTmpMarker + hex.EncodeToString(rand4)
-	// O_EXCL：绝不覆盖已存在的文件
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	// 没有 O_EXCL：续传就是「已存在就接着写」
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
 	}
 	_ = f.Close()
-	return map[string]string{"tmp": tmp}, nil
+	return map[string]interface{}{"tmp": tmp, "existing_size": existing}, nil
 }
 
 func fsWriteChunk(params json.RawMessage) (interface{}, error) {

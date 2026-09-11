@@ -40,12 +40,29 @@ export function createAgentStreamIO(
 
   return {
     async upload(localPath, remotePath, onProgress, isCanceled) {
-      const { tmp } = await call<{ tmp: string }>('fs_write_begin', { path: remotePath })
+      /*
+       * 断点续传：begin 的 tmp 名按目标路径确定性生成，上次失败留下的半截
+       * tmp 会被认出来（existing_size），从断点接着写。
+       * 取消与失败的待遇不同：取消 = 用户明确不要了 → abort 清掉 tmp；
+       * 失败 = 网络断了之类 → tmp 留着，下次重传自动续上。
+       * existing_size 比本地文件还大 = tmp 是另一个来源的残留，作废重来。
+       */
+      const localSize = (await fs.stat(localPath)).size
+      let tmp: string
+      let offset: number
+      const begin = await call<{ tmp: string; existing_size?: number }>('fs_write_begin', { path: remotePath })
+      tmp = begin.tmp
+      offset = begin.existing_size ?? 0
+      if (offset > localSize) {
+        await call('fs_write_abort', { tmp }).catch(() => undefined)
+        const again = await call<{ tmp: string; existing_size?: number }>('fs_write_begin', { path: remotePath })
+        tmp = again.tmp
+        offset = 0
+      }
       try {
         const fh = await fs.open(localPath, 'r')
         try {
           const buf = Buffer.allocUnsafe(CHUNK)
-          let offset = 0
           for (;;) {
             if (isCanceled()) throw new Error(STREAM_CANCELED)
             const { bytesRead } = await fh.read(buf, 0, CHUNK, offset)
@@ -63,17 +80,27 @@ export function createAgentStreamIO(
         }
         await call('fs_write_commit', { tmp, path: remotePath })
       } catch (err) {
-        await call('fs_write_abort', { tmp }).catch(() => undefined)
+        // 取消才清 tmp；失败留半截给下次续传
+        if (err instanceof Error && err.message === STREAM_CANCELED) {
+          await call('fs_write_abort', { tmp }).catch(() => undefined)
+        }
         throw err
       }
     },
 
     async download(remotePath, localPath, onProgress, isCanceled) {
-      // 本地先建/清空目标：半路失败留下半截文件是已知行为（与 SFTP 路径一致，
-      // verify-transfer-cancel 的「不留半截」断言只约束取消路径的清理）
-      const fh = await fs.open(localPath, 'w')
+      /*
+       * 下载续传：本地已有半截就从它的长度接着读（对端 read_chunk 带 offset）。
+       * 本地比远端还大 = 不是同一个东西的残留，清空重来。
+       * 没有存远端 mtime 可比对，「远端中途变了」不在守卫范围内（注释即口径）。
+       */
+      let offset = 0
       try {
-        let offset = 0
+        offset = (await fs.stat(localPath)).size
+      } catch { /* 没下载过 */ }
+      const fh = await fs.open(localPath, offset > 0 ? 'r+' : 'w')
+      try {
+        let remoteSize = -1
         for (;;) {
           if (isCanceled()) throw new Error(STREAM_CANCELED)
           const r = await call<{
@@ -81,6 +108,7 @@ export function createAgentStreamIO(
             eof: boolean
             size: number
           }>('fs_read_chunk', { path: remotePath, offset, length: CHUNK })
+          remoteSize = r.size
           const buf = Buffer.from(r.data, 'base64')
           if (buf.length > 0) {
             await fh.write(buf, 0, buf.length, offset)
@@ -89,6 +117,8 @@ export function createAgentStreamIO(
           }
           if (r.eof || buf.length === 0) break
         }
+        // 本地半截比远端新文件还长：截掉多出来的尾巴
+        if (remoteSize >= 0 && offset > remoteSize) await fh.truncate(remoteSize)
       } finally {
         await fh.close()
       }

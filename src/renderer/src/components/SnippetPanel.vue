@@ -49,7 +49,7 @@ const execTarget = computed<{ sessionId: string; containerName?: string } | null
   const paneId = store.activePane?.sessionId
   if (!tab || !paneId) return null
   if (tab.kind === 'ssh') return { sessionId: paneId }
-  if (tab.kind === 'container' && tab.container) {
+  if (tab.kind === 'container' && tab.container && !tab.container.chain?.length) {
     return { sessionId: tab.container.parentSessionId, containerName: tab.container.containerName }
   }
   return null

@@ -82,6 +82,8 @@ function forwardTarget(): { sessionId: string; containerName?: string } | null {
   if (isPlainSshId(props.sessionId)) return { sessionId: props.sessionId }
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
   if (tab?.kind !== 'container' || !tab.container) return null
+  // 嵌套容器：内层网桥 IP 在外层 netns 里，宿主机摸不到，转发给不出正确目标
+  if (tab.container.chain?.length) return null
   const parent = tab.container.parentSessionId
   if (parent === LOCAL_CONTAINER_TARGET) return null
   return { sessionId: parent, containerName: tab.container.containerName }
@@ -145,6 +147,14 @@ async function pollRemoteListeners(): Promise<void> {
   }
   if (listenerBaseline === null) {
     listenerBaseline = new Set(res.ports)
+    // 容器：首查全量也弹（理由同 handleAgentPorts —— 进容器往往就是冲着服务来的）
+    if (target.containerName) {
+      for (const port of res.ports) {
+        if (port < MIN_SUGGEST_PORT || suggestedPorts.has(port)) continue
+        suggestedPorts.add(port)
+        void pushSuggestion(port, target)
+      }
+    }
     return
   }
   for (const port of res.ports) {
@@ -177,12 +187,14 @@ let agentSubscribed = false
 /** 订阅时的目标（卸载时标签可能已从 store 摘掉，forwardTarget 会拿不到了） */
 let subscribedTarget: { sessionId: string; containerName?: string } | null = null
 
-// ---- agent 系统状态条（CPU/内存/GPU）：与端口推送同一条通道、同一 opt-in ----
+// ---- agent 系统状态条（CPU/内存/GPU/top 进程）：与端口推送同一条通道、同一 opt-in ----
 const agentStats = ref<AgentStatsPayload | null>(null)
 /** 推送是否活着（agent_closed 时藏起来，重建后首帧自动回来） */
 const statsLive = ref(false)
 let unsubscribeAgentStats: (() => void) | null = null
 let statsSubscribed = false
+/** 订阅时的目标（卸载时标签可能已从 store 摘掉，procTarget 会拿不到） */
+let statsTarget: { sessionId: string; containerName?: string } | null = null
 
 const memPercent = computed(() => {
   const s = agentStats.value
@@ -202,14 +214,25 @@ const statsTooltip = computed(() => {
   return parts.join('\n')
 })
 
-/** agent 差分帧：首帧全量即基线（不弹），之后 added 才是「新起的服务」 */
+/*
+ * agent 差分帧的处理。
+ * 宿主机：首帧全量即基线（不弹）——机器上常驻服务多，连上就弹是轰炸。
+ * 容器：首帧也弹 —— 容器里监听的通常就那一两个服务，用户进容器往往
+ * 就是冲着它来的，「已经在跑」不该等于「不提醒」（上限 3 条兜底）。
+ */
 function handleAgentPorts(data: { listening?: number[]; added?: number[] }): void {
   if (!settings.suggestPortForward) return
+  const target = forwardTarget()
   if (listenerBaseline === null) {
     listenerBaseline = new Set(data.listening ?? data.added ?? [])
+    if (!target?.containerName) return
+    for (const port of listenerBaseline) {
+      if (port < MIN_SUGGEST_PORT) continue
+      suggestedPorts.add(port)
+      void pushSuggestion(port, target)
+    }
     return
   }
-  const target = forwardTarget()
   if (!target) return
   for (const port of data.added ?? []) {
     if (listenerBaseline.has(port) || port < MIN_SUGGEST_PORT || suggestedPorts.has(port)) continue
@@ -226,6 +249,9 @@ function handleAgentPorts(data: { listening?: number[]; added?: number[] }): voi
  * 容器 docker exec，pollRemoteListeners 内部按目标分路）。
  */
 async function startPortWatch(): Promise<void> {
+  // 状态条独立于端口推送：本机容器没有转发落点（forwardTarget 为 null），
+  // 但装了助手就值得看 CPU/内存/top 进程 —— 目标集合与 procTarget 一致
+  void startStatsWatch()
   const target = forwardTarget()
   if (!target) return
   const st = await window.api.agentStatus(target.sessionId, target.containerName).catch(() => null)
@@ -270,36 +296,51 @@ async function startPortWatch(): Promise<void> {
         }
         handleAgentPorts(data)
       })
-
-      // 系统状态条：同一条通道、同一个 opt-in（装助手即同意）。
-      // 失败不拖累端口推送 —— 状态条本来就是锦上添花
-      try {
-        await window.api.agentWatchStats(target.sessionId, target.containerName)
-        if (!disposed) {
-          statsSubscribed = true
-          unsubscribeAgentStats = window.api.onAgentStats((id, ctr, data) => {
-            if (id !== target.sessionId || (ctr ?? undefined) !== target.containerName) return
-            if (data.event === 'agent_closed') {
-              statsLive.value = false
-              return
-            }
-            if (data.event !== 'stats') return
-            const { event: _e, ...payload } = data
-            agentStats.value = payload as AgentStatsPayload
-            statsLive.value = true
-          })
-        } else {
-          void window.api.agentUnwatchStats(target.sessionId, target.containerName)
-        }
-      } catch {
-        // 老版本 agent（0.1.0）没有 watch_stats：unknown method，状态条不出现即可
-      }
       return
     } catch {
       // agent 起不来（二进制被删/容器在停/权限变化）：走轮询
     }
   }
   if (!disposed) startProcPoll()
+}
+
+/**
+ * 系统状态条订阅：独立于端口推送。
+ *
+ * 本机容器没有转发落点（forwardTarget 为 null，startPortWatch 直接返回），
+ * 但助手能做的它都能做 —— CPU/内存/top 进程不该因此缺席。目标集合与
+ * procTarget 一致（助手能到哪，状态条就到哪）；主进程侧在通道重建后会
+ * 按订阅意图自动重发 watch_stats，所以这里只需订一次。
+ */
+async function startStatsWatch(): Promise<void> {
+  if (statsSubscribed) return
+  const target = procTarget.value
+  if (!target) return
+  const st = await window.api.agentStatus(target.sessionId, target.containerName).catch(() => null)
+  if (!st?.installed) return
+  try {
+    await window.api.agentWatchStats(target.sessionId, target.containerName)
+    // 挂载期间异步返回的：面板可能已卸载，立即退订别漏通道
+    if (disposed) {
+      void window.api.agentUnwatchStats(target.sessionId, target.containerName)
+      return
+    }
+    statsSubscribed = true
+    statsTarget = target
+    unsubscribeAgentStats = window.api.onAgentStats((id, ctr, data) => {
+      if (id !== target.sessionId || (ctr ?? undefined) !== target.containerName) return
+      if (data.event === 'agent_closed') {
+        statsLive.value = false
+        return
+      }
+      if (data.event !== 'stats') return
+      const { event: _e, ...payload } = data
+      agentStats.value = payload as AgentStatsPayload
+      statsLive.value = true
+    })
+  } catch {
+    // 老版本 agent 没有 watch_stats：unknown method，状态条不出现即可
+  }
 }
 
 /**
@@ -681,7 +722,8 @@ const procTarget = computed(() => {
   const fwd = forwardTarget()
   if (fwd) return fwd
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
-  if (tab?.kind === 'container' && tab.container) {
+  // 本机顶层容器 → 容器（经本机 docker CLI）；嵌套容器不在 agent 支持面（docker cp 链没有嵌套实现）
+  if (tab?.kind === 'container' && tab.container && !tab.container.chain?.length) {
     return { sessionId: tab.container.parentSessionId, containerName: tab.container.containerName }
   }
   return null
@@ -695,6 +737,30 @@ function openProcesses(): void {
   store.openProcPanel({
     ...t,
     label: t.containerName ? `容器 ${t.containerName}` : (tab?.title ?? '主机')
+  })
+}
+
+/** 状态条点名的「罪魁进程」：帧间 CPU 差分 top1，≥10% 才显示（空闲机器点名是噪音） */
+const topProc = computed(() => {
+  const t = agentStats.value?.top_procs?.[0]
+  return t && t.cpu_percent >= 10 ? t : null
+})
+/** 命令的短名：取 argv[0] 的 basename，截到 20 字符 */
+const topProcName = computed(() => {
+  const cmd = topProc.value?.command ?? ''
+  const base = (cmd.split(/\s+/)[0] ?? '').split('/').pop() ?? cmd
+  return base.length > 20 ? base.slice(0, 20) + '…' : base
+})
+
+function openTopProc(): void {
+  const t = procTarget.value
+  const top = topProc.value
+  if (!t || !top) return
+  const tab = store.tabs.find((tb) => tb.panes.some((p) => p.sessionId === props.sessionId))
+  store.openProcPanel({
+    ...t,
+    label: t.containerName ? `容器 ${t.containerName}` : (tab?.title ?? '主机'),
+    filter: String(top.pid)
   })
 }
 
@@ -897,8 +963,8 @@ onBeforeUnmount(() => {
   if (agentSubscribed && subscribedTarget) {
     void window.api.agentUnwatchPorts(subscribedTarget.sessionId, subscribedTarget.containerName)
   }
-  if (statsSubscribed && subscribedTarget) {
-    void window.api.agentUnwatchStats(subscribedTarget.sessionId, subscribedTarget.containerName)
+  if (statsSubscribed && statsTarget) {
+    void window.api.agentUnwatchStats(statsTarget.sessionId, statsTarget.containerName)
   }
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
@@ -1002,6 +1068,13 @@ defineExpose({ refitAndFocus })
         <span v-for="(g, i) in agentStats.gpus ?? []" :key="i">
           GPU{{ (agentStats.gpus ?? []).length > 1 ? i : '' }} {{ g.util_percent }}%
         </span>
+        <!-- 谁在吃 CPU（0.5.0 帧字段）：≥10% 才值得点名，点击开进程面板定位 -->
+        <span
+          v-if="topProc"
+          class="top-proc"
+          :title="`${topProc.command}（PID ${topProc.pid}）— 点击打开进程管理`"
+          @click="openTopProc"
+        >· {{ topProcName }}</span>
       </template>
       <span v-else>助手连接中…</span>
     </div>
@@ -1235,5 +1308,16 @@ defineExpose({ refitAndFocus })
 .agent-stats.offline {
   opacity: 0.65;
   font-style: italic;
+}
+/* 状态条里的「罪魁进程」：可点，悬停给信号 */
+.top-proc {
+  cursor: pointer;
+  color: var(--accent-text);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.top-proc:hover {
+  text-decoration: underline;
 }
 </style>

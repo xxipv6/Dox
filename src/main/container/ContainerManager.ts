@@ -29,9 +29,12 @@ import {
   localLogsArgs,
   localShellProbeArgs,
   logsCommand,
+  NESTED_RUNTIME_CANDIDATES,
+  nestedChainArgv,
   parseInspectIp,
   parseListing,
   parseRows,
+  shellJoinArgv,
   shellProbeCommand,
   SHELL_CANDIDATES,
   shouldDowngradeFormat
@@ -127,8 +130,12 @@ export class ContainerManager {
   /**
    * 探测并列出容器。**不抛错** —— 「没装 docker」「没权限」是预期内的状态，
    * 各自要有各自的界面，扔进 catch 就只剩一句没用的「失败了」。
+   *
+   * chain 给了就是**嵌套列表**：列链末端容器里面的容器（docker exec 链，
+   * 外层容器不需要有 shell，但里面得装着 docker/podman）。
    */
-  async list(parentSessionId: string): Promise<ContainerProbeResult> {
+  async list(parentSessionId: string, chain?: string[]): Promise<ContainerProbeResult> {
+    if (chain?.length) return this.listNested(parentSessionId, chain)
     if (isLocalContainerTarget(parentSessionId)) return this.listLocal()
 
     const client = this.getClient(parentSessionId)
@@ -240,6 +247,118 @@ export class ContainerManager {
     return this.buildResult(LOCAL_CONTAINER_TARGET, binary, containers, stoppedCount, legacy)
   }
 
+  // ---- 嵌套容器（容器里的容器，docker exec 链，链可任意深）----
+
+  /** runtime 缓存键：顶层 = parentSessionId；嵌套 = parent::外层链 */
+  private nestedKey(parentSessionId: string, chain: string[]): string {
+    return [parentSessionId, ...chain].join('::')
+  }
+
+  /**
+   * 解析嵌套链每一跳的 runtime 二进制：chain[0] 用宿主/本机的 runtime，
+   * 之后每一跳用上一跳容器里探测到的（缓存里有 —— 用户是一层层点进来的，
+   * 每一层的列表探测都写了自己的缓存）。缺任何一跳返回 null（让调用方
+   * 报「先刷新嵌套列表」而不是拿错二进制名去撞）。
+   */
+  private async resolveChainBinaries(
+    parentSessionId: string,
+    chain: string[]
+  ): Promise<{ outerBin: string; hops: string[] } | null> {
+    const outerBin = await this.runtimeBinary(parentSessionId)
+    if (!outerBin) return null
+    const hops: string[] = []
+    for (let i = 0; i < chain.length; i++) {
+      if (i === 0) {
+        hops.push(outerBin)
+        continue
+      }
+      const rt = this.runtimeByParent.get(this.nestedKey(parentSessionId, chain.slice(0, i)))
+      if (!rt) return null
+      hops.push(rt.binary)
+    }
+    return { outerBin, hops }
+  }
+
+  /**
+   * 跑一条完整 argv（argv[0] = 宿主/本机 runtime 二进制）。
+   * 本机 execFile argv 直给；远端 shell-quote 后过 execCapture。
+   */
+  private async runDockerArgv(
+    parentSessionId: string,
+    argv: string[],
+    timeoutMs = 10_000
+  ): Promise<{ stdout: string }> {
+    if (isLocalContainerTarget(parentSessionId)) {
+      return runLocal(argv[0], argv.slice(1), { timeoutMs })
+    }
+    const client = this.getClient(parentSessionId)
+    if (!client) throw new Error('父会话已断开，请先恢复 SSH 连接')
+    return execCapture(client, shellJoinArgv(argv), { timeoutMs })
+  }
+
+  /** 嵌套列表：链末端容器里得有 docker/podman（dind 场景），没有就是干净的「没有」 */
+  private async listNested(parentSessionId: string, chain: string[]): Promise<ContainerProbeResult> {
+    for (const hop of chain) assertContainerTarget(hop)
+    const resolved = await this.resolveChainBinaries(parentSessionId, chain)
+    if (!resolved) {
+      return { ok: false, reason: 'no-binary', message: '宿主侧没有可用的容器运行时' }
+    }
+    const viaName = chain[chain.length - 1]
+    const key = this.nestedKey(parentSessionId, chain)
+    const cached = this.runtimeByParent.get(key)
+    const legacy = cached?.legacy ?? false
+    // 已探到过就直接用它；否则 docker → podman 各试一次（链末端没有 = executable file not found）
+    const candidates = cached ? [cached.binary] : [...NESTED_RUNTIME_CANDIDATES]
+
+    for (const innerBin of candidates) {
+      try {
+        const res = await this.runDockerArgv(
+          parentSessionId,
+          nestedChainArgv(chain, resolved.hops, [innerBin, ...localListArgs(legacy)])
+        )
+        const { containers, stoppedCount } = parseRows(res.stdout, legacy)
+        const runtime = /podman/.test(innerBin) ? ('podman' as const) : ('docker' as const)
+        this.runtimeByParent.set(key, { binary: innerBin, runtime, legacy })
+        return { ok: true, list: { runtime, binary: innerBin, containers, stoppedCount } }
+      } catch (err) {
+        const text = textOf(err)
+        // 链末端容器里没有这个 runtime 二进制 → 试下一个候选
+        if (/executable file not found|not found in \$PATH/i.test(text)) continue
+        // 内层 runtime 在但守护进程没起：归类成 daemon-down（文案换成嵌套语境）
+        if (/cannot connect to the docker daemon|is the docker daemon running/i.test(text)) {
+          return {
+            ok: false,
+            reason: 'daemon-down',
+            message: `容器「${viaName}」里的 Docker 守护进程未运行`
+          }
+        }
+        if (!legacy && shouldDowngradeFormat(err)) {
+          try {
+            const res = await this.runDockerArgv(
+              parentSessionId,
+              nestedChainArgv(chain, resolved.hops, [innerBin, ...localListArgs(true)])
+            )
+            const { containers, stoppedCount } = parseRows(res.stdout, true)
+            const runtime = /podman/.test(innerBin) ? ('podman' as const) : ('docker' as const)
+            this.runtimeByParent.set(key, { binary: innerBin, runtime, legacy: true })
+            return {
+              ok: true,
+              list: { runtime, binary: innerBin, containers, stoppedCount, formatDowngraded: true }
+            }
+          } catch (retryErr) {
+            return { ok: false, ...classifyFailure(textOf(retryErr)) }
+          }
+        }
+        return { ok: false, ...classifyFailure(text) }
+      }
+    }
+    return {
+      ok: false,
+      reason: 'no-binary',
+      message: `容器「${viaName}」里没有 docker / podman`
+    }
+  }
+
   private buildResult(
     target: string,
     binary: string,
@@ -262,21 +381,34 @@ export class ContainerManager {
     parentSessionId: string,
     containerName: string,
     term: TermSize,
-    owner: WebContents
+    owner: WebContents,
+    chain?: string[]
   ): Promise<string> {
     // 容器名来自渲染进程，拼进任何命令前都要校验字符集（远端拼 shell 串，本机是 argv）
     assertContainerTarget(containerName)
 
-    const runtime = this.runtimeByParent.get(parentSessionId)
-    if (!runtime) {
-      throw new Error('还没有探测到容器运行时，请先刷新容器列表')
+    let carrier: Carrier
+    if (chain?.length) {
+      carrier = await this.openNestedCarrier(parentSessionId, chain, containerName, term)
+    } else {
+      const runtime = this.runtimeByParent.get(parentSessionId)
+      if (!runtime) {
+        throw new Error('还没有探测到容器运行时，请先刷新容器列表')
+      }
+      carrier = isLocalContainerTarget(parentSessionId)
+        ? await this.openLocal(runtime.binary, containerName, term)
+        : await this.openRemote(parentSessionId, runtime.binary, containerName, term)
     }
+    return this.registerSession(parentSessionId, containerName, carrier, owner, term)
+  }
 
-    const local = isLocalContainerTarget(parentSessionId)
-    const carrier = local
-      ? await this.openLocal(runtime.binary, containerName, term)
-      : await this.openRemote(parentSessionId, runtime.binary, containerName, term)
-
+  private registerSession(
+    parentSessionId: string,
+    containerName: string,
+    carrier: Carrier,
+    owner: WebContents,
+    term: TermSize
+  ): string {
     const id = `${CONTAINER_ID_PREFIX}${randomUUID()}`
     const session: ContainerSession = {
       id,
@@ -294,6 +426,75 @@ export class ContainerManager {
   }
 
   /**
+   * 嵌套进入：docker exec 链（每一跳由它外侧的 runtime exec 进下一层，
+   * 两层 -it 各自给自己的那段分配 tty）。
+   * 每一跳的 runtime 必须是探测缓存里有的 —— 用户是一层层点进来的，
+   * 没列过某一层的嵌套列表就不让进，免得拿没探过的二进制名去撞。
+   */
+  private async openNestedCarrier(
+    parentSessionId: string,
+    chain: string[],
+    containerName: string,
+    term: TermSize
+  ): Promise<Carrier> {
+    for (const hop of chain) assertContainerTarget(hop)
+    const key = this.nestedKey(parentSessionId, chain)
+    const runtime = this.runtimeByParent.get(key)
+    if (!runtime) {
+      throw new Error('还没有探测到容器内运行时，请先在容器面板刷新嵌套列表')
+    }
+    const resolved = await this.resolveChainBinaries(parentSessionId, chain)
+    if (!resolved) throw new Error('嵌套链的某一跳还没有探测过，请先刷新容器面板')
+
+    const shell = await this.resolveShell(key, runtime.binary, containerName, (candidate) =>
+      this.runDockerArgv(
+        parentSessionId,
+        nestedChainArgv(chain, resolved.hops, [runtime.binary, 'exec', containerName, candidate, '-c', 'exit 0']),
+        8000
+      )
+    )
+
+    if (isLocalContainerTarget(parentSessionId)) {
+      const exe = await resolveExecutable(resolved.outerBin)
+      return {
+        kind: 'local',
+        pty: pty.spawn(
+          exe,
+          // 两层 -it 都要：外层 hop（interactive=true）和最里层 exec 各分一个 tty
+          nestedChainArgv(chain, resolved.hops, [runtime.binary, 'exec', '-it', containerName, shell], true).slice(1),
+          {
+            name: 'xterm-256color',
+            cols: term.cols,
+            rows: term.rows,
+            cwd: os.homedir(),
+            env: { ...(process.env as Record<string, string>), TERM: 'xterm-256color' }
+          }
+        )
+      }
+    }
+
+    const client = this.getClient(parentSessionId)
+    if (!client) {
+      throw new Error('父会话已断开，请先恢复 SSH 连接后再进入容器')
+    }
+    const channel = await this.execChannel(
+      client,
+      shellJoinArgv(nestedChainArgv(chain, resolved.hops, [runtime.binary, 'exec', '-it', containerName, shell], true)),
+      term
+    )
+    // 与 openRemote 同款身份校验：开通道那一刻 client 必须还是快照里的那个
+    if (this.getClient(parentSessionId) !== client) {
+      try {
+        channel.close()
+      } catch {
+        /* 已经关了 */
+      }
+      throw new Error('会话已重新连接，请重试')
+    }
+    return { kind: 'ssh', channel }
+  }
+
+  /**
    * 容器生命周期操作（start / stop / unpause / remove，白名单见 runtime.ts）。
    *
    * 这不是「远端零改动」的倒退：红线的本义是**不装 agent、不建文件、不留痕迹**，
@@ -303,9 +504,33 @@ export class ContainerManager {
   async control(
     parentSessionId: string,
     containerName: string,
-    action: ContainerControlAction
+    action: ContainerControlAction,
+    chain?: string[]
   ): Promise<void> {
     assertContainerTarget(containerName)
+
+    if (chain?.length) {
+      for (const hop of chain) assertContainerTarget(hop)
+      const runtime = this.runtimeByParent.get(this.nestedKey(parentSessionId, chain))
+      if (!runtime) {
+        throw new Error('还没有探测到容器内运行时，请先在容器面板刷新嵌套列表')
+      }
+      const resolved = await this.resolveChainBinaries(parentSessionId, chain)
+      if (!resolved) throw new Error('嵌套链的某一跳还没有探测过，请先刷新容器面板')
+      try {
+        await this.runDockerArgv(
+          parentSessionId,
+          // localControlArgs 给的就是 [动词, 名字]（白名单换词），垫在内层 runtime 后面
+          nestedChainArgv(chain, resolved.hops, [runtime.binary, ...localControlArgs(containerName, action)]),
+          15_000
+        )
+      } catch (err) {
+        const { stdout, stderr } = outputsOf(err)
+        throw new Error(firstLine([stderr, stdout].filter(Boolean).join('\n')) || textOf(err))
+      }
+      this.shellByTarget.delete(`${this.nestedKey(parentSessionId, chain)} ${containerName}`)
+      return
+    }
 
     const runtime = this.runtimeByParent.get(parentSessionId)
     if (!runtime) {
@@ -479,16 +704,63 @@ export class ContainerManager {
     parentSessionId: string,
     containerName: string,
     term: TermSize,
-    owner: WebContents
+    owner: WebContents,
+    chain?: string[]
   ): Promise<string> {
     assertContainerTarget(containerName)
+
+    let carrier: Carrier
+    if (chain?.length) {
+      // 嵌套日志：同样是守护进程读日志驱动，不需要任何一层有 shell
+      for (const hop of chain) assertContainerTarget(hop)
+      const runtime = this.runtimeByParent.get(this.nestedKey(parentSessionId, chain))
+      if (!runtime) {
+        throw new Error('还没有探测到容器内运行时，请先在容器面板刷新嵌套列表')
+      }
+      const resolved = await this.resolveChainBinaries(parentSessionId, chain)
+      if (!resolved) throw new Error('嵌套链的某一跳还没有探测过，请先刷新容器面板')
+      const argv = nestedChainArgv(chain, resolved.hops, [
+        runtime.binary,
+        'logs',
+        '-f',
+        '--tail',
+        '200',
+        containerName
+      ])
+      if (isLocalContainerTarget(parentSessionId)) {
+        const exe = await resolveExecutable(resolved.outerBin)
+        carrier = {
+          kind: 'local',
+          pty: pty.spawn(exe, argv.slice(1), {
+            name: 'xterm-256color',
+            cols: term.cols,
+            rows: term.rows,
+            cwd: os.homedir(),
+            env: { ...(process.env as Record<string, string>), TERM: 'xterm-256color' }
+          })
+        }
+      } else {
+        const client = this.getClient(parentSessionId)
+        if (!client) throw new Error('父会话已断开，请先恢复 SSH 连接')
+        const channel = await this.execChannel(client, shellJoinArgv(argv), term)
+        if (this.getClient(parentSessionId) !== client) {
+          try {
+            channel.close()
+          } catch {
+            /* 已经关了 */
+          }
+          throw new Error('会话已重新连接，请重试')
+        }
+        carrier = { kind: 'ssh', channel }
+      }
+      return this.registerSession(parentSessionId, containerName, carrier, owner, term)
+    }
 
     const runtime = this.runtimeByParent.get(parentSessionId)
     if (!runtime) {
       throw new Error('还没有探测到容器运行时，请先刷新容器列表')
     }
 
-    let carrier: Carrier
     if (isLocalContainerTarget(parentSessionId)) {
       const exe = await resolveExecutable(runtime.binary)
       carrier = {
@@ -519,20 +791,7 @@ export class ContainerManager {
       carrier = { kind: 'ssh', channel }
     }
 
-    const id = `${CONTAINER_ID_PREFIX}${randomUUID()}`
-    const session: ContainerSession = {
-      id,
-      parentSessionId,
-      containerName,
-      carrier,
-      owner,
-      term
-    }
-    this.sessions.set(id, session)
-    this.track(session)
-    this.wire(session)
-    if (!owner.isDestroyed()) owner.send(IpcChannels.sshStatus, { id, status: 'connected' })
-    return id
+    return this.registerSession(parentSessionId, containerName, carrier, owner, term)
   }
 
   /**

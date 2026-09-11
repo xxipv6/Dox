@@ -40,6 +40,8 @@ const target = computed<{ sessionId: string; containerName?: string } | null>(()
   if (!id) return null
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === id))
   if (tab?.kind === 'container' && tab.container) {
+    // 嵌套容器（外层里的内层）不在安装面：docker cp 链没有嵌套实现
+    if (tab.container.chain?.length) return null
     // 本机容器（LOCAL_CONTAINER_TARGET）也允许：AgentManager 对它走本机 docker CLI，不经 SSH
     return { sessionId: tab.container.parentSessionId, containerName: tab.container.containerName }
   }

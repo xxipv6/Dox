@@ -34,6 +34,12 @@ export interface ContainerTabInfo {
   /** true = 日志标签（docker logs -f）；缺省/false = 容器内 shell。复用与标题都靠它区分 */
   logs?: boolean
   /**
+   * 嵌套容器才有：从宿主到直接外层的逐跳容器名链（可任意深）。
+   * 非空时这个容器活在链末端容器里（docker exec 链进入），
+   * agent 依赖面（文件面板/进程管理/转发建议）不开放。
+   */
+  chain?: string[]
+  /**
    * 直连容器才有：父会话是按需建的传输会话，这里记它的设备 id。
    * 传输会话死掉后重连容器 pane 靠它重建承载（ensureTransport 换新父）。
    */
@@ -350,12 +356,15 @@ export const useSessionStore = defineStore('sessions', () => {
               ? await window.api.connectContainerLogs(
                   tab.container!.parentSessionId,
                   tab.container!.containerName,
-                  size
+                  size,
+                  // reactive 数组是 Proxy，过不了 IPC 结构化克隆 —— 拷贝成纯数组
+                  tab.container!.chain ? [...tab.container!.chain] : undefined
                 )
               : await window.api.connectContainer(
                   tab.container!.parentSessionId,
                   tab.container!.containerName,
-                  size
+                  size,
+                  tab.container!.chain ? [...tab.container!.chain] : undefined
                 )
             : await window.api.connect(toPlainConfig(tab.config!), size, {
                 savedSessionId: tab.savedSessionId
@@ -454,14 +463,17 @@ export const useSessionStore = defineStore('sessions', () => {
   async function enterContainer(
     parentSessionId: string,
     box: Pick<ContainerInfo, 'name' | 'image'>,
-    originSavedId?: string
+    originSavedId?: string,
+    chain?: string[]
   ): Promise<void> {
+    const chainKey = (t: SessionTab): string => (t.container?.chain ?? []).join('▸')
     const live = tabs.value.find(
       (t) =>
         t.kind === 'container' &&
         !t.container?.logs &&
         t.container?.parentSessionId === parentSessionId &&
         t.container.containerName === box.name &&
+        chainKey(t) === (chain ?? []).join('▸') &&
         t.panes.some((p) => p.status === 'connected' || p.status === 'connecting')
     )
     if (live) {
@@ -474,6 +486,7 @@ export const useSessionStore = defineStore('sessions', () => {
         !t.container?.logs &&
         t.container?.parentSessionId === parentSessionId &&
         t.container.containerName === box.name &&
+        chainKey(t) === (chain ?? []).join('▸') &&
         t.panes.every((p) => p.status === 'closed' || p.status === 'error')
     )
     if (dead) {
@@ -485,10 +498,10 @@ export const useSessionStore = defineStore('sessions', () => {
     const pane = newPane()
     const tab = reactive<SessionTab>({
       tabId: `tab-${++tabSeq}`,
-      title: `容器 · ${box.name}`,
+      title: chain?.length ? `容器 · ${[...chain, box.name].join(' ▸ ')}` : `容器 · ${box.name}`,
       kind: 'container',
       config: null,
-      container: { parentSessionId, containerName: box.name, image: box.image, originSavedId },
+      container: { parentSessionId, containerName: box.name, image: box.image, originSavedId, chain },
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -506,14 +519,16 @@ export const useSessionStore = defineStore('sessions', () => {
   async function viewContainerLogs(
     parentSessionId: string,
     box: Pick<ContainerInfo, 'name' | 'image'>,
-    originSavedId?: string
+    originSavedId?: string,
+    chain?: string[]
   ): Promise<void> {
     const existing = tabs.value.find(
       (t) =>
         t.kind === 'container' &&
         t.container?.logs === true &&
         t.container.parentSessionId === parentSessionId &&
-        t.container.containerName === box.name
+        t.container.containerName === box.name &&
+        (t.container.chain ?? []).join('▸') === (chain ?? []).join('▸')
     )
     if (existing) {
       activeTabId.value = existing.tabId
@@ -526,10 +541,10 @@ export const useSessionStore = defineStore('sessions', () => {
     const pane = newPane()
     const tab = reactive<SessionTab>({
       tabId: `tab-${++tabSeq}`,
-      title: `日志 · ${box.name}`,
+      title: chain?.length ? `日志 · ${[...chain, box.name].join(' ▸ ')}` : `日志 · ${box.name}`,
       kind: 'container',
       config: null,
-      container: { parentSessionId, containerName: box.name, image: box.image, logs: true, originSavedId },
+      container: { parentSessionId, containerName: box.name, image: box.image, logs: true, originSavedId, chain },
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -662,9 +677,9 @@ export const useSessionStore = defineStore('sessions', () => {
   }
 
   // ---- 进程管理面板 ----
-  /** 进程面板目标：SSH 标签 → 宿主机；远端容器标签 → 父会话 + 容器名 */
-  const procTarget = ref<{ sessionId: string; containerName?: string; label: string } | null>(null)
-  function openProcPanel(target: { sessionId: string; containerName?: string; label: string }): void {
+  /** 进程面板目标：SSH 标签 → 宿主机；容器标签 → 容器。filter = 打开时预填的过滤词（状态条 top 进程点进来的场景） */
+  const procTarget = ref<{ sessionId: string; containerName?: string; label: string; filter?: string } | null>(null)
+  function openProcPanel(target: { sessionId: string; containerName?: string; label: string; filter?: string }): void {
     procTarget.value = target
   }
   function closeProcPanel(): void {

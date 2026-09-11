@@ -289,6 +289,19 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
   （进程组同生共死；而且子进程继承 stdout 时通道还会吊着不关）。
   测试要在远端驻留的靶子进程（sleep/nc）用
   `setsid cmd </dev/null >/dev/null 2>&1 &`；容器里用 `docker exec -d` 没这个问题。
+  **agent 的 exec 同理**：起后台驻留进程必须重定向 stdout/stderr
+  （`while :; do :; done >/dev/null 2>&1 &`），否则管道不 EOF，exec 吊到超时。
+- **xterm 的「一行」是一个 div，`textContent` 拼接时不补换行。**
+  对整个 `.xterm-rows` 取 textContent 再 `split('\n')`，拿到的其实是一整坨
+  （回显的命令和输出首尾相接）——「标记独占一行」这种断言永远是假的。
+  逐行断言要逐元素取：`.xterm-rows > div` 各自 `textContent`。
+- **嵌套 exec 链每一层都要 `-it`。** `docker exec A docker exec B sh`
+  只给最外层加 `-it`，内层分不到 tty：提示符/行编辑全没，表现为
+  「进去了但 echo 不回显」。`nestedChainArgv` 的 interactive 标志对每一跳生效。
+- **Vue reactive 数组过不了 IPC 结构化克隆。** 嵌套链
+  `tab.container.chain` 是 Proxy 包着的 reactive 数组，直接当 IPC 参数
+  抛 "An object could not be cloned"—— 传参前 `[...chain]` 展开成普通数组。
+  （与「载荷对象带函数字段」同类：凡是跨 IPC 的，先确认手里的是纯数据。）
 - **busybox `ps` 默认只显示 comm，不带参数**（`ps w` 也一样）——
   `ps | grep 'sleep 300'` 永远匹配不到，活着也报 GONE。
   断言带参数的命令用 `ps -o pid,args`，或直接扫 `/proc/*/cmdline`。

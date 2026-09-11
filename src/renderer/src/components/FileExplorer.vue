@@ -54,6 +54,41 @@ const usagePercent = computed(() =>
   usage.value && usage.value.total > 0 ? Math.round((usage.value.used / usage.value.total) * 100) : 0
 )
 
+// ---- 磁盘占用分解：点用量条展开「谁占的」（agent fs_du，0.5.0+）----
+interface DuEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+}
+const duOpen = ref(false)
+const duLoading = ref(false)
+const duError = ref('')
+const duResult = ref<{ total: number; entries: DuEntry[]; truncated: boolean } | null>(null)
+
+async function refreshDu(): Promise<void> {
+  duLoading.value = true
+  duError.value = ''
+  try {
+    duResult.value = (await window.api.agentCall(fsSessionId.value, ctrName.value, 'fs_du', {
+      path: cwd.value || '/'
+    })) as { total: number; entries: DuEntry[]; truncated: boolean }
+  } catch (err) {
+    const msg = errorText(err)
+    // 老 agent 没有 fs_du：指路升级比糊 unknown method 原文好
+    duError.value = msg.includes('unknown method')
+      ? `磁盘分解需要助手 v${BUNDLED_AGENT_VERSION}，请在侧栏「远程助手」升级`
+      : msg
+  } finally {
+    duLoading.value = false
+  }
+}
+
+function toggleDu(): void {
+  duOpen.value = !duOpen.value
+  if (duOpen.value) void refreshDu()
+}
+
 // 内联新建文件夹 / 重命名
 const creatingDir = ref(false)
 const newDirName = ref('')
@@ -133,6 +168,9 @@ async function load(dir?: string): Promise<void> {
   }
   // 顺手刷新磁盘用量（自带 10s 缓存；失败静默 —— 用量条是加分项不是刚需）
   void refreshUsage()
+  // 换目录后旧的分解结果作废；分解面板开着就顺手重扫
+  duResult.value = null
+  if (duOpen.value) void refreshDu()
 }
 
 async function init(): Promise<void> {
@@ -608,12 +646,39 @@ onBeforeUnmount(() => {
       <div v-if="!entries.length && !creatingDir" class="hint">空目录，拖拽文件到此处上传</div>
     </div>
 
-    <!-- 磁盘用量条：目标不支持（无 statvfs 也无 agent）时整条不出现 -->
+    <!-- 磁盘用量分解（点用量条展开）：谁占的、各占多少，点目录直接跳进去 -->
+    <div v-if="duOpen && usage" class="du-panel">
+      <div v-if="duLoading" class="hint"><Spinner :size="12" text="扫描目录占用…" /></div>
+      <div v-else-if="duError" class="du-error">{{ duError }}</div>
+      <template v-else-if="duResult">
+        <div
+          v-for="e in duResult.entries"
+          :key="e.path"
+          class="du-row"
+          :class="{ clickable: e.is_dir }"
+          @click="e.is_dir && load(e.path)"
+        >
+          <span class="du-name">{{ e.name }}{{ e.is_dir ? '/' : '' }}</span>
+          <span class="du-track">
+            <span
+              class="du-fill"
+              :style="{ width: (duResult.total > 0 ? Math.max(1, Math.round((e.size / duResult.total) * 100)) : 0) + '%' }"
+            ></span>
+          </span>
+          <span class="du-size">{{ formatSize(e.size) }}</span>
+        </div>
+        <div v-if="duResult.truncated" class="du-note">目录太大，结果不完整（已按已扫描部分排序）</div>
+        <div v-if="!duResult.entries.length" class="du-note">空目录</div>
+      </template>
+    </div>
+
+    <!-- 磁盘用量条：目标不支持（无 statvfs 也无 agent）时整条不出现；点击展开分解 -->
     <div
       v-if="usage"
       class="usage-bar"
-      :class="{ warn: usagePercent >= 85 }"
-      :title="usage.mount ? `挂载点 ${usage.mount}` : undefined"
+      :class="{ warn: usagePercent >= 85, open: duOpen }"
+      :title="(usage.mount ? `挂载点 ${usage.mount} · ` : '') + '点击展开占用分解'"
+      @click="toggleDu"
     >
       <span class="usage-track"><span class="usage-fill" :style="{ width: usagePercent + '%' }"></span></span>
       <span class="usage-text">{{ formatSize(usage.used) }} / {{ formatSize(usage.total) }}（{{ usagePercent }}%）</span>
@@ -802,7 +867,7 @@ onBeforeUnmount(() => {
   font-size: var(--fs-sm);
   text-align: center;
 }
-/* 磁盘用量条：贴面板底部，>85% 整条转警示色 */
+/* 磁盘用量条：贴面板底部，>85% 整条转警示色；可点击展开分解 */
 .usage-bar {
   display: flex;
   align-items: center;
@@ -811,6 +876,13 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--border);
   font-size: var(--fs-xs);
   color: var(--fg-muted);
+  cursor: pointer;
+}
+.usage-bar:hover {
+  background: var(--bg-hover);
+}
+.usage-bar.open {
+  background: var(--bg-hover);
 }
 .usage-track {
   flex: 1;
@@ -835,5 +907,62 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+/* 用量分解面板：贴在用量条上方，行 = 子项 + 占比条 + 大小 */
+.du-panel {
+  border-top: 1px solid var(--border);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.du-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  font-size: var(--fs-xs);
+}
+.du-row.clickable {
+  cursor: pointer;
+}
+.du-row.clickable:hover {
+  background: var(--bg-hover);
+}
+.du-name {
+  width: 40%;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.du-track {
+  flex: 1;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.du-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-text);
+  border-radius: var(--r-pill);
+}
+.du-size {
+  flex-shrink: 0;
+  width: 64px;
+  text-align: right;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.du-error {
+  padding: 8px 10px;
+  font-size: var(--fs-xs);
+  color: var(--danger-text);
+}
+.du-note {
+  padding: 4px 10px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
 }
 </style>

@@ -149,6 +149,51 @@ export function localControlArgs(name: string, action: ContainerControlAction): 
 /** 依次尝试的候选 shell；容器里多半只有 sh，distroless 类一个都没有 */
 export const SHELL_CANDIDATES = ['bash', 'sh'] as const
 
+/*
+ * ---- 嵌套容器（容器里的容器）----
+ *
+ * 思路是「docker exec 链」：每一跳由**这一跳外侧**的 runtime 把 argv 直接
+ * 送进容器执行（docker exec 走的是 runc exec，**不需要任何一层有 shell**，
+ * distroless 也成立）。链可以任意深（dind 套 dind 真的存在）：
+ *   宿主 docker exec A docker exec B docker ps …
+ * hopBinaries[i] 是 exec 进 chain[i] 时用的 runtime 二进制（chain[0] 用宿主/
+ * 本机的 runtime，之后每一跳用上一跳容器里探测到的 runtime）——解析是
+ * ContainerManager 的事（它有缓存），这里只做纯拼接。
+ */
+/** 内层 runtime 的候选二进制名（在容器 PATH 里找） */
+export const NESTED_RUNTIME_CANDIDATES = ['docker', 'podman'] as const
+
+export function nestedChainArgv(
+  chain: string[],
+  hopBinaries: string[],
+  innerArgv: string[],
+  interactive = false
+): string[] {
+  if (chain.length === 0 || chain.length !== hopBinaries.length) {
+    throw new Error('嵌套链与逐跳 runtime 数对不上')
+  }
+  let argv = innerArgv
+  for (let i = chain.length - 1; i >= 0; i--) {
+    argv = [
+      hopBinaries[i],
+      'exec',
+      ...(interactive ? ['-it'] : []),
+      assertContainerTarget(chain[i]),
+      ...argv
+    ]
+  }
+  return argv
+}
+
+/**
+ * argv → 一条可以过 SSH shell 的命令串（嵌套的远端侧用）。
+ * 单引号包裹 + 转义；这些 argv 都是我们自己构造的（名字过了字符集校验），
+ * 这层 quoting 防的是 shell 分词，不是对抗输入。
+ */
+export function shellJoinArgv(argv: string[]): string {
+  return argv.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(' ')
+}
+
 /**
  * 从 `docker inspect` 的 JSON 输出抠容器的网桥 IP（端口转发建议用）。
  *
@@ -299,6 +344,8 @@ export function deriveHealth(status: string): ContainerInfo['health'] {
 export interface ClassifiedFailure {
   reason: ContainerProbeReason
   message: string
+  /** 原始报错（面板折叠进「详细信息」，别直接糊主文案） */
+  detail?: string
 }
 
 /**
@@ -307,43 +354,53 @@ export interface ClassifiedFailure {
  * 顺序有讲究：先判 socket 权限，再判守护进程 —— 因为「连不上守护进程」的
  * 典型文案里同时出现 docker.sock 和 permission denied，只有先看前者才不会
  * 把「没权限」误报成「没在跑」。
+ *
+ * podman 的措辞和 docker 不一样（"failed to connect to the docker API at
+ * unix:///…" / "check if the path is correct and if the daemon is running"），
+ * 两套都得认。
  */
 export function classifyFailure(raw: string): ClassifiedFailure {
   const text = (raw || '').toLowerCase()
   const has = (...pats: string[]): boolean => pats.some((p) => text.includes(p))
+  const detail = raw?.trim().slice(0, 600) || undefined
 
   if (has('permission denied') && has('docker.sock', 'podman.sock', 'docker daemon socket', 'socket')) {
     return {
       reason: 'no-permission',
-      message: '当前用户无权访问 Docker（需要加入 docker 组，或用 root 连接）'
+      message: '当前用户无权访问 Docker（需要加入 docker 组，或用 root 连接）',
+      detail
     }
   }
   if (
     has(
       'cannot connect to the docker daemon',
       'is the docker daemon running',
+      'if the daemon is running',
+      'failed to connect to the docker api',
       'error during connect',
       'cannot connect to podman'
     )
   ) {
-    return { reason: 'daemon-down', message: 'Docker 守护进程未运行（或 socket 不可达）' }
+    return { reason: 'daemon-down', message: 'Docker 守护进程未运行（或 socket 不可达）', detail }
   }
   if (has('is not running', 'no such container', 'container state improper', 'no such object')) {
-    return { reason: 'container-gone', message: '容器已不在运行，请刷新列表' }
+    return { reason: 'container-gone', message: '容器已不在运行，请刷新列表', detail }
   }
   if (has('executable file not found', 'not found in $path')) {
     return {
       reason: 'no-shell',
-      message: '容器内没有可用的 shell（可能是 distroless / scratch 镜像）'
+      message: '容器内没有可用的 shell（可能是 distroless / scratch 镜像）',
+      detail
     }
   }
   if (has('permission denied', 'oci runtime exec failed', 'operation not permitted')) {
     return {
       reason: 'exec-denied',
-      message: '进入容器被拒绝（seccomp / AppArmor / 容器用户权限限制）'
+      message: '进入容器被拒绝（seccomp / AppArmor / 容器用户权限限制）',
+      detail
     }
   }
-  return { reason: 'error', message: firstLine(raw) || '容器探测失败' }
+  return { reason: 'error', message: firstLine(raw) || '容器探测失败', detail }
 }
 
 /**

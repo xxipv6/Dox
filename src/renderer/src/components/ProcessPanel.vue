@@ -20,6 +20,8 @@ const props = defineProps<{
   containerName?: string
   /** 标题里显示的目标名（主机名 / 容器名） */
   label: string
+  /** 打开时预填的过滤词（状态条 top 进程点进来 → 定位到那个 PID） */
+  initialFilter?: string
 }>()
 
 const store = useSessionStore()
@@ -29,7 +31,7 @@ const processes = ref<ProcInfo[]>([])
 const via = ref<'agent' | 'fallback-ps' | null>(null)
 const loading = ref(true)
 const errorMsg = ref('')
-const filter = ref('')
+const filter = ref(props.initialFilter ?? '')
 
 type SortKey = 'pid' | 'user' | 'cpu' | 'mem' | 'command'
 const sortKey = ref<SortKey>('cpu')

@@ -142,7 +142,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   const paneId = store.activePane?.sessionId
   if (!tab || !paneId) return null
   if (tab.kind === 'ssh') return { sessionId: paneId }
-  if (tab.kind === 'container' && tab.container) {
+  if (tab.kind === 'container' && tab.container && !tab.container.chain?.length) {
     return {
       sessionId: paneId,
       container: {
@@ -317,6 +317,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
             :session-id="store.procTarget.sessionId"
             :container-name="store.procTarget.containerName"
             :label="store.procTarget.label"
+            :initial-filter="store.procTarget.filter"
           />
 
           <!-- 双击文件后在此编辑；key 绑定会话，切会话不串内容 -->

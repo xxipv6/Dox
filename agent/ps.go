@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -228,6 +229,57 @@ func psList(params json.RawMessage) (interface{}, error) {
 		out = []procInfo{}
 	}
 	return map[string]interface{}{"processes": out}, nil
+}
+
+// ---- top 进程（watch_stats 帧的「谁在吃 CPU」字段）----
+
+type topProc struct {
+	Pid        int     `json:"pid"`
+	Command    string  `json:"command"`
+	CPUPercent float64 `json:"cpu_percent"`
+	MemPercent float64 `json:"mem_percent"`
+}
+
+// sampleProcTimes 给所有活进程记一轮 jiffies（watch_stats 每帧调用，不做两次采样差分——
+// 帧与帧之间天然就是两次采样）
+func sampleProcTimes() map[int]procSample {
+	out := map[int]procSample{}
+	pids, err := listPids()
+	if err != nil {
+		return out
+	}
+	for _, pid := range pids {
+		if s, ok := readProcSample(pid); ok {
+			out[pid] = s
+		}
+	}
+	return out
+}
+
+// topProcs：两帧之间的 CPU 差分 top N。首轮（无基准）返回空。
+func topProcs(prev, cur map[int]procSample, totalDelta float64, memTotalBytes float64, n int) []topProc {
+	if totalDelta <= 0 {
+		return nil
+	}
+	ncpu := float64(runtime.NumCPU())
+	var all []topProc
+	for pid, after := range cur {
+		before, seen := prev[pid]
+		if !seen {
+			continue // 帧间出生的进程没有差分基准，下帧再说
+		}
+		p := float64(after.utime+after.stime-before.utime-before.stime) / totalDelta * ncpu * 100
+		tp := topProc{Pid: pid, Command: after.command, CPUPercent: p}
+		if memTotalBytes > 0 {
+			tp.MemPercent = float64(after.rss) / memTotalBytes * 100
+		}
+		all = append(all, tp)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].CPUPercent > all[j].CPUPercent })
+	if len(all) > n {
+		all = all[:n]
+	}
+	return all
 }
 
 // ps_kill 的信号白名单：TERM 先礼后兵，KILL 兜底。其余信号（STOP/CONT…）

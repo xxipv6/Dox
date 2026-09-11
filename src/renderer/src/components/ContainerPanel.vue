@@ -32,7 +32,8 @@ const menu = ref<{ x: number; y: number; box: ContainerInfo } | null>(null)
  *
  * 刻意**不**用 `store.activeSessionId`：
  *  - 聚焦在容器标签上时，activeSessionId 是容器会话，拿它去列容器是错的；
- *    这时应当继续列它**父会话**的容器，面板才不会一进容器就空掉。
+ *    容器标签列的是**它里面的嵌套容器**（链 = 当前容器的链 + 它自己），
+ *    父会话仍是它的承载会话。容器里没有 docker/podman 就是干净的「没有」。
  *  - 本地终端和「没有标签」都返回 null。
  */
 const parentSessionId = computed<string | null>(() => {
@@ -49,11 +50,19 @@ const parentSessionId = computed<string | null>(() => {
   return store.activeSessionId
 })
 
-/** 目标此刻是否可用。SSH 断线期间列表还在，但不能点进去 */
+/** 嵌套目标：当前标签是容器 → 列它里面的容器（链 = 它自己的链 + 它自己） */
+const nestedChain = computed<string[] | undefined>(() => {
+  const tab = store.activeTab
+  if (tab?.kind !== 'container' || !tab.container) return undefined
+  return [...(tab.container.chain ?? []), tab.container.containerName]
+})
+
+/** 目标此刻是否可用。断线期间列表还在，但不能点进去 */
 const parentReady = computed(() => {
   const tab = store.activeTab
   if (!tab) return false
-  if (tab.kind === 'container') return false // 已经在容器里了，没有「再进一个」这一说
+  // 容器标签：当前容器的会话活着就能进嵌套（docker exec 链从它出去）
+  if (tab.kind === 'container') return tab.panes.some((p) => p.status === 'connected')
   /*
    * 本机恒为 true：这里没有「父会话」这回事。docker exec 是新起一个进程，
    * 本地的那个 shell 死没死都拦不住它 —— 拿本地终端的连接状态来限制进入，
@@ -66,12 +75,12 @@ const parentReady = computed(() => {
 /**
  * 「现在不能进容器」的原因文案。
  *
- * `parentReady` 为 false 有两种成因，不能共用一句话：已经在容器标签里的时候
- * 父会话往往好好的，此时说「父会话已断开」就是假话。
+ * `parentReady` 为 false 的成因要分开说：容器标签里是当前容器会话断了，
+ * 说「父会话已断开」是假话。
  */
 const blockedHint = computed(() =>
   store.activeTab?.kind === 'container'
-    ? '已在容器内。切到设备或本地终端标签，即可进入其它容器'
+    ? '当前容器会话已断开，恢复后即可进入嵌套容器'
     : '父会话已断开，恢复后即可进入容器'
 )
 
@@ -90,7 +99,7 @@ async function refresh(): Promise<void> {
   // 先清空再加载的话，每次切标签/点刷新面板都要闪一下空态
   loading.value = true
   try {
-    result.value = await api.listContainers(sessionId)
+    result.value = await api.listContainers(sessionId, nestedChain.value)
   } catch (err) {
     result.value = { ok: false, reason: 'error', message: errorText(err) }
   } finally {
@@ -99,8 +108,8 @@ async function refresh(): Promise<void> {
 }
 
 onMounted(refresh)
-// 换会话要重新探测
-watch(parentSessionId, refresh)
+// 换会话/换嵌套目标都要重新探测
+watch([parentSessionId, nestedChain], refresh)
 /*
  * 父会话重连回来之后要重新列一次：断线期间列表是灰的，
  * 状态翻回 connected 时用户期望它自己恢复。
@@ -165,7 +174,7 @@ async function onMenuSelect(id: string): Promise<void> {
 
   if (id === 'logs') {
     try {
-      await store.viewContainerLogs(sessionId, target)
+      await store.viewContainerLogs(sessionId, target, undefined, nestedChain.value)
     } catch (err) {
       alert(`查看日志失败：${errorText(err)}`)
     }
@@ -177,7 +186,7 @@ async function onMenuSelect(id: string): Promise<void> {
     try {
       // 失败原因（容器已停止 / 没有可用 shell / 被 seccomp 拒绝）由主进程写好，
       // 这里如实抛出来给用户看，不要吞成一句「失败了」
-      await store.enterContainer(sessionId, target)
+      await store.enterContainer(sessionId, target, undefined, nestedChain.value)
     } catch (err) {
       alert(`进入容器失败：${errorText(err)}`)
     } finally {
@@ -191,7 +200,7 @@ async function onMenuSelect(id: string): Promise<void> {
   if (ask && !confirm(ask(target.name))) return
   controlling.value = target.name
   try {
-    await api.controlContainer(sessionId, target.name, id as 'start' | 'stop' | 'unpause' | 'remove')
+    await api.controlContainer(sessionId, target.name, id as 'start' | 'stop' | 'unpause' | 'remove', nestedChain.value)
     // 状态变化是异步体现在 docker ps 里的，稍等再刷，否则列表可能还是旧状态
     await new Promise((r) => setTimeout(r, 600))
     await refresh()
@@ -228,13 +237,23 @@ async function onMenuSelect(id: string): Promise<void> {
     <Spinner text="正在探测远端容器…" />
   </div>
 
+  <!-- 没装运行时 = 正常状态不是错误：淡色提示，不带重试 -->
+  <div v-else-if="result && !result.ok && result.reason === 'no-binary'" class="empty-hint">
+    {{ result.message }}
+  </div>
+
+  <!-- 真错误：一句话人话 + 原始报错折叠进「详细信息」 -->
   <div v-else-if="result && !result.ok" class="empty-hint error">
     {{ result.message }}
     <button class="retry" @click="refresh">重试</button>
+    <details v-if="result.detail" class="err-detail">
+      <summary>详细信息</summary>
+      <pre>{{ result.detail }}</pre>
+    </details>
   </div>
 
   <div v-else-if="!containers.length" class="empty-hint">
-    这台设备上没有容器
+    {{ nestedChain ? '这个容器里没有容器' : '这台设备上没有容器' }}
   </div>
 
   <template v-else>
@@ -296,6 +315,28 @@ async function onMenuSelect(id: string): Promise<void> {
 }
 .retry:hover {
   border-color: var(--accent-text);
+}
+/* 原始报错折叠区：默认收起，不糊主文案 */
+.err-detail {
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+}
+.err-detail summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--fg-muted);
+}
+.err-detail pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: var(--bg-hover);
+  border-radius: var(--r-xs);
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--fg-muted);
+  max-height: 120px;
+  overflow-y: auto;
+  user-select: text;
 }
 .container-list.stale {
   opacity: 0.5;

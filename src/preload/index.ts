@@ -79,14 +79,14 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.sftpWriteText, sessionId, path, content, expectedMtime, containerName),
 
   // ---- 容器 ----
-  listContainers: (parentSessionId) =>
-    ipcRenderer.invoke(IpcChannels.containerList, parentSessionId),
-  connectContainer: (parentSessionId, containerName, term) =>
-    ipcRenderer.invoke(IpcChannels.containerConnect, parentSessionId, containerName, term),
-  connectContainerLogs: (parentSessionId, containerName, term) =>
-    ipcRenderer.invoke(IpcChannels.containerLogs, parentSessionId, containerName, term),
-  controlContainer: (parentSessionId, containerName, action) =>
-    ipcRenderer.invoke(IpcChannels.containerControl, parentSessionId, containerName, action),
+  listContainers: (parentSessionId, chain) =>
+    ipcRenderer.invoke(IpcChannels.containerList, parentSessionId, chain),
+  connectContainer: (parentSessionId, containerName, term, chain) =>
+    ipcRenderer.invoke(IpcChannels.containerConnect, parentSessionId, containerName, term, chain),
+  connectContainerLogs: (parentSessionId, containerName, term, chain) =>
+    ipcRenderer.invoke(IpcChannels.containerLogs, parentSessionId, containerName, term, chain),
+  controlContainer: (parentSessionId, containerName, action, chain) =>
+    ipcRenderer.invoke(IpcChannels.containerControl, parentSessionId, containerName, action, chain),
   containerIp: (parentSessionId, containerName) =>
     ipcRenderer.invoke(IpcChannels.containerIp, parentSessionId, containerName),
   containerListeners: (parentSessionId, containerName) =>

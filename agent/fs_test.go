@@ -165,8 +165,8 @@ func TestFsChunkedWriteReadRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "big.bin")
 	// 两块写：一块正常 + 一块贴上限边界内的小尾巴
-	begin := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]string)
-	tmp := begin["tmp"]
+	begin := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]interface{})
+	tmp := begin["tmp"].(string)
 	if !strings.Contains(tmp, doxTmpMarker) {
 		t.Fatalf("tmp 名字没带标记: %s", tmp)
 	}
@@ -232,15 +232,15 @@ func TestFsChunkedCommitConflict(t *testing.T) {
 	info, _ := os.Stat(target)
 	oldMtime := info.ModTime().Unix()
 
-	begin := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]string)
+	begin := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]interface{})
 	pc, _ := json.Marshal(map[string]interface{}{
-		"tmp": begin["tmp"], "path": target, "expected_mtime": oldMtime - 100,
+		"tmp": begin["tmp"].(string), "path": target, "expected_mtime": oldMtime - 100,
 	})
 	if _, err := fsWriteCommit(pc); err == nil || !strings.Contains(err.Error(), "已被") {
 		t.Fatalf("mtime 不符必须拒绝覆盖: %v", err)
 	}
 	// 冲突拒绝后 tmp 应已清理（rename 前的拒绝分支）
-	if _, err := os.Stat(begin["tmp"]); !os.IsNotExist(err) {
+	if _, err := os.Stat(begin["tmp"].(string)); !os.IsNotExist(err) {
 		t.Fatal("冲突拒绝后临时文件应不存在（或被留待 abort）")
 	}
 }
@@ -250,6 +250,82 @@ func TestFsUsage(t *testing.T) {
 	r := call(t, fsUsage, `{"path":`+strconv.Quote(dir)+`}`).(map[string]interface{})
 	if r["total"].(uint64) == 0 || r["avail"].(uint64) == 0 {
 		t.Fatalf("statfs 返回异常: %+v", r)
+	}
+}
+
+// 续传：同一目标路径两次 begin 拿到同一个 tmp，第二次报告已存在的半截大小
+func TestFsWriteBeginResume(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "resume.bin")
+
+	b1 := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]interface{})
+	if b1["existing_size"].(int64) != 0 {
+		t.Fatalf("首次 begin 不应有 existing_size: %v", b1)
+	}
+	tmp := b1["tmp"].(string)
+
+	// 写半截（模拟传到一半断线）
+	chunk := base64.StdEncoding.EncodeToString([]byte("partial-"))
+	p, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "offset": 0, "data": chunk})
+	if _, err := fsWriteChunk(p); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重传：同路径 begin → 同 tmp + existing_size = 半截大小
+	b2 := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]interface{})
+	if b2["tmp"].(string) != tmp {
+		t.Fatalf("tmp 不确定，续传无从谈起: %s vs %s", b2["tmp"], tmp)
+	}
+	if b2["existing_size"].(int64) != 8 {
+		t.Fatalf("existing_size 应为 8: %v", b2["existing_size"])
+	}
+
+	// 从断点续写剩余部分再 commit，内容应完整无缝
+	rest := base64.StdEncoding.EncodeToString([]byte("content"))
+	p2, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "offset": 8, "data": rest})
+	if _, err := fsWriteChunk(p2); err != nil {
+		t.Fatal(err)
+	}
+	pc, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "path": target})
+	if _, err := fsWriteCommit(pc); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "partial-content" {
+		t.Fatalf("续传结果不符: %q", got)
+	}
+}
+
+func TestFsDu(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "big/sub"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "small"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "big/sub/f.bin"), make([]byte, 4096), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "small/t.txt"), []byte("x"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "loose.txt"), make([]byte, 100), 0o644)
+
+	r := call(t, fsDu, `{"path":`+strconv.Quote(dir)+`}`).(map[string]interface{})
+	ents := r["entries"].([]duEntry)
+	if len(ents) != 3 {
+		t.Fatalf("应列出 3 个直接子项: %+v", ents)
+	}
+	// 按大小降序：big（含子树 4096）在最前
+	if ents[0].Name != "big" || !ents[0].IsDir || ents[0].Size < 4096 {
+		t.Fatalf("top1 应为 big 目录: %+v", ents[0])
+	}
+	if r["total"].(int64) < 4096+100 {
+		t.Fatalf("total 偏小: %v", r["total"])
+	}
+	if r["truncated"].(bool) {
+		t.Fatal("小目录不应 truncated")
+	}
+
+	// 文件 / 相对路径必须拒绝
+	if _, err := fsDu(json.RawMessage(`{"path":` + jq(filepath.Join(dir, "loose.txt")) + `}`)); err == nil {
+		t.Fatal("对文件 fs_du 应报错")
+	}
+	if _, err := fsDu(json.RawMessage(`{"path":"rel"}`)); err == nil {
+		t.Fatal("相对路径应拒绝")
 	}
 }
 

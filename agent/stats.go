@@ -44,6 +44,8 @@ type statsPayload struct {
 	MemTotalMB int       `json:"mem_total_mb"`
 	MemUsedMB  int       `json:"mem_used_mb"`
 	Gpus       []gpuStat `json:"gpus,omitempty"`
+	// 帧间 CPU 差分 top3（「谁在吃 CPU」）；首轮无基准为空
+	TopProcs []topProc `json:"top_procs,omitempty"`
 }
 
 // cpuTimes：/proc/stat 第一行（聚合行）的 idle 与 total jiffies
@@ -173,7 +175,8 @@ func queryGPUs(nvidiaSmi string) []gpuStat {
 }
 
 // watchStats 周期推送系统状态。首帧用 200ms 短采样让 UI 尽快有数，
-// 之后每个 tick 与上一帧差分。采集失败（非 Linux）推 stats_error 并退出。
+// 之后每个 tick 与上一帧差分。top_procs 复用帧间差分（帧即采样点，
+// 不需要额外睡一个采样窗）。采集失败（非 Linux）推 stats_error 并退出。
 func watchStats(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 	nvidiaSmi, _ := exec.LookPath("nvidia-smi")
 
@@ -188,6 +191,7 @@ func watchStats(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 		_ = enc.Encode(event{Event: "stats_error", Data: map[string]string{"error": err.Error()}})
 		return
 	}
+	prevProcs := sampleProcTimes()
 
 	push := func() bool {
 		f, err := os.Open("/proc/stat")
@@ -209,13 +213,16 @@ func watchStats(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 		if err != nil {
 			return true
 		}
+		curProcs := sampleProcTimes()
 		_ = enc.Encode(event{Event: "stats", Data: statsPayload{
 			CPUPercent: cpuPercent(prev, cur),
 			MemTotalMB: totalMB,
 			MemUsedMB:  usedMB,
 			Gpus:       queryGPUs(nvidiaSmi),
+			TopProcs:   topProcs(prevProcs, curProcs, float64(cur.total-prev.total), float64(totalMB)*1024*1024, 3),
 		}})
 		prev = cur
+		prevProcs = curProcs
 		return true
 	}
 
