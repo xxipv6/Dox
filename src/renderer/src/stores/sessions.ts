@@ -661,6 +661,16 @@ export const useSessionStore = defineStore('sessions', () => {
     sftpVisible.value = !sftpVisible.value
   }
 
+  // ---- 进程管理面板 ----
+  /** 进程面板目标：SSH 标签 → 宿主机；远端容器标签 → 父会话 + 容器名 */
+  const procTarget = ref<{ sessionId: string; containerName?: string; label: string } | null>(null)
+  function openProcPanel(target: { sessionId: string; containerName?: string; label: string }): void {
+    procTarget.value = target
+  }
+  function closeProcPanel(): void {
+    procTarget.value = null
+  }
+
   function toggleFollowTerminal(): void {
     followTerminal.value = !followTerminal.value
   }
@@ -694,6 +704,9 @@ export const useSessionStore = defineStore('sessions', () => {
     clearEditSessionRequest,
     sftpVisible,
     toggleSftp,
+    procTarget,
+    openProcPanel,
+    closeProcPanel,
     followTerminal,
     toggleFollowTerminal,
     cwdBySession,

@@ -14,6 +14,7 @@ import { _electron as electron } from 'playwright'
 import { Client } from 'ssh2'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { createHash, randomBytes } from 'node:crypto'
 
 const host = process.argv[2] ?? 'localhost'
 const port = Number(process.argv[3] ?? 2222)
@@ -221,6 +222,53 @@ check('容器目录递归下载（含子目录）', dlDirA === 'key=value1\n' &&
 // 中转目录不留痕
 const stageLeft = await remoteExec(`ls -d /tmp/.dox-stage-* 2>/dev/null || echo CLEAN`)
 check('宿主机中转目录已清理', stageLeft.includes('CLEAN'), stageLeft)
+
+// ---- 大文件直传（agent ≥0.4.0 分块流式，不经宿主中转/docker cp）----
+/** 等队列清空（所有任务到终态），返回任务列表 */
+async function waitTransfers() {
+  for (let i = 0; i < 90; i++) {
+    const tasks = await win.evaluate(() => window.api.listTransfers())
+    const active = tasks.filter((t) => t.status === 'pending' || t.status === 'active')
+    if (!active.length) return tasks
+    await win.waitForTimeout(500)
+  }
+  return win.evaluate(() => window.api.listTransfers())
+}
+writeFileSync(`${LOCAL_DIR}/big.bin`, randomBytes(6 * 1024 * 1024))
+const localSha = createHash('sha256').update(readFileSync(`${LOCAL_DIR}/big.bin`)).digest('hex')
+await win.evaluate(
+  async ({ sid, inner, localDir }) => {
+    await window.api.enqueueDropped(sid, '/tmp/doxfs-test', [
+      { path: `${localDir}/big.bin`, name: 'big.bin', size: 0 }
+    ], inner)
+  },
+  { sid: upSession, inner: INNER, localDir: LOCAL_DIR }
+)
+const upTasks = await waitTransfers()
+const bigUp = upTasks.find((t) => t.fileName === 'big.bin' && t.direction === 'upload')
+check('大文件上传任务完成（6MB）', bigUp?.status === 'done', JSON.stringify(bigUp ?? {}).slice(0, 200))
+const upSha = (await ctrExec(`sha256sum ${CTR_DIR}/big.bin | cut -d' ' -f1`)).trim()
+check('大文件上传字节一致（sha256）', upSha === localSha, `${upSha} vs ${localSha}`)
+
+// 直传下载回来再比一次
+await app.evaluate(({ dialog }) => {
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: '/tmp/doxfs-local/dl-big.bin' })
+})
+await win.evaluate(
+  async ({ sid, inner }) => window.api.download(sid, '/tmp/doxfs-test/big.bin', 'big.bin', inner),
+  { sid: upSession, inner: INNER }
+)
+const dlTasks = await waitTransfers()
+const bigDl = dlTasks.find((t) => t.remotePath.endsWith('/big.bin') && t.direction === 'download')
+check('大文件下载任务完成', bigDl?.status === 'done', JSON.stringify(bigDl ?? {}).slice(0, 200))
+let dlSha = ''
+try {
+  dlSha = createHash('sha256').update(readFileSync(`${LOCAL_DIR}/dl-big.bin`)).digest('hex')
+} catch { /* 没落地 */ }
+check('大文件下载字节一致（sha256）', dlSha === localSha, `${dlSha} vs ${localSha}`)
+// 直传路径全程不碰宿主中转目录，再查一次零残留
+const stageLeft2 = await remoteExec(`ls -d /tmp/.dox-stage-* 2>/dev/null || echo CLEAN`)
+check('直传后中转目录仍零残留', stageLeft2.includes('CLEAN'), stageLeft2)
 
 // ---- 递归删除 ----
 // 打包放在删除之前：up-dir 还在，把它和 hello.txt 一起打成包（agent 用 Go 标准库产包）

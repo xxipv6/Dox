@@ -104,7 +104,7 @@ if ((await sectionHead.getAttribute('aria-expanded')) === 'false') {
   await win.waitForTimeout(600)
 }
 // 未安装态：描述 + 按钮
-await win.locator('.agent-desc').waitFor({ timeout: 10000 })
+await win.locator('.agent-desc').first().waitFor({ timeout: 10000 })
 check('未安装态显示说明与按钮', (await win.locator('button:has-text("安装到这台机器")').count()) === 1)
 await win.screenshot({ path: 'shots/64-agent-not-installed.png' })
 

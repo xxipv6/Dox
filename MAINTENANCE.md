@@ -285,6 +285,20 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
 - **UI 验证脚本的选择器会随界面改版过期。** verify-ui-flows 的 `.add-btn`
   在侧栏改版后不复存在（改成 `button[title="添加设备"]`），超时才暴露。
   界面结构改动时顺手 grep 一遍 scripts/ 里的对应选择器。
+- **SSH exec 通道里 `cmd &` 的后台进程会随通道关闭被一起收掉**
+  （进程组同生共死；而且子进程继承 stdout 时通道还会吊着不关）。
+  测试要在远端驻留的靶子进程（sleep/nc）用
+  `setsid cmd </dev/null >/dev/null 2>&1 &`；容器里用 `docker exec -d` 没这个问题。
+- **busybox `ps` 默认只显示 comm，不带参数**（`ps w` 也一样）——
+  `ps | grep 'sleep 300'` 永远匹配不到，活着也报 GONE。
+  断言带参数的命令用 `ps -o pid,args`，或直接扫 `/proc/*/cmdline`。
+- **TransferTask.fileName 取的是 localPath 的 basename** —— 下载任务的
+  fileName 是本地存盘名（保存对话框选的那个），不是远端文件名。
+  脚本按任务找下载项时用 `remotePath` 匹配，别用 fileName。
+- **泛通道必须配白名单。** `agentCall(method, params)` 给渲染层开了
+  「任意 agent 方法」的形，主进程 handler 必须校验 method ∈ 显式集合
+  （src/main/ipc/index.ts 的 AGENT_CALL_ALLOW）—— 泛通道不等于泛权限，
+  加新 agent 方法时记得同步白名单，否则调用方拿到的是「不在白名单」的错。
 
 ---
 

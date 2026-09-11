@@ -350,3 +350,38 @@ export interface LocalTermOptions extends TermSize {
   /** 不传则用设置里的默认 shell */
   shellId?: string
 }
+
+// ---- 进程管理（agent 0.4.0 ps_* / 宿主机 ps 命令退化）----
+
+export interface ProcInfo {
+  pid: number
+  ppid: number
+  user: string
+  rssBytes: number
+  cpuPercent: number
+  memPercent: number
+  command: string
+}
+
+export interface ProcListResult {
+  /** agent = 瞬时差分 CPU；fallback-ps = ps 命令退化（CPU 为存活期均值） */
+  via: 'agent' | 'fallback-ps'
+  processes: ProcInfo[]
+}
+
+/** 路径所在文件系统的用量（statvfs / agent fs_usage） */
+export interface DiskUsage {
+  total: number
+  used: number
+  avail: number
+  mount?: string
+}
+
+/** exec 静默执行的结果（argv 不经 shell） */
+export interface ExecResult {
+  exit_code: number
+  stdout: string
+  stderr: string
+  timed_out: boolean
+  truncated: boolean
+}

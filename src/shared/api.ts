@@ -4,6 +4,7 @@ import type {
   CommandSnippet,
   ContainerControlAction,
   ContainerProbeResult,
+  DiskUsage,
   DownloadRequest,
   DroppedFile,
   FileEntry,
@@ -13,6 +14,7 @@ import type {
   HostKeyVerifyRequest,
   LayoutSnapshot,
   LocalShellInfo,
+  ProcListResult,
   RemoteFileContent,
   SavedSession,
   SaveSessionInput,
@@ -221,6 +223,22 @@ export interface DoxApi {
   /** 文件面板持有/释放 agent 通道（面板打开期间通道不被退订收掉） */
   agentFsHold(sessionId: string, containerName?: string): Promise<void>
   agentFsRelease(sessionId: string, containerName?: string): Promise<void>
+  /**
+   * agent 白名单泛通道（0.4.0 起的显式方法：ps_list/ps_kill/exec/fs_usage/fs_*）。
+   * method 不在白名单会被主进程拒绝。
+   */
+  agentCall(
+    sessionId: string,
+    containerName: string | undefined,
+    method: string,
+    params: unknown
+  ): Promise<unknown>
+  /** 进程列表（agent ps_list / 宿主机 ps 命令退化；容器无 agent 会报错指路） */
+  procList(sessionId: string, containerName?: string): Promise<ProcListResult>
+  /** 结束进程（TERM/KILL 白名单） */
+  procKill(sessionId: string, pid: number, signal: 15 | 9, containerName?: string): Promise<void>
+  /** 路径所在文件系统的用量；目标不支持时返回 null（调用方不显示即可） */
+  sftpDiskUsage(sessionId: string, path: string, containerName?: string): Promise<DiskUsage | null>
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>
   clearFinishedTransfers(): Promise<void>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { DroppedFile, FileEntry, TransferTask } from '@shared/types'
+import type { DiskUsage, DroppedFile, FileEntry, TransferTask } from '@shared/types'
 import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
@@ -36,6 +36,23 @@ const agentOutdated = ref('')
 const holdAcquired = ref(false)
 /** 打包进行中（远端 tar 最长 5 分钟，没反馈就像卡死） */
 const archiving = ref(false)
+
+// ---- 磁盘用量条（宿主 statvfs 扩展 / 容器 agent fs_usage；不支持就不显示）----
+const usage = ref<DiskUsage | null>(null)
+let usageFetchedAt = 0
+
+async function refreshUsage(): Promise<void> {
+  // 10s 缓存：用量变化慢，每次 cd 都问一次远端是浪费
+  if (Date.now() - usageFetchedAt < 10_000) return
+  usageFetchedAt = Date.now()
+  usage.value = await window.api
+    .sftpDiskUsage(fsSessionId.value, cwd.value || '/', ctrName.value)
+    .catch(() => null)
+}
+
+const usagePercent = computed(() =>
+  usage.value && usage.value.total > 0 ? Math.round((usage.value.used / usage.value.total) * 100) : 0
+)
 
 // 内联新建文件夹 / 重命名
 const creatingDir = ref(false)
@@ -114,6 +131,8 @@ async function load(dir?: string): Promise<void> {
   } finally {
     loading.value = false
   }
+  // 顺手刷新磁盘用量（自带 10s 缓存；失败静默 —— 用量条是加分项不是刚需）
+  void refreshUsage()
 }
 
 async function init(): Promise<void> {
@@ -589,6 +608,17 @@ onBeforeUnmount(() => {
       <div v-if="!entries.length && !creatingDir" class="hint">空目录，拖拽文件到此处上传</div>
     </div>
 
+    <!-- 磁盘用量条：目标不支持（无 statvfs 也无 agent）时整条不出现 -->
+    <div
+      v-if="usage"
+      class="usage-bar"
+      :class="{ warn: usagePercent >= 85 }"
+      :title="usage.mount ? `挂载点 ${usage.mount}` : undefined"
+    >
+      <span class="usage-track"><span class="usage-fill" :style="{ width: usagePercent + '%' }"></span></span>
+      <span class="usage-text">{{ formatSize(usage.used) }} / {{ formatSize(usage.total) }}（{{ usagePercent }}%）</span>
+    </div>
+
     <ContextMenu
       v-if="menu"
       :x="menu.x"
@@ -771,5 +801,39 @@ onBeforeUnmount(() => {
   color: var(--fg-muted);
   font-size: var(--fs-sm);
   text-align: center;
+}
+/* 磁盘用量条：贴面板底部，>85% 整条转警示色 */
+.usage-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.usage-track {
+  flex: 1;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.usage-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--accent-text);
+}
+.usage-bar.warn .usage-fill {
+  background: var(--warning-text);
+}
+.usage-bar.warn .usage-text {
+  color: var(--warning-text);
+}
+.usage-text {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 </style>

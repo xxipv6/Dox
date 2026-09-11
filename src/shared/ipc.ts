@@ -57,6 +57,16 @@ export const IpcChannels = {
   /** 文件面板持有/释放 agent 通道（持有期间退订归零也不关通道） */
   agentFsHold: 'agent:fsHold',
   agentFsRelease: 'agent:fsRelease',
+  /**
+   * 白名单泛通道：method 只允许 agent 0.4.0 起的显式方法（主进程侧校验），
+   * 免得每个方法各开一条通道。
+   */
+  agentCall: 'agent:call',
+  // 进程管理（目标装了 agent ≥0.4.0 走 ps_*；宿主机退化 ps 命令；容器没装则报错指路）
+  procList: 'proc:list',
+  procKill: 'proc:kill',
+  /** 路径所在文件系统的用量（宿主 SFTP statvfs 扩展 / 容器 agent fs_usage；不支持返回 null） */
+  sftpDiskUsage: 'sftp:diskUsage',
   /*
    * 容器终端（Docker / Podman）。
    *

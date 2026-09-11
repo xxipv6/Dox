@@ -1,19 +1,24 @@
 // 文件系统方法：让应用能浏览/编辑容器（或宿主机）里的文件。
 //
 // 这是 Dev Containers  parity 的核心 —— vscode-server 在容器里提供的
-// 第一项能力就是文件访问。协议走 NDJSON，二进制内容 base64；
-// 大文件传输（上传/下载）刻意**不**走这里 —— 那是宿主机 /tmp 中转
-// docker cp 的活，协议内传大文件又慢又占内存。
+// 第一项能力就是文件访问。协议走 NDJSON，二进制内容 base64。
+// 0.4.0 起加了分块流式读写（fs_read_chunk / fs_write_begin|chunk|commit|abort）：
+// 大文件传输直走这条通道（真进度、无宿主机中转、distroless 可传），
+// 整读整写（fs_read/fs_write）仍服务编辑器小文件。
 package main
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 type fsEntry struct {
@@ -256,6 +261,218 @@ func dispatchFS(method string, params json.RawMessage) (interface{}, bool, error
 	case "fs_archive":
 		r, err := fsArchive(params)
 		return r, true, err
+	case "fs_usage":
+		r, err := fsUsage(params)
+		return r, true, err
+	case "fs_read_chunk":
+		r, err := fsReadChunk(params)
+		return r, true, err
+	case "fs_write_begin":
+		r, err := fsWriteBegin(params)
+		return r, true, err
+	case "fs_write_chunk":
+		r, err := fsWriteChunk(params)
+		return r, true, err
+	case "fs_write_commit":
+		r, err := fsWriteCommit(params)
+		return r, true, err
+	case "fs_write_abort":
+		r, err := fsWriteAbort(params)
+		return r, true, err
 	}
 	return nil, false, nil
+}
+
+// ---- fs_usage：statfs 某路径所在文件系统的容量 ----
+
+func fsUsage(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Path == "" {
+		return nil, errors.New("fs_usage 需要 path")
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(p.Path, &st); err != nil {
+		return nil, err
+	}
+	bsize := uint64(st.Bsize)
+	total := st.Blocks * bsize
+	free := st.Bfree * bsize
+	return map[string]interface{}{
+		"total": total,
+		"used":  total - free,
+		"avail": st.Bavail * bsize, // 非 root 可用（root 保留块之后）
+		"mount": mountPointOf(p.Path),
+	}, nil
+}
+
+// mountPointOf：/proc/mounts 里包含 path 的最长挂载点（展示用，不关键）
+func mountPointOf(path string) string {
+	raw, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return ""
+	}
+	best := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		mp := f[1]
+		if mp != "/" && !strings.HasPrefix(path, mp+"/") {
+			continue
+		}
+		if len(mp) > len(best) {
+			best = mp
+		}
+	}
+	return best
+}
+
+// ---- 分块流式读写：大文件传输直走 agent 通道（替代 SFTP+中转+docker cp 接力）----
+
+const fsChunkMaxLen = 4 << 20 // 单块 4MB 上限
+
+func fsReadChunk(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Path   string `json:"path"`
+		Offset int64  `json:"offset"`
+		Length int    `json:"length"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Path == "" {
+		return nil, errors.New("fs_read_chunk 需要 path/offset/length")
+	}
+	if p.Offset < 0 || p.Length <= 0 || p.Length > fsChunkMaxLen {
+		return nil, fmt.Errorf("offset/length 越界（单块上限 %d 字节）", fsChunkMaxLen)
+	}
+	f, err := os.Open(p.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, errors.New("是目录，不是文件")
+	}
+	buf := make([]byte, p.Length)
+	n, _ := f.ReadAt(buf, p.Offset)
+	buf = buf[:n]
+	return map[string]interface{}{
+		"data":  base64.StdEncoding.EncodeToString(buf),
+		"eof":   p.Offset+int64(n) >= info.Size(),
+		"size":  info.Size(),
+		"mtime": info.ModTime().Unix(),
+	}, nil
+}
+
+// doxTmpMarker：分块写临时名的标记。commit/abort 只认带这个标记的路径，
+// 否则一个构造好的 tmp 参数就能把任意文件 rename 走 / 删掉。
+const doxTmpMarker = ".dox-tmp-"
+
+func guardTmpPath(tmp string) error {
+	if !filepath.IsAbs(tmp) || !strings.Contains(filepath.Base(tmp), doxTmpMarker) {
+		return errors.New("非法的临时文件路径")
+	}
+	return nil
+}
+
+func fsWriteBegin(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Path == "" || !filepath.IsAbs(p.Path) {
+		return nil, errors.New("fs_write_begin 需要绝对路径 path")
+	}
+	rand4 := make([]byte, 4)
+	if _, err := rand.Read(rand4); err != nil {
+		return nil, err
+	}
+	tmp := p.Path + doxTmpMarker + hex.EncodeToString(rand4)
+	// O_EXCL：绝不覆盖已存在的文件
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	_ = f.Close()
+	return map[string]string{"tmp": tmp}, nil
+}
+
+func fsWriteChunk(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Tmp    string `json:"tmp"`
+		Offset int64  `json:"offset"`
+		Data   string `json:"data"` // base64
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Tmp == "" {
+		return nil, errors.New("fs_write_chunk 需要 tmp/offset/data")
+	}
+	if err := guardTmpPath(p.Tmp); err != nil {
+		return nil, err
+	}
+	data, err := base64.StdEncoding.DecodeString(p.Data)
+	if err != nil {
+		return nil, errors.New("data 不是合法 base64")
+	}
+	if len(data) > fsChunkMaxLen {
+		return nil, fmt.Errorf("单块超过 %d 字节上限", fsChunkMaxLen)
+	}
+	f, err := os.OpenFile(p.Tmp, os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if _, err := f.WriteAt(data, p.Offset); err != nil {
+		return nil, err
+	}
+	return map[string]int{"written": len(data)}, nil
+}
+
+func fsWriteCommit(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Tmp           string `json:"tmp"`
+		Path          string `json:"path"`
+		ExpectedMtime *int64 `json:"expected_mtime"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Tmp == "" || p.Path == "" {
+		return nil, errors.New("fs_write_commit 需要 tmp 与 path")
+	}
+	if err := guardTmpPath(p.Tmp); err != nil {
+		return nil, err
+	}
+	// 乐观锁：与 fs_write 同一条判定（两处文案保持一致，渲染层靠它认冲突）。
+	// 冲突时顺手删掉临时文件：commit 是最后一步，被拒后这份内容已无用处，
+	// 留着只会随失败传输堆积
+	if p.ExpectedMtime != nil {
+		if info, err := os.Stat(p.Path); err == nil && info.ModTime().Unix() != *p.ExpectedMtime {
+			_ = os.Remove(p.Tmp)
+			return nil, errors.New("文件已被他人修改，拒绝覆盖（重新打开后再试）")
+		}
+	}
+	if err := os.Rename(p.Tmp, p.Path); err != nil {
+		_ = os.Remove(p.Tmp)
+		return nil, err
+	}
+	info, err := os.Stat(p.Path)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]int64{"mtime": info.ModTime().Unix()}, nil
+}
+
+func fsWriteAbort(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Tmp string `json:"tmp"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.Tmp == "" {
+		return nil, errors.New("fs_write_abort 需要 tmp")
+	}
+	if err := guardTmpPath(p.Tmp); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(p.Tmp)
+	return map[string]bool{"ok": true}, nil
 }

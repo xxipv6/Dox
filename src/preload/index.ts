@@ -133,6 +133,14 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.agentFsHold, sessionId, containerName),
   agentFsRelease: (sessionId, containerName) =>
     ipcRenderer.invoke(IpcChannels.agentFsRelease, sessionId, containerName),
+  agentCall: (sessionId, containerName, method, params) =>
+    ipcRenderer.invoke(IpcChannels.agentCall, sessionId, containerName, method, params),
+  procList: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.procList, sessionId, containerName),
+  procKill: (sessionId, pid, signal, containerName) =>
+    ipcRenderer.invoke(IpcChannels.procKill, sessionId, pid, signal, containerName),
+  sftpDiskUsage: (sessionId, path, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpDiskUsage, sessionId, path, containerName),
   onAgentStats: (cb) => {
     const listener = (
       _e: IpcRendererEvent,

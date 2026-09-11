@@ -1,0 +1,258 @@
+// ps_list / ps_kill：直读 /proc 的进程表，不依赖 ps 二进制（distroless 容器也能列）。
+//
+// CPU% 用两次采样差分（与 stats.go 的系统级 CPU 同一口径）：先记一轮
+// 每进程 jiffies 与系统总 jiffies，睡 sample_ms 再记一轮，差值相除。
+// 进程在两次采样之间消失是常态（短命令），逐 pid 忽略错误即可。
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+)
+
+type procInfo struct {
+	Pid        int     `json:"pid"`
+	Ppid       int     `json:"ppid"`
+	User       string  `json:"user"`
+	RssBytes   int64   `json:"rss_bytes"`
+	CPUPercent float64 `json:"cpu_percent"`
+	MemPercent float64 `json:"mem_percent"`
+	Command    string  `json:"command"`
+}
+
+// procSample：一次采样里一个进程需要的全部字段（uid 与命令在第二轮假定不变）
+type procSample struct {
+	pid     int
+	ppid    int
+	utime   uint64
+	stime   uint64
+	rss     int64
+	uid     string
+	command string
+}
+
+// parseProcStat 解析 /proc/<pid>/stat。
+// comm 在括号里且可以含空格甚至括号本身（线程名 "（lunarlens）" 这类），
+// 所以不能用 Fields 直接切：先找最后一个 ')'，后面的字段从 state(3) 开始数。
+func parseProcStat(content string) (pid, ppid int, utime, stime uint64, comm string, ok bool) {
+	open := strings.IndexByte(content, '(')
+	closeIdx := strings.LastIndexByte(content, ')')
+	if open < 0 || closeIdx < open {
+		return 0, 0, 0, 0, "", false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(content[:open]))
+	if err != nil {
+		return 0, 0, 0, 0, "", false
+	}
+	comm = content[open+1 : closeIdx]
+	rest := strings.Fields(content[closeIdx+1:])
+	// rest[0]=state(3) rest[1]=ppid(4) … rest[11]=utime(14) rest[12]=stime(15)
+	if len(rest) < 13 {
+		return 0, 0, 0, 0, "", false
+	}
+	ppid, _ = strconv.Atoi(rest[1])
+	utime, _ = strconv.ParseUint(rest[11], 10, 64)
+	stime, _ = strconv.ParseUint(rest[12], 10, 64)
+	return pid, ppid, utime, stime, comm, true
+}
+
+// readProcSample 读一个 pid 的 stat/status/cmdline；进程已走返回 ok=false
+func readProcSample(pid int) (procSample, bool) {
+	var s procSample
+	statRaw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return s, false
+	}
+	spid, ppid, utime, stime, comm, ok := parseProcStat(string(statRaw))
+	if !ok || spid != pid {
+		return s, false
+	}
+	s.pid, s.ppid, s.utime, s.stime = pid, ppid, utime, stime
+
+	// status：Uid（第一列 real uid）与 VmRSS（kB）
+	if statusRaw, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)); err == nil {
+		for _, line := range strings.Split(string(statusRaw), "\n") {
+			if strings.HasPrefix(line, "Uid:") {
+				if f := strings.Fields(line); len(f) >= 2 {
+					s.uid = f[1]
+				}
+			} else if strings.HasPrefix(line, "VmRSS:") {
+				if f := strings.Fields(line); len(f) >= 2 {
+					kb, _ := strconv.ParseInt(f[1], 10, 64)
+					s.rss = kb * 1024
+				}
+			}
+		}
+	}
+
+	// cmdline 是 NUL 分隔；内核线程为空，退回 [comm]
+	if cmdRaw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		cmd := strings.Join(strings.Fields(strings.ReplaceAll(string(cmdRaw), "\x00", " ")), " ")
+		if cmd != "" {
+			s.command = cmd
+		}
+	}
+	if s.command == "" {
+		s.command = "[" + comm + "]"
+	}
+	return s, true
+}
+
+// passwdMap：uid → 用户名。distroless 容器可能没有 /etc/passwd —— 那就显示数字 uid。
+func passwdMap() map[string]string {
+	m := map[string]string{}
+	raw, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return m
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Split(line, ":")
+		if len(f) >= 3 {
+			m[f[2]] = f[0]
+		}
+	}
+	return m
+}
+
+func listPids() ([]int, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, e := range entries {
+		if pid, err := strconv.Atoi(e.Name()); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+func readTotalCPUTimes() (cpuTimes, error) {
+	f, err := os.Open("/proc/stat")
+	if err != nil {
+		return cpuTimes{}, err
+	}
+	defer f.Close()
+	return readCPUTimes(f)
+}
+
+// readMemTotalBytes 读 /proc/meminfo 的 MemTotal（parseMemInfo 返回 MB，换回字节）
+func readMemTotalBytes() (float64, error) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	totalMB, _, err := parseMemInfo(f)
+	return float64(totalMB) * 1024 * 1024, err
+}
+
+func psList(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		SampleMs int `json:"sample_ms"`
+	}
+	_ = json.Unmarshal(params, &p)
+	if p.SampleMs <= 0 {
+		p.SampleMs = 300
+	}
+	if p.SampleMs > 5000 {
+		p.SampleMs = 5000
+	}
+
+	pids, err := listPids()
+	if err != nil {
+		return nil, err
+	}
+	first := map[int]procSample{}
+	for _, pid := range pids {
+		if s, ok := readProcSample(pid); ok {
+			first[pid] = s
+		}
+	}
+	totalBefore, err := readTotalCPUTimes()
+	if err != nil {
+		return nil, err
+	}
+
+	time.Sleep(time.Duration(p.SampleMs) * time.Millisecond)
+
+	totalAfter, err := readTotalCPUTimes()
+	if err != nil {
+		return nil, err
+	}
+	totalDelta := float64(totalAfter.total - totalBefore.total)
+	if totalDelta <= 0 {
+		totalDelta = 1
+	}
+	ncpu := float64(runtime.NumCPU())
+
+	memTotalBytes, memErr := readMemTotalBytes()
+	passwd := passwdMap()
+
+	var out []procInfo
+	for _, pid := range pids {
+		before, seen := first[pid]
+		if !seen {
+			continue // 第一轮之后才出生的进程没有差分基准，下轮再见
+		}
+		after, ok := readProcSample(pid)
+		if !ok {
+			continue // 采样间隙退出了
+		}
+		user := passwd[after.uid]
+		if user == "" {
+			user = after.uid
+		}
+		info := procInfo{
+			Pid:        pid,
+			Ppid:       after.ppid,
+			User:       user,
+			RssBytes:   after.rss,
+			CPUPercent: float64(after.utime+after.stime-before.utime-before.stime) / totalDelta * ncpu * 100,
+			Command:    after.command,
+		}
+		if memErr == nil && memTotalBytes > 0 {
+			info.MemPercent = float64(after.rss) / memTotalBytes * 100
+		}
+		out = append(out, info)
+	}
+	if out == nil {
+		out = []procInfo{}
+	}
+	return map[string]interface{}{"processes": out}, nil
+}
+
+// ps_kill 的信号白名单：TERM 先礼后兵，KILL 兜底。其余信号（STOP/CONT…）
+// 对「结束任务」这个场景没有正当用途，不开口子。
+var allowedSignals = map[int]bool{int(syscall.SIGTERM): true, int(syscall.SIGKILL): true}
+
+func psKill(params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Pid    int `json:"pid"`
+		Signal int `json:"signal"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, errors.New("ps_kill 需要 pid 与 signal")
+	}
+	if !allowedSignals[p.Signal] {
+		return nil, errors.New("只允许 SIGTERM(15) / SIGKILL(9)")
+	}
+	if p.Pid < 2 {
+		return nil, errors.New("不允许动 init/kernel 进程")
+	}
+	if p.Pid == os.Getpid() {
+		return nil, errors.New("不允许结束 dox-agent 自己")
+	}
+	if err := syscall.Kill(p.Pid, syscall.Signal(p.Signal)); err != nil {
+		return nil, err
+	}
+	return map[string]bool{"ok": true}, nil
+}

@@ -14,6 +14,7 @@ import { ForwardManager } from './forward/ForwardManager'
 import { ContainerManager } from './container/ContainerManager'
 import { LocalPtyManager } from './local/LocalPtyManager'
 import { AgentManager } from './agent/AgentManager'
+import { ProcessService } from './proc/ProcessService'
 import { prewarmShells } from './local/shells'
 import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
@@ -65,6 +66,7 @@ const forwardManager = new ForwardManager(
 const containerManager = new ContainerManager((id) => sessionManager.getClient(id))
 const agentManager = new AgentManager(sessionManager, (id) => containerManager.runtimeBinary(id))
 agentFsHolder.bridge = agentManager
+const processService = new ProcessService((id) => sessionManager.getClient(id), agentManager)
 
 // 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped），
 // 并把它承载的容器终端通道一并收掉
@@ -181,7 +183,8 @@ app.whenReady().then(() => {
     localPtyManager,
     layoutStore,
     settingsStore,
-    agentManager
+    agentManager,
+    processService
   )
   createWindow()
   setupAutoUpdater()

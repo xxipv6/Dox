@@ -670,6 +670,20 @@ function focusTerminal(): void {
   term?.focus()
 }
 
+/** 进程管理的打开目标（同转发落点：SSH → 宿主机；远端容器 → 容器）。本地终端没有 */
+const procTarget = computed(() => forwardTarget())
+
+function openProcesses(): void {
+  closeMenu()
+  const t = forwardTarget()
+  if (!t) return
+  const tab = store.tabs.find((tb) => tb.panes.some((p) => p.sessionId === props.sessionId))
+  store.openProcPanel({
+    ...t,
+    label: t.containerName ? `容器 ${t.containerName}` : (tab?.title ?? '主机')
+  })
+}
+
 onMounted(() => {
   term = new Terminal({
     cursorBlink: true,
@@ -989,6 +1003,7 @@ defineExpose({ refitAndFocus })
       <button @click="pasteClipboard">粘贴<span class="hint">Ctrl+Shift+V</span></button>
       <button @click="clearTerminal">清屏<span class="hint">Ctrl+L</span></button>
       <button @click="focusTerminal">聚焦终端</button>
+      <button v-if="procTarget" @click="openProcesses">进程管理</button>
     </div>
   </div>
 </template>

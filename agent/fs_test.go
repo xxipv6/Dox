@@ -158,3 +158,106 @@ func jq(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// ---- 分块流式读写与 fs_usage ----
+
+func TestFsChunkedWriteReadRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "big.bin")
+	// 两块写：一块正常 + 一块贴上限边界内的小尾巴
+	begin := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]string)
+	tmp := begin["tmp"]
+	if !strings.Contains(tmp, doxTmpMarker) {
+		t.Fatalf("tmp 名字没带标记: %s", tmp)
+	}
+	chunk1 := base64.StdEncoding.EncodeToString([]byte("hello-"))
+	chunk2 := base64.StdEncoding.EncodeToString([]byte("chunked-world"))
+	p1, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "offset": 0, "data": chunk1})
+	if _, err := fsWriteChunk(p1); err != nil {
+		t.Fatal(err)
+	}
+	p2, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "offset": 6, "data": chunk2})
+	if _, err := fsWriteChunk(p2); err != nil {
+		t.Fatal(err)
+	}
+	// commit 前目标文件不该存在
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("commit 前目标文件不应存在")
+	}
+	pc, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "path": target})
+	if _, err := fsWriteCommit(pc); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "hello-chunked-world" {
+		t.Fatalf("roundtrip 内容不符: %q", got)
+	}
+
+	// 分块读回
+	pr, _ := json.Marshal(map[string]interface{}{"path": target, "offset": 6, "length": 7})
+	r := call(t, fsReadChunk, string(pr)).(map[string]interface{})
+	if base64DecodeString(t, r["data"].(string)) != "chunked" {
+		t.Fatalf("chunk 读内容不符: %v", r)
+	}
+	if r["eof"].(bool) {
+		t.Fatal("读到一半不该 eof")
+	}
+}
+
+func TestFsChunkedGuards(t *testing.T) {
+	// 伪造 tmp 路径（不带标记）必须被拒
+	bad, _ := json.Marshal(map[string]interface{}{"tmp": "/etc/passwd", "offset": 0, "data": "eA=="})
+	if _, err := fsWriteChunk(bad); err == nil {
+		t.Fatal("无标记 tmp 必须拒绝")
+	}
+	ab, _ := json.Marshal(map[string]interface{}{"tmp": "/etc/passwd"})
+	if _, err := fsWriteAbort(ab); err == nil {
+		t.Fatal("abort 无标记 tmp 必须拒绝")
+	}
+	// 相对路径 begin 拒绝
+	if _, err := fsWriteBegin(json.RawMessage(`{"path":"rel/a.txt"}`)); err == nil {
+		t.Fatal("begin 相对路径必须拒绝")
+	}
+	// 超长块拒绝
+	tooBig, _ := json.Marshal(map[string]interface{}{"path": "/tmp/x", "offset": 0, "length": fsChunkMaxLen + 1})
+	if _, err := fsReadChunk(tooBig); err == nil {
+		t.Fatal("超上限 length 必须拒绝")
+	}
+}
+
+func TestFsChunkedCommitConflict(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "exists.txt")
+	_ = os.WriteFile(target, []byte("old"), 0o644)
+	info, _ := os.Stat(target)
+	oldMtime := info.ModTime().Unix()
+
+	begin := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]string)
+	pc, _ := json.Marshal(map[string]interface{}{
+		"tmp": begin["tmp"], "path": target, "expected_mtime": oldMtime - 100,
+	})
+	if _, err := fsWriteCommit(pc); err == nil || !strings.Contains(err.Error(), "已被") {
+		t.Fatalf("mtime 不符必须拒绝覆盖: %v", err)
+	}
+	// 冲突拒绝后 tmp 应已清理（rename 前的拒绝分支）
+	if _, err := os.Stat(begin["tmp"]); !os.IsNotExist(err) {
+		t.Fatal("冲突拒绝后临时文件应不存在（或被留待 abort）")
+	}
+}
+
+func TestFsUsage(t *testing.T) {
+	dir := t.TempDir()
+	r := call(t, fsUsage, `{"path":`+strconv.Quote(dir)+`}`).(map[string]interface{})
+	if r["total"].(uint64) == 0 || r["avail"].(uint64) == 0 {
+		t.Fatalf("statfs 返回异常: %+v", r)
+	}
+}
+
+func base64DecodeString(t *testing.T, s string) string {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}

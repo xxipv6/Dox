@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import type { CommandSnippet } from '@shared/types'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import type { CommandSnippet, ExecResult } from '@shared/types'
+import { agentVersionOlder } from '@shared/agentVersion'
+import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import { useSessionStore } from '../stores/sessions'
+import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
+import Spinner from './Spinner.vue'
 import SidebarSection from './SidebarSection.vue'
 
 const api = window.api
@@ -36,6 +40,87 @@ function pasteOnly(s: CommandSnippet): void {
   const sessionId = store.activeSessionId
   if (!sessionId) return
   api.input(sessionId, s.command.replace(/\r?\n/g, '\r'))
+}
+
+// ---- 静默执行：不开终端，经 agent exec（argv 不经 shell）跑完拿回输出 ----
+
+/** 静默执行的目标（同进程面板：SSH 标签 → 宿主机；远端容器标签 → 容器） */
+const execTarget = computed<{ sessionId: string; containerName?: string } | null>(() => {
+  const tab = store.activeTab
+  const paneId = store.activePane?.sessionId
+  if (!tab || !paneId) return null
+  if (tab.kind === 'ssh') return { sessionId: paneId }
+  if (tab.kind === 'container' && tab.container && tab.container.parentSessionId !== LOCAL_CONTAINER_TARGET) {
+    return { sessionId: tab.container.parentSessionId, containerName: tab.container.containerName }
+  }
+  return null
+})
+
+/** 目标装了 agent ≥0.4.0 才有 exec 方法 */
+const execCapable = ref(false)
+watch(
+  execTarget,
+  async (t) => {
+    if (!t) {
+      execCapable.value = false
+      return
+    }
+    const st = await api.agentStatus(t.sessionId, t.containerName).catch(() => null)
+    execCapable.value = !!st?.installed && !!st.version && !agentVersionOlder(st.version, '0.4.0')
+  },
+  { immediate: true }
+)
+
+const execRunning = ref(false)
+const execResult = ref<{
+  name: string
+  code: number
+  stdout: string
+  stderr: string
+  timedOut: boolean
+  truncated: boolean
+} | null>(null)
+
+/**
+ * 静默执行：命令按行拆开逐条跑，每行按空白拆成 argv（不经 shell ——
+ * 管道/重定向这些 shell 特性用不了，需要它们就用「发送到终端」）。
+ * 某行失败（退出码非 0）即停，后面的行不再跑。
+ */
+async function runSilent(s: CommandSnippet): Promise<void> {
+  const t = execTarget.value
+  if (!t || execRunning.value) return
+  execRunning.value = true
+  execResult.value = null
+  const lines = s.command.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  let code = 0
+  let stdout = ''
+  let stderr = ''
+  let timedOut = false
+  let truncated = false
+  try {
+    for (const line of lines) {
+      const r = (await api.agentCall(t.sessionId, t.containerName, 'exec', {
+        argv: line.split(/\s+/)
+      })) as ExecResult
+      code = r.exit_code
+      if (r.stdout) stdout += (stdout ? '\n' : '') + r.stdout
+      if (r.stderr) stderr += (stderr ? '\n' : '') + r.stderr
+      timedOut ||= r.timed_out
+      truncated ||= r.truncated
+      if (r.exit_code !== 0 || r.timed_out) break
+    }
+  } catch (err) {
+    code = -1
+    stderr += (stderr ? '\n' : '') + errorText(err)
+  }
+  execResult.value = { name: s.name, code, stdout, stderr, timedOut, truncated }
+  execRunning.value = false
+}
+
+function copyExecResult(): void {
+  const r = execResult.value
+  if (!r) return
+  void navigator.clipboard.writeText([r.stdout, r.stderr].filter(Boolean).join('\n'))
 }
 
 function edit(s: CommandSnippet): void {
@@ -111,9 +196,30 @@ async function remove(s: CommandSnippet): Promise<void> {
         title="粘贴到命令行（不执行）"
         @click="pasteOnly(s)"
       ><Icon name="paste" /></button>
+      <button
+        class="icon-btn"
+        :class="{ dim: !execCapable }"
+        :title="execCapable ? '静默执行（经远程助手，不开终端；不支持管道/重定向）' : '静默执行需要目标装有远程助手 v0.4.0'"
+        :disabled="!execCapable || execRunning"
+        @click="runSilent(s)"
+      ><Icon name="zap" /></button>
       <button class="icon-btn" title="编辑" @click="edit(s)"><Icon name="pencil" /></button>
       <button class="icon-btn danger" title="删除" @click="remove(s)"><Icon name="x" /></button>
     </span>
+  </div>
+
+  <!-- 静默执行结果块：退出码 + 输出预览，可复制 -->
+  <div v-if="execRunning" class="exec-result"><Spinner :size="12" text="静默执行中…" /></div>
+  <div v-else-if="execResult" class="exec-result" :class="{ failed: execResult.code !== 0 }">
+    <div class="exec-head">
+      <span class="exec-code">「{{ execResult.name || '片段' }}」退出码 {{ execResult.code }}<template v-if="execResult.timedOut">（超时）</template></span>
+      <button class="icon-btn" title="复制输出" @click="copyExecResult"><Icon name="paste" /></button>
+      <button class="icon-btn" title="关闭" @click="execResult = null"><Icon name="x" /></button>
+    </div>
+    <pre v-if="execResult.stdout" class="exec-out">{{ execResult.stdout }}</pre>
+    <pre v-if="execResult.stderr" class="exec-out err">{{ execResult.stderr }}</pre>
+    <div v-if="execResult.truncated" class="exec-note">输出过长，已截断（64KB 上限）</div>
+    <div v-if="!execResult.stdout && !execResult.stderr && execResult.code === 0" class="exec-note">执行成功，无输出</div>
   </div>
   </SidebarSection>
 </template>
@@ -185,5 +291,48 @@ async function remove(s: CommandSnippet): Promise<void> {
 .snippet-actions {
   display: flex;
   flex-shrink: 0;
+}
+/* 静默执行结果块 */
+.exec-result {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-hover);
+  font-size: var(--fs-xs);
+}
+.exec-result.failed {
+  border-color: var(--danger);
+}
+.exec-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.exec-code {
+  flex: 1;
+  color: var(--fg-muted);
+}
+.failed .exec-code {
+  color: var(--danger-text);
+}
+.exec-out {
+  margin: 4px 0 0;
+  padding: 4px 6px;
+  background: var(--bg-panel);
+  border-radius: var(--r-xs);
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--font-mono, monospace);
+  user-select: text;
+}
+.exec-out.err {
+  color: var(--danger-text);
+}
+.exec-note {
+  margin-top: 4px;
+  color: var(--fg-muted);
 }
 </style>

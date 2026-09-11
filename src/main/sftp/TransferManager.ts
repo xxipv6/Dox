@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import { basename, join } from 'node:path'
 import type { SFTPWrapper } from 'ssh2'
 import type { TransferDirection, TransferTask } from '../../shared/types'
+import type { AgentStreamIO } from '../agent/agentStream'
 import { mkdirRemoteRecursive, posix, readdirP, statP, toPosixRel, unlinkP } from './sftpUtils'
 
 const CANCELED = '__transfer_canceled__'
@@ -33,6 +34,11 @@ interface InternalTask extends TransferTask {
   _prepare?: () => Promise<void>
   _finalize?: () => Promise<void>
   _cleanupStage?: () => void
+  /**
+   * 容器直传（agent ≥0.4.0 分块流式）：给了它就不走 SFTP pipe，
+   * prepare/finalize/stage 全不需要 —— 没有宿主机中转这回事了。
+   */
+  _stream?: (task: InternalTask) => Promise<void>
 }
 
 /**
@@ -56,6 +62,8 @@ export interface ContainerIO {
   statContainer(path: string): Promise<{ isDir: boolean; size: number }>
   /** 容器内列目录（agent fs_list，下载文件夹时递归展开用） */
   listContainer(dir: string): Promise<{ name: string; isDir: boolean; isSymlink: boolean; size: number }[]>
+  /** agent ≥0.4.0 的分块直传（有它就不走 docker cp 接力；见 agent/agentStream.ts） */
+  stream?: AgentStreamIO
 }
 
 interface LocalFileItem {
@@ -254,9 +262,28 @@ export class TransferManager {
     const stat = await fs.promises.stat(localPath)
 
     const makeTask = (lPath: string, rel: string, size: number, displayName?: string): InternalTask => {
+      const ctrPath = posix.join(remoteDir, rel)
+      // agent ≥0.4.0：分块直传，无中转、真进度、distroless 可传
+      const stream = io.stream
+      if (stream) {
+        const task = this.createTask(sessionId, 'upload', lPath, ctrPath, size, displayName, containerName)
+        task._stream = async (t) => {
+          await io.mkdirContainer(posix.dirname(ctrPath))
+          await stream.upload(
+            lPath,
+            ctrPath,
+            (n) => {
+              t.transferred = n
+              this.emitThrottled()
+            },
+            () => !!t._cancelRequested
+          )
+        }
+        return task
+      }
+      // 老 agent 回退：SFTP → 宿主机中转 → docker cp
       const stage = `/tmp/.dox-stage-${randomUUID().slice(0, 8)}`
       const stagePath = posix.join(stage, posix.basename(rel))
-      const ctrPath = posix.join(remoteDir, rel)
       const task = this.createTask(sessionId, 'upload', lPath, stagePath, size, displayName, containerName)
       task._prepare = async () => {
         const sftp = await this.getSftp(sessionId)
@@ -291,7 +318,7 @@ export class TransferManager {
     return []
   }
 
-  /** 从容器下载文件：docker cp 到宿主机中转 → SFTP 回本机 → 删中转 */
+  /** 从容器下载文件：agent ≥0.4.0 分块直传；老 agent 回退 docker cp 中转 */
   async enqueueDownloadContainer(
     sessionId: string,
     containerName: string,
@@ -300,6 +327,22 @@ export class TransferManager {
     io: ContainerIO
   ): Promise<TransferTask> {
     const st = await io.statContainer(remotePath)
+    const stream = io.stream
+    if (stream) {
+      const task = this.createTask(sessionId, 'download', localPath, remotePath, st.size, undefined, containerName)
+      task._stream = (t) =>
+        stream.download(
+          remotePath,
+          localPath,
+          (n) => {
+            t.transferred = n
+            this.emitThrottled()
+          },
+          () => !!t._cancelRequested
+        )
+      this.push(task)
+      return this.snapshot(task)
+    }
     const stage = `/tmp/.dox-stage-${randomUUID().slice(0, 8)}`
     const stagePath = posix.join(stage, posix.basename(remotePath))
     const task = this.createTask(sessionId, 'download', localPath, stagePath, st.size, undefined, containerName)
@@ -340,6 +383,33 @@ export class TransferManager {
           await fs.promises.mkdir(lChild, { recursive: true })
           await walk(rChild, lChild, rel)
         } else {
+          const lChild = join(lDir, item.name)
+          const stream = io.stream
+          if (stream) {
+            // 直传：不经过宿主中转，落盘就是最终位置
+            const task = this.createTask(
+              sessionId,
+              'download',
+              lChild,
+              rChild,
+              item.size,
+              `${rootName}/${rel}`,
+              containerName
+            )
+            task._stream = (t) =>
+              stream.download(
+                rChild,
+                lChild,
+                (n) => {
+                  t.transferred = n
+                  this.emitThrottled()
+                },
+                () => !!t._cancelRequested
+              )
+            this.push(task)
+            created.push(this.snapshot(task))
+            continue
+          }
           const stage = `/tmp/.dox-stage-${randomUUID().slice(0, 8)}`
           const stagePath = posix.join(stage, item.name)
           const task = this.createTask(
@@ -516,10 +586,16 @@ export class TransferManager {
     task.status = 'active'
     this.emit()
     try {
-      const sftp = await this.getSftp(task.sessionId)
-      if (task._prepare) await task._prepare()
-      await this.pipe(task, sftp)
-      if (task._finalize) await task._finalize()
+      if (task._stream) {
+        // 容器直传：agent 分块流式，全程不经 SFTP/中转（取消由 _stream 内
+        // 逐块检查 _cancelRequested 抛 CANCELED 实现）
+        await task._stream(task)
+      } else {
+        const sftp = await this.getSftp(task.sessionId)
+        if (task._prepare) await task._prepare()
+        await this.pipe(task, sftp)
+        if (task._finalize) await task._finalize()
+      }
       task.transferred = task.size
       this.settle(task, 'done')
     } catch (err) {

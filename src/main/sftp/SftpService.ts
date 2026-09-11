@@ -121,6 +121,43 @@ export class SftpService {
   }
 
   /**
+   * 路径所在文件系统的用量。三路按目标能力选：
+   *  - 容器 → agent fs_usage（容器有自己的 mount namespace，宿主的 statvfs 看不到里面）
+   *  - 宿主机 → OpenSSH 的 statvfs@openssh.com SFTP 扩展（不需要装任何东西）
+   * 都不行返回 null —— 用量条是加分项不是刚需，调用方藏起来即可，不值得报错。
+   */
+  async diskUsage(
+    sessionId: string,
+    path: string,
+    containerName?: string
+  ): Promise<{ total: number; used: number; avail: number; mount?: string } | null> {
+    try {
+      if (containerName) {
+        const r = (await this.fs(sessionId, containerName, 'fs_usage', { path })) as {
+          total: number
+          used: number
+          avail: number
+          mount?: string
+        }
+        return r
+      }
+      const sftp = await this.sessions.sftp(sessionId)
+      return await new Promise((resolve) => {
+        sftp.ext_openssh_statvfs(path, (err, info) => {
+          if (err || !info) return resolve(null)
+          const frsize = Number(info.f_frsize) || Number(info.f_bsize) || 0
+          const total = frsize * Number(info.f_blocks)
+          const avail = frsize * Number(info.f_bavail)
+          if (!total) return resolve(null)
+          resolve({ total, used: total - frsize * Number(info.f_bfree), avail })
+        })
+      })
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 打包：在远端**当前目录**把选中项打成 .tar.gz，返回包的路径。
    *
    * 不下载、不写本地 —— 下载有专门的入口，这里解决的是「先在远端归置成

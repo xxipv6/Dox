@@ -30,6 +30,30 @@ import type { ForwardManager } from '../forward/ForwardManager'
 import type { AgentManager } from '../agent/AgentManager'
 import { createContainerTransferIO } from '../container/containerTransfer'
 import type { ContainerIO } from '../sftp/TransferManager'
+import { agentVersionOlder } from '../../shared/agentVersion'
+import { createAgentStreamIO } from '../agent/agentStream'
+import type { ProcessService } from '../proc/ProcessService'
+
+/** agentCall 白名单泛通道允许的方法（0.4.0 起；fs_* 是既有方法，走这里也行） */
+const AGENT_CALL_ALLOW = new Set([
+  'ps_list',
+  'ps_kill',
+  'exec',
+  'fs_usage',
+  'fs_read_chunk',
+  'fs_write_begin',
+  'fs_write_chunk',
+  'fs_write_commit',
+  'fs_write_abort',
+  'fs_list',
+  'fs_stat',
+  'fs_read',
+  'fs_write',
+  'fs_mkdir',
+  'fs_rename',
+  'fs_delete',
+  'fs_archive'
+])
 
 /** 集中注册所有 IPC 路由 */
 export function registerIpc(
@@ -42,7 +66,8 @@ export function registerIpc(
   localPtyManager: LocalPtyManager,
   layoutStore: LayoutStore,
   settingsStore: SettingsStore,
-  agentManager: AgentManager
+  agentManager: AgentManager,
+  processService: ProcessService
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle(
@@ -183,6 +208,30 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.agentFsRelease, (event, sessionId: string, containerName?: string) =>
     agentManager.releaseChannel(sessionId, containerName, event.sender)
   )
+  /*
+   * agent 白名单泛通道：进程面板 / 静默执行 / 用量条等共用。
+   * 方法必须落在白名单里 —— 泛通道不等于泛权限，渲染层拼什么字符串
+   * 都不能越过这个集合（agent 侧 exec 本身也是 argv 不经 shell）。
+   */
+  ipcMain.handle(
+    IpcChannels.agentCall,
+    (_event, sessionId: string, containerName: string | undefined, method: string, params: unknown) => {
+      if (!AGENT_CALL_ALLOW.has(method)) throw new Error(`agent 方法不在白名单: ${method}`)
+      return agentManager.call(sessionId, containerName, method, params)
+    }
+  )
+  // ---- 进程管理 ----
+  ipcMain.handle(IpcChannels.procList, (_event, sessionId: string, containerName?: string) =>
+    processService.list(sessionId, containerName)
+  )
+  ipcMain.handle(
+    IpcChannels.procKill,
+    (_event, sessionId: string, pid: number, signal: 15 | 9, containerName?: string) =>
+      processService.kill(sessionId, pid, signal, containerName)
+  )
+  ipcMain.handle(IpcChannels.sftpDiskUsage, (_event, sessionId: string, path: string, containerName?: string) =>
+    sftpService.diskUsage(sessionId, path, containerName)
+  )
 
   // ---- 容器终端 ----
   ipcMain.handle(IpcChannels.containerList, (_event, parentSessionId: string) =>
@@ -214,36 +263,48 @@ export function registerIpc(
 
   // ---- 传输队列 ----
 
-  /** 容器传输 IO：docker cp 段 + agent fs 段（容器内目录操作）组合 */
-  const containerIO = (sessionId: string, containerName: string): ContainerIO => ({
-    ...createContainerTransferIO(
-      (id) => sessionManager.getClient(id) ?? null,
-      (id) => containerManager.runtimeBinary(id),
-      sessionId,
-      containerName
-    ),
-    mkdirContainer: async (dir) => {
-      await agentManager.call(sessionId, containerName, 'fs_mkdir', { path: dir })
-    },
-    statContainer: async (path) => {
-      const r = (await agentManager.call(sessionId, containerName, 'fs_stat', { path })) as {
-        is_dir: boolean
-        size: number
+  /** 容器传输 IO：docker cp 段 + agent fs 段（容器内目录操作）组合；agent ≥0.4.0 附直传流 */
+  const containerIO = async (sessionId: string, containerName: string): Promise<ContainerIO> => {
+    const io: ContainerIO = {
+      ...createContainerTransferIO(
+        (id) => sessionManager.getClient(id) ?? null,
+        (id) => containerManager.runtimeBinary(id),
+        sessionId,
+        containerName
+      ),
+      mkdirContainer: async (dir) => {
+        await agentManager.call(sessionId, containerName, 'fs_mkdir', { path: dir })
+      },
+      statContainer: async (path) => {
+        const r = (await agentManager.call(sessionId, containerName, 'fs_stat', { path })) as {
+          is_dir: boolean
+          size: number
+        }
+        return { isDir: r.is_dir, size: r.size }
+      },
+      listContainer: async (dir) => {
+        const r = (await agentManager.call(sessionId, containerName, 'fs_list', { path: dir })) as {
+          entries: { name: string; is_dir: boolean; is_symlink: boolean; size: number }[]
+        }
+        return r.entries.map((e) => ({
+          name: e.name,
+          isDir: e.is_dir,
+          isSymlink: e.is_symlink,
+          size: e.size
+        }))
       }
-      return { isDir: r.is_dir, size: r.size }
-    },
-    listContainer: async (dir) => {
-      const r = (await agentManager.call(sessionId, containerName, 'fs_list', { path: dir })) as {
-        entries: { name: string; is_dir: boolean; is_symlink: boolean; size: number }[]
-      }
-      return r.entries.map((e) => ({
-        name: e.name,
-        isDir: e.is_dir,
-        isSymlink: e.is_symlink,
-        size: e.size
-      }))
     }
-  })
+    // 直传能力：状态读不到（agent 没装/挂了）就不挂，自然落回 docker cp 接力
+    try {
+      const st = await agentManager.status(sessionId, containerName)
+      if (st.installed && st.version && !agentVersionOlder(st.version, '0.4.0')) {
+        io.stream = createAgentStreamIO(agentManager, sessionId, containerName)
+      }
+    } catch {
+      /* 回退接力路径 */
+    }
+    return io
+  }
 
   ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string, containerName?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -253,9 +314,9 @@ export function registerIpc(
     })
     if (result.canceled) return []
     const nested = await Promise.all(
-      result.filePaths.map((p) =>
+      result.filePaths.map(async (p) =>
         containerName
-          ? transferManager.enqueueUploadContainer(sessionId, containerName, p, remoteDir, containerIO(sessionId, containerName))
+          ? transferManager.enqueueUploadContainer(sessionId, containerName, p, remoteDir, await containerIO(sessionId, containerName))
           : transferManager.enqueueUpload(sessionId, p, remoteDir)
       )
     )
@@ -266,9 +327,9 @@ export function registerIpc(
     IpcChannels.transferEnqueueDropped,
     async (_event, sessionId: string, remoteDir: string, files: DroppedFile[], containerName?: string) => {
       const nested = await Promise.all(
-        files.map((f) =>
+        files.map(async (f) =>
           containerName
-            ? transferManager.enqueueUploadContainer(sessionId, containerName, f.path, remoteDir, containerIO(sessionId, containerName))
+            ? transferManager.enqueueUploadContainer(sessionId, containerName, f.path, remoteDir, await containerIO(sessionId, containerName))
             : transferManager.enqueueUpload(sessionId, f.path, remoteDir)
         )
       )
@@ -286,7 +347,7 @@ export function registerIpc(
       })
       if (result.canceled || !result.filePath) return null
       return containerName
-        ? transferManager.enqueueDownloadContainer(sessionId, containerName, remotePath, result.filePath, containerIO(sessionId, containerName))
+        ? transferManager.enqueueDownloadContainer(sessionId, containerName, remotePath, result.filePath, await containerIO(sessionId, containerName))
         : transferManager.enqueueDownload(sessionId, remotePath, result.filePath)
     }
   )
@@ -303,7 +364,7 @@ export function registerIpc(
       if (result.canceled || !result.filePaths[0]) return []
       const dir = result.filePaths[0]
       return containerName
-        ? transferManager.enqueueDownloadDirContainer(sessionId, containerName, remotePath, dir, containerIO(sessionId, containerName))
+        ? transferManager.enqueueDownloadDirContainer(sessionId, containerName, remotePath, dir, await containerIO(sessionId, containerName))
         : transferManager.enqueueDownloadDir(sessionId, remotePath, dir)
     }
   )
@@ -325,7 +386,7 @@ export function registerIpc(
       })
       if (result.canceled || !result.filePaths[0]) return []
       const dir = result.filePaths[0]
-      const io = containerName ? containerIO(sessionId, containerName) : null
+      const io = containerName ? await containerIO(sessionId, containerName) : null
       // 入队本身是串行排队的，这里并发提交只是在建任务记录，不占传输通道
       const nested = await Promise.all(
         items.map((item) =>

@@ -17,7 +17,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.3.0"
+var version = "0.4.0"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -53,6 +53,15 @@ func main() {
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", os.Args[1])
 		os.Exit(2)
+	}
+}
+
+// writeCallResult：一次性调用方法的统一回包（成功 result / 失败 error）
+func writeCallResult(enc *safeEncoder, id int, result interface{}, err error) {
+	if err != nil {
+		_ = enc.Encode(response{ID: id, Error: err.Error()})
+	} else {
+		_ = enc.Encode(response{ID: id, Result: result})
 	}
 }
 
@@ -126,7 +135,19 @@ func serve() error {
 					_ = enc.Encode(response{ID: req.ID, Result: result})
 				}
 			} else {
-				_ = enc.Encode(response{ID: req.ID, Error: "unknown method: " + req.Method})
+				switch req.Method {
+				case "ps_list":
+					r, err := psList(req.Params)
+					writeCallResult(enc, req.ID, r, err)
+				case "ps_kill":
+					r, err := psKill(req.Params)
+					writeCallResult(enc, req.ID, r, err)
+				case "exec":
+					r, err := execOnce(req.Params)
+					writeCallResult(enc, req.ID, r, err)
+				default:
+					_ = enc.Encode(response{ID: req.ID, Error: "unknown method: " + req.Method})
+				}
 			}
 		}
 	}

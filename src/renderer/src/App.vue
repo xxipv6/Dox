@@ -8,6 +8,7 @@ import SessionSidebar from './components/SessionSidebar.vue'
 import TitleBar from './components/TitleBar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
 import FileExplorer from './components/FileExplorer.vue'
+import ProcessPanel from './components/ProcessPanel.vue'
 import TransferQueue from './components/TransferQueue.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
@@ -308,6 +309,15 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
             :key="sftpTarget.sessionId"
             :session-id="sftpTarget.sessionId"
             :container="sftpTarget.container"
+          />
+
+          <!-- 进程管理面板（终端右键「进程管理」打开；目标随打开时的标签定） -->
+          <ProcessPanel
+            v-if="store.procTarget"
+            :key="store.procTarget.sessionId + ':' + (store.procTarget.containerName ?? '')"
+            :session-id="store.procTarget.sessionId"
+            :container-name="store.procTarget.containerName"
+            :label="store.procTarget.label"
           />
 
           <!-- 双击文件后在此编辑；key 绑定会话，切会话不串内容 -->
