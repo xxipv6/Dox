@@ -84,7 +84,7 @@ await win.waitForTimeout(2000)
 // 事件埋点：失败时能说清是主进程没发还是组件没弹
 await win.evaluate(() => {
   window.__agentEvents = []
-  window.api.onAgentPorts((sid, data) =>
+  window.api.onAgentPorts((sid, ctr, data) =>
     window.__agentEvents.push([Math.round(performance.now() / 1000), JSON.stringify(data)])
   )
 })

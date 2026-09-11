@@ -100,27 +100,35 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.sftpArchive, sessionId, paths),
   remoteListeners: (sessionId) =>
     ipcRenderer.invoke(IpcChannels.remoteListeners, sessionId),
-  agentStatus: (sessionId) => ipcRenderer.invoke(IpcChannels.agentStatus, sessionId),
-  agentInstall: (sessionId) => ipcRenderer.invoke(IpcChannels.agentInstall, sessionId),
-  agentWatchPorts: (sessionId) => ipcRenderer.invoke(IpcChannels.agentWatchPorts, sessionId),
-  agentUnwatchPorts: (sessionId) => ipcRenderer.invoke(IpcChannels.agentUnwatchPorts, sessionId),
+  agentStatus: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentStatus, sessionId, containerName),
+  agentInstall: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentInstall, sessionId, containerName),
+  agentWatchPorts: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentWatchPorts, sessionId, containerName),
+  agentUnwatchPorts: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentUnwatchPorts, sessionId, containerName),
   onAgentPorts: (cb) => {
     const listener = (
       _e: IpcRendererEvent,
       sessionId: string,
+      containerName: string | null,
       data: { event: string; listening?: number[]; added?: number[]; removed?: number[] }
-    ): void => cb(sessionId, data)
+    ): void => cb(sessionId, containerName, data)
     ipcRenderer.on(IpcChannels.agentPorts, listener)
     return () => ipcRenderer.removeListener(IpcChannels.agentPorts, listener)
   },
-  agentWatchStats: (sessionId) => ipcRenderer.invoke(IpcChannels.agentWatchStats, sessionId),
-  agentUnwatchStats: (sessionId) => ipcRenderer.invoke(IpcChannels.agentUnwatchStats, sessionId),
+  agentWatchStats: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentWatchStats, sessionId, containerName),
+  agentUnwatchStats: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentUnwatchStats, sessionId, containerName),
   onAgentStats: (cb) => {
     const listener = (
       _e: IpcRendererEvent,
       sessionId: string,
+      containerName: string | null,
       data: { event: string } & Partial<AgentStatsPayload>
-    ): void => cb(sessionId, data)
+    ): void => cb(sessionId, containerName, data)
     ipcRenderer.on(IpcChannels.agentStats, listener)
     return () => ipcRenderer.removeListener(IpcChannels.agentStats, listener)
   },

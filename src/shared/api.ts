@@ -172,25 +172,42 @@ export interface DoxApi {
    * supported=false = 远端没有 /proc（非 Linux），调用方应停止轮询。
    */
   remoteListeners(sessionId: string): Promise<{ ports: number[]; supported: boolean }>
-  /** 远程助手状态（installed/version/osArch）与显式安装（opt-in） */
-  agentStatus(sessionId: string): Promise<{ installed: boolean; version?: string; osArch?: string }>
-  agentInstall(sessionId: string): Promise<{ installed: boolean; version?: string; osArch?: string }>
+  /**
+   * 远程助手状态（installed/version/osArch）与显式安装（opt-in）。
+   * containerName 给了就是容器内安装（Dev Containers 式注入，docker cp + exec）。
+   */
+  agentStatus(
+    sessionId: string,
+    containerName?: string
+  ): Promise<{ installed: boolean; version?: string; osArch?: string }>
+  agentInstall(
+    sessionId: string,
+    containerName?: string
+  ): Promise<{ installed: boolean; version?: string; osArch?: string }>
   /** 订阅/退订 agent 端口推送（首个订阅者建立通道，归零自动 stop） */
-  agentWatchPorts(sessionId: string): Promise<void>
-  agentUnwatchPorts(sessionId: string): Promise<void>
-  /** agent 端口事件：listening/added/removed 差分帧，或 agent_closed（通道死，应降级） */
+  agentWatchPorts(sessionId: string, containerName?: string): Promise<void>
+  agentUnwatchPorts(sessionId: string, containerName?: string): Promise<void>
+  /**
+   * agent 端口事件：listening/added/removed 差分帧，或 agent_closed（通道死，应降级）。
+   * containerName 区分同一会话上的宿主机（null）与容器目标。
+   */
   onAgentPorts(
     cb: (
       sessionId: string,
+      containerName: string | null,
       data: { event: string; listening?: number[]; added?: number[]; removed?: number[] }
     ) => void
   ): () => void
   /** 订阅/退订 agent 系统状态推送（CPU/内存/GPU，与端口推送共用通道） */
-  agentWatchStats(sessionId: string): Promise<void>
-  agentUnwatchStats(sessionId: string): Promise<void>
+  agentWatchStats(sessionId: string, containerName?: string): Promise<void>
+  agentUnwatchStats(sessionId: string, containerName?: string): Promise<void>
   /** agent 状态帧（event='stats' 时载荷为 AgentStatsPayload），或 agent_closed */
   onAgentStats(
-    cb: (sessionId: string, data: { event: string } & Partial<AgentStatsPayload>) => void
+    cb: (
+      sessionId: string,
+      containerName: string | null,
+      data: { event: string } & Partial<AgentStatsPayload>
+    ) => void
   ): () => void
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>

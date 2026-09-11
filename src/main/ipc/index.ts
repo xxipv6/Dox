@@ -147,23 +147,23 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.remoteListeners, (_event, sessionId: string) =>
     sessionManager.remoteListeners(sessionId)
   )
-  ipcMain.handle(IpcChannels.agentStatus, (_event, sessionId: string) =>
-    agentManager.status(sessionId)
+  ipcMain.handle(IpcChannels.agentStatus, (_event, sessionId: string, containerName?: string) =>
+    agentManager.status(sessionId, containerName)
   )
-  ipcMain.handle(IpcChannels.agentInstall, (_event, sessionId: string) =>
-    agentManager.install(sessionId)
+  ipcMain.handle(IpcChannels.agentInstall, (_event, sessionId: string, containerName?: string) =>
+    agentManager.install(sessionId, containerName)
   )
-  ipcMain.handle(IpcChannels.agentWatchPorts, (event, sessionId: string) =>
-    agentManager.watchPorts(sessionId, event.sender)
+  ipcMain.handle(IpcChannels.agentWatchPorts, (event, sessionId: string, containerName?: string) =>
+    agentManager.watchPorts(sessionId, containerName, event.sender)
   )
-  ipcMain.handle(IpcChannels.agentUnwatchPorts, (event, sessionId: string) =>
-    agentManager.unwatchPorts(sessionId, event.sender)
+  ipcMain.handle(IpcChannels.agentUnwatchPorts, (event, sessionId: string, containerName?: string) =>
+    agentManager.unwatchPorts(sessionId, containerName, event.sender)
   )
-  ipcMain.handle(IpcChannels.agentWatchStats, (event, sessionId: string) =>
-    agentManager.watchStats(sessionId, event.sender)
+  ipcMain.handle(IpcChannels.agentWatchStats, (event, sessionId: string, containerName?: string) =>
+    agentManager.watchStats(sessionId, containerName, event.sender)
   )
-  ipcMain.handle(IpcChannels.agentUnwatchStats, (event, sessionId: string) =>
-    agentManager.unwatchStats(sessionId, event.sender)
+  ipcMain.handle(IpcChannels.agentUnwatchStats, (event, sessionId: string, containerName?: string) =>
+    agentManager.unwatchStats(sessionId, containerName, event.sender)
   )
 
   // ---- 容器终端 ----

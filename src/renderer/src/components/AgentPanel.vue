@@ -31,17 +31,17 @@ const errorMsg = ref('')
  * 容器里的端口发现本就由宿主机助手经 docker 完成，不用往容器里装。
  */
 
-/** 安装目标：容器标签 → 父 SSH 会话；普通 SSH 标签 → 自己；其余 → null */
-const target = computed<{ sessionId: string; viaContainer: string | null } | null>(() => {
+/** 安装目标：容器标签 → 容器内（父会话承载传输）；普通 SSH 标签 → 宿主机；其余 → null */
+const target = computed<{ sessionId: string; containerName?: string } | null>(() => {
   const id = store.activeSessionId
   if (!id) return null
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === id))
   if (tab?.kind === 'container' && tab.container) {
     if (tab.container.parentSessionId === LOCAL_CONTAINER_TARGET) return null
-    return { sessionId: tab.container.parentSessionId, viaContainer: tab.container.containerName }
+    return { sessionId: tab.container.parentSessionId, containerName: tab.container.containerName }
   }
   if (tab?.kind === 'local') return null
-  return { sessionId: id, viaContainer: null }
+  return { sessionId: id }
 })
 
 async function refresh(): Promise<void> {
@@ -49,7 +49,7 @@ async function refresh(): Promise<void> {
   errorMsg.value = ''
   if (!target.value) return
   try {
-    status.value = await window.api.agentStatus(target.value.sessionId)
+    status.value = await window.api.agentStatus(target.value.sessionId, target.value.containerName)
   } catch {
     status.value = { installed: false }
   }
@@ -60,7 +60,9 @@ async function install(): Promise<void> {
   installing.value = true
   errorMsg.value = ''
   try {
-    status.value = await window.api.agentInstall(target.value.sessionId)
+    status.value = await window.api.agentInstall(target.value.sessionId, target.value.containerName)
+    // 通知开着的终端标签重试 agent 通道（mount 时还是「未安装」，已走轮询兜底）
+    store.markAgentInstalled()
   } catch (err) {
     errorMsg.value = errorText(err)
   } finally {
@@ -83,21 +85,25 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
 
       <div v-else-if="status.installed" class="agent-ok">
         <Icon name="check" :size="13" />
-        <span>已安装 v{{ status.version }}<template v-if="status.osArch">（{{ status.osArch }}）</template></span>
+        <span>
+          已安装 v{{ status.version }}
+          <template v-if="target.containerName">（容器 {{ target.containerName }}）</template>
+          <template v-else-if="status.osArch">（{{ status.osArch }}）</template>
+        </span>
       </div>
 
       <template v-else>
         <p class="agent-desc">
-          把 dox-agent（~2MB，Go 静态二进制）安装到远端
-          <code>~/.dox/dox-agent</code>，解锁自动端口发现、GPU 监控等能力。
-          不装系统目录、不要 root、不开机自启；删除该目录即完全卸载。
+          把 dox-agent（~2MB，Go 静态二进制）安装到<template v-if="target.containerName">容器「{{ target.containerName }}」的 <code>/tmp/dox-agent</code></template><template v-else>远端 <code>~/.dox/dox-agent</code></template>，
+          解锁自动端口发现、GPU 监控等能力。
+          不装系统目录、不要 root、不开机自启<template v-if="!target.containerName">；删除该目录即完全卸载</template>。
         </p>
-        <p v-if="target.viaContainer" class="agent-desc">
-          当前在容器「{{ target.viaContainer }}」里：助手装到<strong>宿主机</strong>，
-          容器内的端口发现由它经 docker 完成，容器里不用装任何东西。
+        <p v-if="target.containerName" class="agent-desc">
+          与 VS Code Dev Containers 同款：二进制经 docker cp 注入，容器删除即消失；
+          容器 stop/start 不影响，rm/重建后需重装。
         </p>
         <button class="btn primary" :disabled="installing" @click="install">
-          {{ installing ? '安装中…' : target.viaContainer ? '安装到宿主机' : '安装到这台机器' }}
+          {{ installing ? '安装中…' : target.containerName ? `安装到容器 ${target.containerName}` : '安装到这台机器' }}
         </button>
       </template>
 

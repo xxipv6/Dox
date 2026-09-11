@@ -107,6 +107,15 @@ export const useSessionStore = defineStore('sessions', () => {
    * 弹窗挂在侧边栏，而触发点在终端面板，所以借 store 传一次话。
    */
   const addDevicePrefill = ref<{ host: string; port: number; username: string } | null>(null)
+  /**
+   * agent 安装成功的标记（单调递增）。AgentPanel 装完 bump 一次，
+   * 开着的 TerminalPanel 据此重试 startPortWatch —— 否则装完要重开
+   * 标签推送才生效（mount 时状态还是「未安装」，已经走了轮询兜底）。
+   */
+  const agentInstallStamp = ref(0)
+  function markAgentInstalled(): void {
+    agentInstallStamp.value++
+  }
 
   /** 保存的密码解密失败时，请求侧栏打开该设备的编辑框（重输密码即自愈） */
   const editSessionRequest = ref<SavedSession | null>(null)
@@ -489,6 +498,8 @@ export const useSessionStore = defineStore('sessions', () => {
     activeSessionId,
     savedSessions,
     addDevicePrefill,
+    agentInstallStamp,
+    markAgentInstalled,
     requestAddDevice,
     clearAddDeviceRequest,
     editSessionRequest,

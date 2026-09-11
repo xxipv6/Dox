@@ -117,7 +117,7 @@ await win.locator('.terminal-container:visible').first().click()
 await win.keyboard.press('Escape')
 
 // ---- 状态条出现：CPU / MEM / GPU ----
-const bar = win.locator('.agent-stats')
+const bar = win.locator('.agent-stats:visible')
 let barText = ''
 try {
   await bar.waitFor({ timeout: 15000 })

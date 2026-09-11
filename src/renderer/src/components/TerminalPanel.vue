@@ -173,6 +173,8 @@ let unsubscribeAgentPorts: (() => void) | null = null
 let agentWatchActive = false
 /** 是否已在主进程登记订阅（卸载时据此退订；降级期意图仍在主进程，不能漏退） */
 let agentSubscribed = false
+/** 订阅时的目标（卸载时标签可能已从 store 摘掉，forwardTarget 会拿不到了） */
+let subscribedTarget: { sessionId: string; containerName?: string } | null = null
 
 // ---- agent 系统状态条（CPU/内存/GPU）：与端口推送同一条通道、同一 opt-in ----
 const agentStats = ref<AgentStatsPayload | null>(null)
@@ -216,33 +218,37 @@ function handleAgentPorts(data: { listening?: number[]; added?: number[] }): voi
   }
 }
 
-/** 端口监视的统一入口：普通 SSH 优先 agent 长连接；容器标签走 docker exec 轮询 */
+/**
+ * 端口监视的统一入口：有转发落点就开。
+ * 优先 agent 长连接推送（宿主机标签 → 宿主机助手；容器标签 → 容器内助手，
+ * Dev Containers 式注入）；没装/起不来都退回 /proc 轮询（宿主机直读 /
+ * 容器 docker exec，pollRemoteListeners 内部按目标分路）。
+ */
 async function startPortWatch(): Promise<void> {
-  if (!isPlainSshId(props.sessionId)) {
-    // agent 跑在宿主机上、读的是宿主机 netns —— 容器标签用不上它，
-    // 容器里的表走 docker exec 轮询（本机容器/本地终端 forwardTarget 为 null，不开）
-    startProcPoll()
-    return
-  }
-  const st = await window.api.agentStatus(props.sessionId).catch(() => null)
+  const target = forwardTarget()
+  if (!target) return
+  const st = await window.api.agentStatus(target.sessionId, target.containerName).catch(() => null)
   if (st?.installed) {
     try {
-      await window.api.agentWatchPorts(props.sessionId)
+      await window.api.agentWatchPorts(target.sessionId, target.containerName)
       // 挂载期间异步返回的：面板可能已卸载，立即退订别漏通道
       if (disposed) {
-        void window.api.agentUnwatchPorts(props.sessionId)
+        void window.api.agentUnwatchPorts(target.sessionId, target.containerName)
         return
       }
       agentSubscribed = true
+      subscribedTarget = target
       agentWatchActive = true
-      unsubscribeAgentPorts = window.api.onAgentPorts((id, data) => {
-        if (id !== props.sessionId) return
+      stopProcPoll() // 可能是从轮询兜底升级上来的（装完 agent 的重试），停掉顶班的
+      unsubscribeAgentPorts = window.api.onAgentPorts((id, ctr, data) => {
+        if (id !== target.sessionId || (ctr ?? undefined) !== target.containerName) return
         if (data.event === 'agent_closed') {
-          // 通道死了（SSH 断线/agent 被杀）：/proc 轮询顶班，订阅保留 ——
-          // 主进程会在重连后自动重建，帧回来了就切回去
+          // 通道死了（SSH 断线/容器停止/agent 被杀）：/proc 轮询顶班，订阅保留 ——
+          // SSH 重连后主进程自动重建；容器重启由 scheduleAgentRetry 兜（SSH 没断过）
           agentWatchActive = false
           listenerBaseline = null // 换路径重建基线，别把 /proc 全量当差分弹了
           startProcPoll()
+          scheduleAgentRetry(target)
           return
         }
         if (!agentWatchActive) {
@@ -257,11 +263,11 @@ async function startPortWatch(): Promise<void> {
       // 系统状态条：同一条通道、同一个 opt-in（装助手即同意）。
       // 失败不拖累端口推送 —— 状态条本来就是锦上添花
       try {
-        await window.api.agentWatchStats(props.sessionId)
+        await window.api.agentWatchStats(target.sessionId, target.containerName)
         if (!disposed) {
           statsSubscribed = true
-          unsubscribeAgentStats = window.api.onAgentStats((id, data) => {
-            if (id !== props.sessionId) return
+          unsubscribeAgentStats = window.api.onAgentStats((id, ctr, data) => {
+            if (id !== target.sessionId || (ctr ?? undefined) !== target.containerName) return
             if (data.event === 'agent_closed') {
               statsLive.value = false
               return
@@ -272,17 +278,43 @@ async function startPortWatch(): Promise<void> {
             statsLive.value = true
           })
         } else {
-          void window.api.agentUnwatchStats(props.sessionId)
+          void window.api.agentUnwatchStats(target.sessionId, target.containerName)
         }
       } catch {
         // 老版本 agent（0.1.0）没有 watch_stats：unknown method，状态条不出现即可
       }
       return
     } catch {
-      // agent 起不来（二进制被删/权限变化）：走老路
+      // agent 起不来（二进制被删/容器在停/权限变化）：走轮询
     }
   }
   if (!disposed) startProcPoll()
+}
+
+/**
+ * 容器标签的 agent 复活重试：容器 stop→start 后二进制还在容器文件层里，
+ * 只是进程没了 —— 重新拉起 serve 即可（SSH 全程没断，主进程的重连钩子
+ * 管不到这种死法）。45s 节流、上限 20 次（约 15 分钟，容器真删了就别吵）。
+ */
+let agentRetryTimer: number | null = null
+let agentRetryCount = 0
+function scheduleAgentRetry(target: { sessionId: string; containerName?: string }): void {
+  if (!target.containerName || agentRetryTimer !== null || agentRetryCount >= 20) return
+  agentRetryTimer = window.setTimeout(() => {
+    agentRetryTimer = null
+    if (disposed || agentWatchActive) return
+    agentRetryCount++
+    void window.api
+      .agentWatchPorts(target.sessionId, target.containerName)
+      .then(() => {
+        if (disposed) return
+        agentRetryCount = 0
+        agentWatchActive = true
+        stopProcPoll()
+        listenerBaseline = null
+      })
+      .catch(() => scheduleAgentRetry(target))
+  }, 45_000)
 }
 
 async function confirmForward(s: PortSuggestion): Promise<void> {
@@ -731,6 +763,14 @@ onMounted(() => {
   // 端口监视：agent 长连接优先，/proc 轮询兜底（内部自选）
   void startPortWatch()
 
+  // 面板里装完 agent → 重试通道（mount 时状态是「未安装」，已走轮询兜底）
+  watch(
+    () => store.agentInstallStamp,
+    () => {
+      if (!disposed && !agentSubscribed) void startPortWatch()
+    }
+  )
+
   // 会话状态：断线 / 重连中 / 重连成功都往终端里留痕，并驱动顶部状态条
   unsubscribeStatus = window.api.onStatus((e) => {
     if (e.id !== props.sessionId || disposed) return
@@ -800,10 +840,18 @@ onBeforeUnmount(() => {
   disposed = true
   zmodem?.abort() // 清掉看门狗定时器，避免卸载后触发
   stopProcPoll()
+  if (agentRetryTimer !== null) {
+    clearTimeout(agentRetryTimer)
+    agentRetryTimer = null
+  }
   unsubscribeAgentPorts?.()
-  if (agentSubscribed) void window.api.agentUnwatchPorts(props.sessionId)
   unsubscribeAgentStats?.()
-  if (statsSubscribed) void window.api.agentUnwatchStats(props.sessionId)
+  if (agentSubscribed && subscribedTarget) {
+    void window.api.agentUnwatchPorts(subscribedTarget.sessionId, subscribedTarget.containerName)
+  }
+  if (statsSubscribed && subscribedTarget) {
+    void window.api.agentUnwatchStats(subscribedTarget.sessionId, subscribedTarget.containerName)
+  }
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
   unsubscribeStatus?.()

@@ -174,6 +174,22 @@ export function parseInspectIp(stdout: string): string | null {
   }
 }
 
+/**
+ * 容器 daemon 的平台（往容器里推 agent 时选二进制用）。
+ *
+ * 走 `docker info` 而不是 inspect：容器 inspect 没有 Architecture 字段
+ * （实测 docker 29），镜像 inspect 才有但容器不一定对应原镜像；
+ * 也不跑 `docker exec uname` —— distroless 容器里没有 uname。
+ * 代价是 qemu 跨架构容器会选错（daemon 架构 ≠ 容器架构），
+ * VS Code Dev Containers 同样不做这个区分，接受。
+ */
+export function parseDockerInfoPlatform(stdout: string): { os: string; arch: string } | null {
+  const os = /^\s*OSType:\s*(\S+)\s*$/m.exec(stdout)?.[1]
+  const arch = /^\s*Architecture:\s*(\S+)\s*$/m.exec(stdout)?.[1]
+  if (!os || !arch) return null
+  return { os, arch }
+}
+
 export interface ParsedListing {
   /** runtime 可执行文件绝对路径；null = 远端没有 docker 也没有 podman */
   binary: string | null

@@ -328,6 +328,18 @@ export class ContainerManager {
     }
   }
 
+  /** 该父会话上的容器 runtime 二进制名（AgentManager 拼 docker exec/cp 命令用） */
+  async runtimeBinary(parentSessionId: string): Promise<string | null> {
+    if (isLocalContainerTarget(parentSessionId)) return null
+    if (!this.getClient(parentSessionId)) return null
+    try {
+      if (!this.runtimeByParent.has(parentSessionId)) await this.list(parentSessionId)
+      return this.runtimeByParent.get(parentSessionId)?.binary ?? null
+    } catch {
+      return null
+    }
+  }
+
   /**
    * 容器里的 LISTEN 端口（容器标签转发建议的静默检测）。
    *

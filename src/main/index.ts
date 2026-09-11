@@ -56,7 +56,7 @@ const forwardManager = new ForwardManager(
  * 不需要任何 guard，因为这里根本没有那套代码。
  */
 const containerManager = new ContainerManager((id) => sessionManager.getClient(id))
-const agentManager = new AgentManager(sessionManager)
+const agentManager = new AgentManager(sessionManager, (id) => containerManager.runtimeBinary(id))
 
 // 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped），
 // 并把它承载的容器终端通道一并收掉

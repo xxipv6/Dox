@@ -99,7 +99,7 @@ await win.waitForTimeout(2000)
 // 事件埋点：等 agent watch 首帧（基线）到达再动夹具 —— 否则 nc 会被首帧收进基线，永远不弹
 await win.evaluate(() => {
   window.__agentEvents = []
-  window.api.onAgentPorts((sid, data) => window.__agentEvents.push(JSON.stringify(data)))
+  window.api.onAgentPorts((sid, ctr, data) => window.__agentEvents.push(JSON.stringify(data)))
 })
 
 await win.locator('button[title="添加设备"]').click()
