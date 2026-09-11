@@ -97,21 +97,71 @@ function scanForListenPorts(chunk: Uint8Array): void {
   const fresh = detectListenPorts(chunk).filter((p) => !suggestedPorts.has(p))
   if (!fresh.length) return
   for (const p of fresh) suggestedPorts.add(p)
-  void (async () => {
-    // 已有活跃规则的端口不弹：用户早就转过了
-    const rules = await window.api.listForwards().catch(() => [])
-    for (const port of fresh) {
-      const exists = rules.some(
-        (r) =>
-          r.sessionId === target.sessionId &&
-          r.type === 'local' &&
-          r.targetPort === port &&
-          r.status === 'active'
-      )
-      if (exists || suggestions.value.length >= MAX_SUGGESTIONS) continue
-      suggestions.value.push({ port, state: 'pending' })
-    }
-  })()
+  for (const port of fresh) void pushSuggestion(port, target)
+}
+
+/** 规则查重后把建议推上屏（横幅与 /proc 两条检测路径共用） */
+async function pushSuggestion(port: number, target: { sessionId: string }): Promise<void> {
+  const rules = await window.api.listForwards().catch(() => [])
+  const exists = rules.some(
+    (r) =>
+      r.sessionId === target.sessionId &&
+      r.type === 'local' &&
+      r.targetPort === port &&
+      r.status === 'active'
+  )
+  if (exists || suggestions.value.length >= MAX_SUGGESTIONS) return
+  suggestions.value.push({ port, state: 'pending' })
+}
+
+// ---- /proc 静默监听轮询：不打横幅的服务也能发现 ----
+const PROC_POLL_MS = 5000
+/** 建议下限：特权端口基本是系统服务（53/631…），开发服务器都在 1024 以上 */
+const MIN_SUGGEST_PORT = 1024
+/** 首查只建基线不弹窗 —— 一连上就被既有端口轰炸，功能就死了 */
+let listenerBaseline: Set<number> | null = null
+let procPollTimer: number | null = null
+
+/**
+ * 每 5 秒读一次远端 /proc/net/tcp（VS Code "process" 检测源的无 agent 版）。
+ *
+ * 只对普通 SSH 标签开启：这里读到的是**宿主机**的 socket 表；
+ * 容器标签想要的是容器里的那张表（docker exec cat /proc/net/tcp），
+ * 那是另一条路，留给 v2。
+ */
+async function pollRemoteListeners(): Promise<void> {
+  if (!settings.suggestPortForward) return
+  const target = forwardTarget()
+  if (!target) return
+  const res = await window.api.remoteListeners(target.sessionId).catch(() => null)
+  if (!res || !res.supported) {
+    // 非 Linux（没有 /proc）：这条路不存在，别再每 5 秒白跑
+    stopProcPoll()
+    return
+  }
+  if (listenerBaseline === null) {
+    listenerBaseline = new Set(res.ports)
+    return
+  }
+  for (const port of res.ports) {
+    if (listenerBaseline.has(port) || port < MIN_SUGGEST_PORT || suggestedPorts.has(port)) continue
+    suggestedPorts.add(port)
+    // 弹过即入基线：服务一直在听也不反复弹
+    listenerBaseline.add(port)
+    void pushSuggestion(port, target)
+  }
+}
+
+function startProcPoll(): void {
+  if (procPollTimer !== null || !isPlainSshId(props.sessionId)) return
+  procPollTimer = window.setInterval(() => void pollRemoteListeners(), PROC_POLL_MS)
+}
+
+function stopProcPoll(): void {
+  if (procPollTimer !== null) {
+    clearInterval(procPollTimer)
+    procPollTimer = null
+  }
 }
 
 async function confirmForward(s: PortSuggestion): Promise<void> {
@@ -557,6 +607,9 @@ onMounted(() => {
     zmodem?.consume(chunk)
   })
 
+  // /proc 静默监听轮询（首查只建基线；非 Linux 或会话不可用时自动停）
+  startProcPoll()
+
   // 会话状态：断线 / 重连中 / 重连成功都往终端里留痕，并驱动顶部状态条
   unsubscribeStatus = window.api.onStatus((e) => {
     if (e.id !== props.sessionId || disposed) return
@@ -625,6 +678,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   disposed = true
   zmodem?.abort() // 清掉看门狗定时器，避免卸载后触发
+  stopProcPoll()
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
   unsubscribeStatus?.()

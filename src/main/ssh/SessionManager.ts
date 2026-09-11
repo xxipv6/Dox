@@ -6,6 +6,8 @@ import { IpcChannels } from '../../shared/ipc'
 import type { HostKeyDecision, SessionStatus, SshSessionConfig, TermSize } from '../../shared/types'
 import type { KnownHostsStore } from '../store/knownHosts'
 import { createChunkBatcher } from '../chunkBatcher'
+import { execCapture } from './remoteExec'
+import { parseProcNetTcp, procListenCommand } from './procNet'
 
 interface ActiveSession {
   id: string
@@ -273,6 +275,36 @@ export class SessionManager {
 
   // ---- 内部实现 ----
 
+  /** /proc 监听发现的短 TTL 缓存：同一秒内的重复轮询（多面板/分屏）只跑一次命令 */
+  private listenerCache = new Map<string, { at: number; ports: number[] }>()
+  /** 读不了 /proc（非 Linux）的会话：记一次就不再反复跑必然失败的命令 */
+  private listenerUnsupported = new Set<string>()
+
+  /**
+   * 远端 LISTEN 端口列表（读 /proc/net/tcp{,6}，VS Code "process" 检测源的无 agent 版）。
+   *
+   * supported=false 表示这台远端没有 /proc（非 Linux）或通道异常 ——
+   * 调用方据此停掉轮询，而不是每几秒跑一次必然失败的命令。
+   */
+  async remoteListeners(id: string): Promise<{ ports: number[]; supported: boolean }> {
+    if (this.listenerUnsupported.has(id)) return { ports: [], supported: false }
+    const cached = this.listenerCache.get(id)
+    if (cached && Date.now() - cached.at < 3000) {
+      return { ports: cached.ports, supported: true }
+    }
+    const client = this.getClient(id)
+    if (!client) return { ports: [], supported: false }
+    try {
+      const res = await execCapture(client, procListenCommand(), { timeoutMs: 8000 })
+      const ports = parseProcNetTcp(res.stdout)
+      this.listenerCache.set(id, { at: Date.now(), ports })
+      return { ports, supported: true }
+    } catch {
+      this.listenerUnsupported.add(id)
+      return { ports: [], supported: false }
+    }
+  }
+
   /**
    * 建立一条完整的 SSH 连接（含跳板机链）并打开 shell。
    * connect 与断线重连共用这一条路径。
@@ -391,6 +423,8 @@ export class SessionManager {
     session.client = null
     session.shell = null
     session.sftpClient = null
+    // 监听发现缓存随连接失效：重连后用新连接重新读，别让旧数据污染差分
+    this.listenerCache.delete(id)
     this.finalize(session)
 
     if (session.disposed) {

@@ -142,6 +142,9 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.sftpArchive, (_event, sessionId: string, paths: string[]) =>
     sftpService.archive(sessionId, paths)
   )
+  ipcMain.handle(IpcChannels.remoteListeners, (_event, sessionId: string) =>
+    sessionManager.remoteListeners(sessionId)
+  )
 
   // ---- 容器终端 ----
   ipcMain.handle(IpcChannels.containerList, (_event, parentSessionId: string) =>

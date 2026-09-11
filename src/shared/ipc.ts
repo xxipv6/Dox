@@ -39,6 +39,8 @@ export const IpcChannels = {
   sftpWriteText: 'sftp:writeText',
   /** 打包：在远端当前目录把选中项 tar 成 .tar.gz（不下载），返回包路径 */
   sftpArchive: 'sftp:archive',
+  /** 远端 LISTEN 端口列表（/proc/net/tcp，端口转发建议的静默检测） */
+  remoteListeners: 'remote:listeners',
   /*
    * 容器终端（Docker / Podman）。
    *

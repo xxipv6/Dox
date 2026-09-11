@@ -157,6 +157,11 @@ export interface DoxApi {
    * 返回生成的包路径；失败把 tar 的 stderr 原文抛回。
    */
   sftpArchive(sessionId: string, paths: string[]): Promise<string>
+  /**
+   * 远端 LISTEN 端口列表（/proc/net/tcp，端口转发建议的静默检测）。
+   * supported=false = 远端没有 /proc（非 Linux），调用方应停止轮询。
+   */
+  remoteListeners(sessionId: string): Promise<{ ports: number[]; supported: boolean }>
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>
   clearFinishedTransfers(): Promise<void>
