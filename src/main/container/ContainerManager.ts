@@ -13,6 +13,7 @@ import {
 } from '../../shared/sessionId'
 import type { ContainerControlAction, ContainerInfo, ContainerProbeResult, TermSize } from '../../shared/types'
 import { execCapture } from '../ssh/remoteExec'
+import { parseProcNetTcp } from '../ssh/procNet'
 import { CommandError, outputsOf } from '../execError'
 import { createChunkBatcher } from '../chunkBatcher'
 import { isNotFound, runLocal } from './localRun'
@@ -324,6 +325,40 @@ export class ContainerManager {
       return parseInspectIp(res.stdout)
     } catch {
       return null
+    }
+  }
+
+  /**
+   * 容器里的 LISTEN 端口（容器标签转发建议的静默检测）。
+   *
+   * 容器有自己的 netns，宿主机那张 /proc/net/tcp 里看不到它的 socket，
+   * 必须进容器读 —— docker exec 只读两张表，与只读探测同类。
+   * 容器没 sh（distroless）/ 已停止 / 非 Linux 都归 supported=false，
+   * 调用方据此停止轮询。**不抛错**，定位同 containerIp：辅助查询不该打断终端。
+   */
+  async containerListeners(
+    parentSessionId: string,
+    containerName: string
+  ): Promise<{ ports: number[]; supported: boolean }> {
+    const unsupported = { ports: [] as number[], supported: false }
+    if (isLocalContainerTarget(parentSessionId)) return unsupported
+    const client = this.getClient(parentSessionId)
+    if (!client) return unsupported
+
+    try {
+      assertContainerTarget(containerName)
+      if (!this.runtimeByParent.has(parentSessionId)) await this.list(parentSessionId)
+      const runtime = this.runtimeByParent.get(parentSessionId)
+      if (!runtime) return unsupported
+
+      const res = await execCapture(
+        client,
+        `${runtime.binary} exec ${containerName} sh -c "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null"`,
+        { timeoutMs: 10_000 }
+      )
+      return { ports: parseProcNetTcp(res.stdout), supported: true }
+    } catch {
+      return unsupported
     }
   }
 

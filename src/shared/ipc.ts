@@ -62,6 +62,8 @@ export const IpcChannels = {
   containerControl: 'container:control',
   /** 解析容器网桥 IP（端口转发建议的目标地址；本机/无 IP 返回 null） */
   containerIp: 'container:ip',
+  /** 容器内 LISTEN 端口（docker exec 读容器 netns 的 /proc；转发建议的静默检测） */
+  containerListeners: 'container:listeners',
   // 传输队列
   transferPickUpload: 'transfer:pickUpload',
   transferEnqueueDropped: 'transfer:enqueueDropped',

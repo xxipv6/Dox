@@ -204,6 +204,11 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
   不是 `/etc/ssh/sshd_config` —— 改错文件折腾一轮。凡涉及转发的 e2e
   （verify-port-suggest / port-watch / socks）都要求该配置里
   `AllowTcpForwarding yes`；莫名全部「Channel open failure」先查它。
+- **dox-sshd-test 现在是 privileged dind**（verify-container-watch 需要「远端有 docker」）：
+  重建命令带 `--privileged`，里面 `apk add docker` 后 `dockerd --storage-driver=vfs`
+  （**必须 vfs** —— overlayfs 套 overlayfs 挂载直接 invalid argument），
+  镜像用 `docker save | docker exec -i … docker load` 离线灌进去。
+  把 doxtest 加进 docker 组后**必须重启容器**，sshd 已开的会话不认新组。
 - **macOS 上 Ctrl+点击 = 系统级右键。** Playwright 里做「多选」用 `modifiers: ['Meta']`，
   用 `Control` 会开出上下文菜单 —— 菜单背板（.menu-backdrop）随即拦截后续所有点击，
   表现为「莫名其妙的超时/点错行」。真实用户同理：Mac 上多选就是 Cmd，应用代码不用改。

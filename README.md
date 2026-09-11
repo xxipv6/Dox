@@ -64,6 +64,7 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-socks.mjs` | SOCKS5 代理：握手状态机单测（假 connectFn 驱动真 Socket）+ 端到端（UI 建规则 → 经代理 CONNECT 活端口通/死端口拒） |
 | `verify-agent.mjs` | dox-agent v1：go test + 交叉编译 + 端到端（UI 安装 → version 校验 → serve 握手 → watch_ports 事件抓到静默监听） |
 | `verify-agent-watch.mjs` | 转发建议接 agent 推送：端到端（预装 agent → 静默 nc → 气泡 **1.8s** 内出现（时序即路径证明，/proc 要 ~10s）→ 转发连通），跑前需 `node scripts/build-agent.mjs`（需主机参数） |
+| `verify-container-watch.mjs` | 容器标签静默端口发现：dind 端到端（容器里静默 nc → docker exec /proc 差分弹气泡 → 转发目标 = 容器网桥 IP → 本机连通）。前置：dox-sshd-test 为 privileged + 内部 dockerd（vfs）+ inner 容器 |
 | `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |
 | `verify-posix-integration.mjs` | 校验 POSIX 侧的同一契约：zsh（ZDOTDIR 注入）/ bash（--rcfile）/ fish（-C），装了哪个测哪个 |
 | `verify-posix-local-ui.mjs` | 端到端：真实应用里新建本地终端 → 敲 `cd` → 断言标签标题跟随 cwd（守着「zsh 打开即死」那个回归） |
@@ -126,7 +127,7 @@ src/
 - **应用图标重做 ✅**：`scripts/generate-icon.mjs` 生成，天蓝→草绿竖向渐变 + 白色 `>_`，3 倍超采样抗锯齿；`--preview` 出 16/32/64/128 原生并排图供肉眼核对（缩到 16px 才是真正要过的那关）。侧栏顶栏的品牌已并到标题栏，同一处不再出现两遍「Dox」
 - **远程助手 dox-agent v1 ✅**（红线 opt-in 新口径）：Go 静态二进制（~2MB，linux/amd64+arm64 交叉编译，`node scripts/build-agent.mjs`），侧栏「远程助手」面板**显式点「安装到这台机器」**才推送（uname 探测选架构 → SFTP 传 .tmp 再 mv → chmod → version 自检；落点 `~/.dox/dox-agent`，删目录即完全卸载，永不静默装/不写系统目录/不自启）。传输复用 SSH exec 通道跑 NDJSON 协议（hello / watch_ports / stop），watch_ports 在远端本地算 /proc 差分、只推变化
 - **SOCKS5 一键代理 ✅**：端口转发面板新增「代理 -D」规则类型 —— 本机起 SOCKS5 服务（RFC 1928 仅 CONNECT 免认证，自研握手状态机），每个连接经 SSH forwardOut 从**远端网络出口**发出（ssh -D 等价）。浏览器/终端代理指向 `socks5://127.0.0.1:端口` 即全局走服务器网络；每条连接现取 client，断线重连后无需重建自动恢复
-- **端口转发建议 ✅**：三条检测路径——输出横幅（`localhost:端口`，秒出气泡，字节级门控零开销）+ **agent watch_ports 长连接推送**（装了助手的机器：远端本地算 /proc 差分，新监听 ~2s 推上来；通道断了自动降级）+ **/proc/net/tcp 每 5s 差分**兜底（VS Code "process" 检测源的无 agent 版，首查只建基线不轰炸、只建议 ≥1024 端口、非 Linux 自动停）。点「转发到本机」一键建成 ssh -L；**容器感知**：远端容器标签里的建议用 `docker inspect` 解析网桥 IP 当目标，没发布端口的容器也能转；本地终端/本机容器不弹。设置里可关
+- **端口转发建议 ✅**：三条检测路径——输出横幅（`localhost:端口`，秒出气泡，字节级门控零开销）+ **agent watch_ports 长连接推送**（装了助手的机器：远端本地算 /proc 差分，新监听 ~2s 推上来；通道断了自动降级）+ **/proc/net/tcp 每 5s 差分**兜底（VS Code "process" 检测源的无 agent 版，首查只建基线不轰炸、只建议 ≥1024 端口、非 Linux 自动停）。点「转发到本机」一键建成 ssh -L；**容器感知**：远端容器标签走 `docker exec` 读**容器 netns** 的 /proc（容器有自己的 netns，宿主机表里看不到），建议目标用 `docker inspect` 解析网桥 IP，没发布端口的容器也能转；本地终端/本机容器不弹。设置里可关
 - **性能优化 ✅**：终端输出 4ms/64KB 批处理合并（三处管理器共用 `chunkBatcher`，刷屏时 IPC 消息降 1-2 个数量级）；ZMODEM Sentry 改触发序列预扫描（常规输出不再逐块做 3 次 O(n) 复制）；SFTP 传输并发 2→4 + 高水位调大（读 1MB / 写 4MB，读了 ssh2 源码确认串行点）；渲染产物开 oxc 压缩 + FileEditor（CodeMirror）懒加载，首包 2.38MB → 0.58MB；更新检查延后 45s 退出启动关键路径；连接 ready 后后台预热 sftp 通道
 - **容器终端 ✅**：侧栏列出 Docker / Podman 容器（运行中/暂停/已停止全量展示，已停止淡一档），右键「进入」即在新标签页里得到该容器的 shell；右键「查看日志」开一个 `docker logs -f --tail 200` 标签（守护进程读日志驱动，不依赖容器内有 shell，已停止的容器也能看 —— 「它刚才为什么挂了」正是高频场景）；右键还可**启动 / 停止 / 恢复 / 删除**容器（`CONTROL_VERBS` 白名单，停止与删除落手前有确认）
   - **两种目标**：SSH 设备（列那台机器上的）与**本机**（本地终端标签下列本机的，Docker Desktop / Podman Desktop 都行）。上层完全一样，只有承载方式不同

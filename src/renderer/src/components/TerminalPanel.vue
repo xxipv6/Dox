@@ -123,17 +123,19 @@ let listenerBaseline: Set<number> | null = null
 let procPollTimer: number | null = null
 
 /**
- * 每 5 秒读一次远端 /proc/net/tcp（VS Code "process" 检测源的无 agent 版）。
+ * 每 5 秒读一次 /proc/net/tcp（VS Code "process" 检测源的无 agent 版）。
  *
- * 只对普通 SSH 标签开启：这里读到的是**宿主机**的 socket 表；
- * 容器标签想要的是容器里的那张表（docker exec cat /proc/net/tcp），
- * 那是另一条路，留给 v2。
+ * 普通 SSH 标签读宿主机那张表；远端容器标签读**容器 netns** 那张
+ * （docker exec，容器有自己的 netns，宿主机表里看不到它的 socket）。
+ * 本地终端 / 本机容器不查 —— forwardTarget 为 null 时整条路不存在。
  */
 async function pollRemoteListeners(): Promise<void> {
   if (!settings.suggestPortForward) return
   const target = forwardTarget()
   if (!target) return
-  const res = await window.api.remoteListeners(target.sessionId).catch(() => null)
+  const res = target.containerName
+    ? await window.api.containerListeners(target.sessionId, target.containerName).catch(() => null)
+    : await window.api.remoteListeners(target.sessionId).catch(() => null)
   if (!res || !res.supported) {
     // 非 Linux（没有 /proc）：这条路不存在，别再每 5 秒白跑
     stopProcPoll()
@@ -153,7 +155,8 @@ async function pollRemoteListeners(): Promise<void> {
 }
 
 function startProcPoll(): void {
-  if (procPollTimer !== null || !isPlainSshId(props.sessionId)) return
+  // 有转发落点的标签才轮询（普通 SSH / 远端容器）；本地终端没有可转的目标
+  if (procPollTimer !== null || !forwardTarget()) return
   procPollTimer = window.setInterval(() => void pollRemoteListeners(), PROC_POLL_MS)
 }
 
@@ -185,9 +188,14 @@ function handleAgentPorts(data: { listening?: number[]; added?: number[] }): voi
   }
 }
 
-/** 端口监视的统一入口：优先 agent 长连接，装不了/起不来都退回 /proc 轮询 */
+/** 端口监视的统一入口：普通 SSH 优先 agent 长连接；容器标签走 docker exec 轮询 */
 async function startPortWatch(): Promise<void> {
-  if (!isPlainSshId(props.sessionId)) return
+  if (!isPlainSshId(props.sessionId)) {
+    // agent 跑在宿主机上、读的是宿主机 netns —— 容器标签用不上它，
+    // 容器里的表走 docker exec 轮询（本机容器/本地终端 forwardTarget 为 null，不开）
+    startProcPoll()
+    return
+  }
   const st = await window.api.agentStatus(props.sessionId).catch(() => null)
   if (st?.installed) {
     try {

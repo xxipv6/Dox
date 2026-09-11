@@ -137,6 +137,15 @@ export interface DoxApi {
   ): Promise<void>
   /** 容器网桥 IP（端口转发建议的目标）；本机容器/无 IP/探测失败都返回 null */
   containerIp(parentSessionId: string, containerName: string): Promise<string | null>
+  /**
+   * 容器内 LISTEN 端口列表（docker exec 读容器 netns 的 /proc）。
+   * 容器有自己的 netns，宿主机那张表里看不到它的 socket。
+   * supported=false = 容器没 sh / 已停止 / 非 Linux，调用方应停止轮询。
+   */
+  containerListeners(
+    parentSessionId: string,
+    containerName: string
+  ): Promise<{ ports: number[]; supported: boolean }>
 
   // ---- 传输队列 ----
   /** 弹出本地文件选择框，选中文件上传到 remoteDir */

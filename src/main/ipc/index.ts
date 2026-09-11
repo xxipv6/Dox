@@ -182,6 +182,11 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.containerIp, (_event, parentSessionId: string, containerName: string) =>
     containerManager.containerIp(parentSessionId, containerName)
   )
+  ipcMain.handle(
+    IpcChannels.containerListeners,
+    (_event, parentSessionId: string, containerName: string) =>
+      containerManager.containerListeners(parentSessionId, containerName)
+  )
 
   // ---- 传输队列 ----
   ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string) => {
