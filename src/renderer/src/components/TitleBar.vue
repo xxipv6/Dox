@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import Icon from './Icon.vue'
 import Logo from './Logo.vue'
+import AiUsagePill from './AiUsagePill.vue'
 
 /**
  * 自绘标题栏。
@@ -43,21 +44,26 @@ onUnmounted(() => off?.())
       <span class="tb-title">Dox</span>
     </span>
 
-    <!-- macOS 有系统红绿灯，这三枚不画 -->
-    <span v-if="!isMac" class="tb-controls">
-      <button class="tb-btn" title="最小化" @click="api.windowMinimize()">
-        <Icon name="minus" :size="15" />
-      </button>
-      <button
-        class="tb-btn"
-        :title="maximized ? '向下还原' : '最大化'"
-        @click="api.windowToggleMaximize()"
-      >
-        <Icon :name="maximized ? 'restore' : 'square'" :size="13" />
-      </button>
-      <button class="tb-btn close" title="关闭" @click="api.windowClose()">
-        <Icon name="x" :size="15" />
-      </button>
+    <span class="tb-right">
+      <!-- AI 容量速览：没配账号时它自己不渲染，不占地方 -->
+      <AiUsagePill />
+
+      <!-- macOS 有系统红绿灯，这三枚不画 -->
+      <span v-if="!isMac" class="tb-controls">
+        <button class="tb-btn" title="最小化" @click="api.windowMinimize()">
+          <Icon name="minus" :size="15" />
+        </button>
+        <button
+          class="tb-btn"
+          :title="maximized ? '向下还原' : '最大化'"
+          @click="api.windowToggleMaximize()"
+        >
+          <Icon :name="maximized ? 'restore' : 'square'" :size="13" />
+        </button>
+        <button class="tb-btn close" title="关闭" @click="api.windowClose()">
+          <Icon name="x" :size="15" />
+        </button>
+      </span>
     </span>
   </header>
 </template>
@@ -99,6 +105,17 @@ onUnmounted(() => off?.())
   height: 100%;
   /* 按钮必须自己可点，否则会被上面整条的拖拽区吃掉 */
   -webkit-app-region: no-drag;
+}
+/* 右侧组合：容量挂件 + 窗口按钮，挂件自己已标 no-drag */
+.tb-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-right: var(--sp-2);
+  height: 100%;
+}
+.tb-right .tb-controls {
+  padding-right: 0;
 }
 .tb-btn {
   display: inline-flex;

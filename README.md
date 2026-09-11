@@ -74,6 +74,8 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-local-container-agent.mjs` | 本机容器 agent（LOCAL 分支，全程无 SSH）：本机起 alpine → 侧栏进入 → UI 安装（本机 docker cp 直拷）→ exec 回显 → procList 含主进程 → 右键进程面板 → 文件面板列容器根目录 |
 | `verify-agent-v050.mjs` | agent v0.5.0（全程本机容器）：fs_du 子项降序返回、续传协议位（重入 begin 报 existing_size、偏移补齐 commit 内容正确）、watch_stats top_procs 点名 CPU 燃烧器、本机容器状态条 + top 进程 chip 点击开进程面板（过滤预设 PID）、用量条点开 du 分解。跑前需 `node scripts/build-agent.mjs` |
 | `verify-nested-container.mjs` | 嵌套容器（任意深度 docker exec 链）：进 dind → 侧栏列出内层 inner → 进入（标题带 `▸` 链、echo 真执行）→ 内层 daemon 未运行的友好归类 + 原始报错折叠「详细信息」→ 嵌套标签无 SFTP/进程管理入口。前置：dox-sshd-test 里有 inner |
+| `verify-ai-usage.mjs` | AI 容量状态栏（真实接口）：UI 添加 Kimi 账号 → 标题栏挂件「Kimi xx%」→ 浮层 5h 窗/每周两行 → IPC 快照字段齐备。需要 `KIMI_TEST_KEY` 环境变量 |
+| `verify-terminal-drop.mjs` | 拖文件进终端：本地终端提示「粘贴路径」+ drop 后引号路径落进终端；拖出浮层消失 |
 | `verify-direct-container.mjs` | 直连容器（免宿主机标签）+ 容器标签独立存活：保存设备（不连接）→ 设备行展开箭头列出容器（后台传输会话，全程无宿主机终端标签）→ 点容器名直接进 → echo 可交互 → 服务器侧 TCP 连接数证明只有一条传输连接；再验孤儿保活：宿主标签里进的容器，关宿主标签后 echo 仍可交互、连接数不变，最后的容器标签关掉后连接才被回收 |
 | `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |
 | `verify-posix-integration.mjs` | 校验 POSIX 侧的同一契约：zsh（ZDOTDIR 注入）/ bash（--rcfile）/ fish（-C），装了哪个测哪个 |
@@ -162,6 +164,8 @@ src/
 - **磁盘用量分解 ✅**（agent v0.5.0 `fs_du`）：点文件面板底部用量条展开「谁占的」—— 当前目录直接子项按子树大小降序的条形列表（遍历上限 50 万项 / 15s，超了如实标「结果不完整」；不跨设备、不跟符号链接）；老 agent 给升级指路而不是糊 `unknown method` 原文
 - **断点续传 ✅**（agent v0.5.0）：传输 tmp 路径从随机改为确定性（`路径.dox-tmp-<sha1前4位>`），`fs_write_begin` 重入报 `existing_size` —— 失败留下的半截 tmp 下次从断点继续（**取消仍是放弃**：取消清 tmp，失败留 tmp）；tmp 比本地文件还长说明源已变，弃 tmp 重传；下载按本地已有长度续、本地比远端长则截断
 - **状态条 top 进程 ✅**（agent v0.5.0）：watch_stats 帧带帧间 CPU 差分 top3，≥10% 的「罪魁」点名在状态条上（`· sh` 样式，悬停看全命令与 PID），点击直接开进程面板并按该 PID 过滤。同版本起**本机容器也有状态条** —— 状态条订阅从端口推送里拆出来，不再依赖「有转发落点」
+- **拖到终端即传 ✅**：文件拖进终端面板 —— SSH/容器终端 = 上传到**当前目录**（cwd 来自 shell integration / cd 跟踪，浮层实时显示目标目录；嵌套容器提示暂不支持）；本地终端 = 粘贴引号包裹的路径（Finder 拖终端的经典手势）
+- **AI 容量速览 ✅**：标题栏常驻 Kimi Code / DeepSeek / GLM 的剩余配额（Kimi/GLM 看 5 小时滚动窗 + 每周窗，DeepSeek 看余额），主进程每 5 分钟轮询 + 点开看明细（重置时间、MCP 次数、赠送余额）；账号在设置里管理，Key 经系统钥匙串（safeStorage）加密落盘、不出主进程
 
 ## 已知待办（代码内 TODO）
 

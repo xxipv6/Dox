@@ -3,6 +3,8 @@ import Store from 'electron-store'
 import { safeStorage } from 'electron'
 import {
   AUTH_DECRYPT_FAILED,
+  type AiAccount,
+  type AiAccountInput,
   type CommandSnippet,
   type SavedSession,
   type SaveSessionInput,
@@ -13,6 +15,7 @@ import {
 interface StoreSchema {
   sessions: SavedSession[]
   snippets: CommandSnippet[]
+  aiAccounts: AiAccount[]
 }
 
 /**
@@ -23,7 +26,7 @@ interface StoreSchema {
 export class ConfigStore {
   private store = new Store<StoreSchema>({
     name: 'dox-config',
-    defaults: { sessions: [], snippets: [] }
+    defaults: { sessions: [], snippets: [], aiAccounts: [] }
   })
 
   list(): SavedSession[] {
@@ -123,6 +126,43 @@ export class ConfigStore {
       'snippets',
       this.listSnippets().filter((s) => s.id !== id)
     )
+  }
+
+  // ---- AI 账号（容量速览的查询对象；key 与会话密码同一套加密口径）----
+
+  listAiAccounts(): AiAccount[] {
+    return this.store.get('aiAccounts')
+  }
+
+  saveAiAccount(input: AiAccountInput): AiAccount {
+    const accounts = this.listAiAccounts()
+    const existing = input.id ? accounts.find((a) => a.id === input.id) : undefined
+    const account: AiAccount = {
+      id: existing?.id ?? randomUUID(),
+      name: input.name.trim() || input.provider,
+      provider: input.provider,
+      // 未重新填写 key 时保留旧密文（与会话密码同一惯例）
+      encryptedKey: input.apiKey ? this.encrypt(input.apiKey) : (existing?.encryptedKey ?? '')
+    }
+    const next = existing
+      ? accounts.map((a) => (a.id === account.id ? account : a))
+      : [...accounts, account]
+    this.store.set('aiAccounts', next)
+    return account
+  }
+
+  removeAiAccount(id: string): void {
+    this.store.set(
+      'aiAccounts',
+      this.listAiAccounts().filter((a) => a.id !== id)
+    )
+  }
+
+  /** 取回解密后的 apiKey，仅用于发起查询，不离开主进程 */
+  resolveAiKey(id: string): string {
+    const account = this.listAiAccounts().find((a) => a.id === id)
+    if (!account?.encryptedKey) throw new Error(`AI 账号不存在或未配置 key: ${id}`)
+    return this.decrypt(account.encryptedKey)
   }
 
   private encrypt(plain: string): string {

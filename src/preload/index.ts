@@ -3,6 +3,8 @@ import { IpcChannels } from '../shared/ipc'
 import type { DoxApi } from '../shared/api'
 import type {
   AgentStatsPayload,
+  AiAccountInput,
+  AiUsageSnapshot,
   DownloadRequest,
   DroppedFile,
   ForwardRule,
@@ -194,6 +196,18 @@ const api: DoxApi = {
     const listener = (_e: IpcRendererEvent, state: WindowState): void => cb(state)
     ipcRenderer.on(IpcChannels.windowState, listener)
     return () => ipcRenderer.removeListener(IpcChannels.windowState, listener)
+  },
+
+  // ---- AI 容量 ----
+  aiAccountList: () => ipcRenderer.invoke(IpcChannels.aiAccountList),
+  aiAccountSave: (input) => ipcRenderer.invoke(IpcChannels.aiAccountSave, input),
+  aiAccountDelete: (id) => ipcRenderer.invoke(IpcChannels.aiAccountDelete, id),
+  aiUsageGet: () => ipcRenderer.invoke(IpcChannels.aiUsageGet),
+  aiUsageRefresh: () => ipcRenderer.invoke(IpcChannels.aiUsageRefresh),
+  onAiUsageUpdate: (cb) => {
+    const listener = (_e: IpcRendererEvent, snapshot: AiUsageSnapshot): void => cb(snapshot)
+    ipcRenderer.on(IpcChannels.aiUsageUpdate, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.aiUsageUpdate, listener)
   }
 }
 

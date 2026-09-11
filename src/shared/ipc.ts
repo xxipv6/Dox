@@ -122,5 +122,16 @@ export const IpcChannels = {
   /** 问一次当前是否最大化 —— 渲染层挂载时要拿初始值，光靠事件会漏掉启动那一刻 */
   windowGetMaximized: 'window:getMaximized',
   /** 主进程 → 渲染进程：最大化状态变了，图标要在 □ / ❐ 之间切 */
-  windowState: 'window:state'
+  windowState: 'window:state',
+  /*
+   * AI 容量（Kimi Code / DeepSeek / GLM 配额速览）。
+   * 账号 key 走 safeStorage 加密落盘；查询结果由主进程缓存 + 定时轮询 + 事件广播。
+   */
+  aiAccountList: 'ai:accountList',
+  aiAccountSave: 'ai:accountSave',
+  aiAccountDelete: 'ai:accountDelete',
+  aiUsageGet: 'ai:usageGet',
+  aiUsageRefresh: 'ai:usageRefresh',
+  /** 主进程 → 渲染进程：一轮查询完成（含失败结果），快照整体替换 */
+  aiUsageUpdate: 'ai:usageUpdate'
 } as const

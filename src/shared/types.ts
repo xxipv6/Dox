@@ -387,3 +387,65 @@ export interface ExecResult {
   timed_out: boolean
   truncated: boolean
 }
+
+// ---- AI 容量（Kimi Code / DeepSeek / GLM 配额速览）----
+
+/** 支持的 AI 平台 */
+export type AiProvider = 'kimi' | 'deepseek' | 'glm'
+
+/** 持久化的 AI 账号（apiKey 经 safeStorage 加密落盘） */
+export interface AiAccount {
+  id: string
+  name: string
+  provider: AiProvider
+  encryptedKey: string
+}
+
+/** 保存账号时渲染进程提交的表单（明文 key 仅在此次 IPC 调用中存在） */
+export interface AiAccountInput {
+  id?: string
+  name: string
+  provider: AiProvider
+  /** 留空 = 保留旧 key（与密码字段同一惯例） */
+  apiKey?: string
+}
+
+/**
+ * 一个账号的一次查询结果。
+ *
+ * 三家平台的配额模型不同：Kimi/GLM 是「5 小时滚动窗 + 每周窗」，
+ * DeepSeek 是余额 —— 字段全部可选，界面按 provider 挑着渲染。
+ */
+export interface AiUsageResult {
+  id: string
+  name: string
+  provider: AiProvider
+  ok: boolean
+  error?: string
+  /** 套餐等级（kimi membership / glm level） */
+  membership?: string
+  /** 每周窗口（Kimi/GLM）：已用/剩余百分比与重置时间 */
+  weeklyUsed?: number
+  weeklyRemaining?: number
+  weeklyReset?: string
+  /** 5 小时滚动窗（Kimi/GLM） */
+  fiveHourUsed?: number
+  fiveHourRemaining?: number
+  fiveHourReset?: string
+  /** 余额（DeepSeek） */
+  currency?: string
+  totalBalance?: number
+  grantedBalance?: number
+  toppedUpBalance?: number
+  isAvailable?: boolean
+  /** MCP 月度次数（GLM） */
+  mcpUsed?: number
+  mcpLimit?: number
+  mcpRemaining?: number
+}
+
+/** 一轮全量查询的快照（主进程缓存并广播） */
+export interface AiUsageSnapshot {
+  fetchedAt: string
+  accounts: AiUsageResult[]
+}

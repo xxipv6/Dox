@@ -740,8 +740,7 @@ function openProcesses(): void {
   })
 }
 
-/** 状态条点名的「罪魁进程」：帧间 CPU 差分 top1，≥10% 才显示（空闲机器点名是噪音） */
-const topProc = computed(() => {
+/** 状态条点名的「罪魁进程」：帧间 CPU 差分 top1，≥10% 才显示（空闲机器点名是噪音） */const topProc = computed(() => {
   const t = agentStats.value?.top_procs?.[0]
   return t && t.cpu_percent >= 10 ? t : null
 })
@@ -762,6 +761,93 @@ function openTopProc(): void {
     label: t.containerName ? `容器 ${t.containerName}` : (tab?.title ?? '主机'),
     filter: String(top.pid)
   })
+}
+
+/*
+ * ---- 拖文件进终端 ----
+ *
+ * 本地终端：粘贴引号包裹的路径（Finder 拖进终端的经典手势）。
+ * SSH / 容器：上传到**当前目录**（cwd 来自 shell integration / cd 跟踪，
+ * 都没有时回退家目录）——「随手一扔」不用先开 SFTP 面板。
+ * 嵌套容器没有传输通道（docker cp 链没有嵌套实现），拖进来给提示不静默吞。
+ */
+const dropActive = ref(false)
+let dragDepth = 0
+
+/** 拖放目标：本地 = 粘贴路径；远端 = 上传到 cwd */
+const dropTarget = computed<
+  | { kind: 'local' }
+  | { kind: 'remote'; sessionId: string; containerName?: string; dir: string }
+  | { kind: 'unsupported'; reason: string }
+  | null
+>(() => {
+  const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
+  if (!tab) return null
+  if (tab.kind === 'local') return { kind: 'local' }
+  const dir = store.cwdBySession[props.sessionId] ?? store.homeBySession[props.sessionId] ?? '/'
+  if (tab.kind === 'container' && tab.container) {
+    if (tab.container.chain?.length) {
+      return { kind: 'unsupported', reason: '嵌套容器暂不支持文件传输' }
+    }
+    return {
+      kind: 'remote',
+      sessionId: tab.container.parentSessionId,
+      containerName: tab.container.containerName,
+      dir
+    }
+  }
+  return { kind: 'remote', sessionId: props.sessionId, dir }
+})
+
+/** 拖入时浮层上的一句话 */
+const dropHint = computed(() => {
+  const t = dropTarget.value
+  if (!t) return ''
+  if (t.kind === 'local') return '松开粘贴路径'
+  if (t.kind === 'unsupported') return t.reason
+  return `松开上传到 ${t.dir}`
+})
+
+function onDragOver(e: DragEvent): void {
+  if (![...(e.dataTransfer?.types ?? [])].includes('Files')) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+  dropActive.value = true
+}
+
+function onDragEnter(e: DragEvent): void {
+  if (![...(e.dataTransfer?.types ?? [])].includes('Files')) return
+  dragDepth++
+}
+
+function onDragLeave(): void {
+  // 进出子元素会成对触发 enter/leave，用计数器而不是单次 leave 判定离开
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dropActive.value = false
+}
+
+/** 引号包裹路径（粘进 shell 的口径：单引号 + 内部转义） */
+function shellQuote(p: string): string {
+  return `'${p.replace(/'/g, `'\\''`)}'`
+}
+
+function onDropFiles(e: DragEvent): void {
+  e.preventDefault()
+  dropActive.value = false
+  dragDepth = 0
+  const files = [...(e.dataTransfer?.files ?? [])].map((f) => ({
+    path: window.api.getPathForFile(f),
+    name: f.name,
+    size: f.size
+  }))
+  const t = dropTarget.value
+  if (!files.length || !t || t.kind === 'unsupported') return
+  if (t.kind === 'local') {
+    // 不补回车 —— 粘路径是输入的一部分，执行与否留给用户
+    window.api.input(props.sessionId, files.map((f) => shellQuote(f.path)).join(' '))
+    return
+  }
+  void window.api.enqueueDropped(t.sessionId, t.dir, files, t.containerName)
 }
 
 onMounted(() => {
@@ -1012,7 +1098,16 @@ defineExpose({ refitAndFocus })
       class="terminal-container"
       :style="{ background: settings.currentPreset.theme.background }"
       @contextmenu.prevent="openMenu"
+      @dragover="onDragOver"
+      @dragenter="onDragEnter"
+      @dragleave="onDragLeave"
+      @drop="onDropFiles"
     ></div>
+
+    <!-- 拖文件进来的目标提示浮层（pointer-events none：别把 drop 从终端上抢走） -->
+    <div v-if="dropActive" class="drop-veil">
+      <span>{{ dropHint }}</span>
+    </div>
 
     <!-- 断线重连状态条：重连期间一直挂着，随时可以停下 -->
     <div v-if="reconnect" class="reconnect-bar">
@@ -1100,6 +1195,27 @@ defineExpose({ refitAndFocus })
   position: relative;
   width: 100%;
   height: 100%;
+}
+/* 拖文件进来的提示浮层：只展示不拦截，drop 还得落在终端上 */
+.drop-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 2px dashed var(--accent-text);
+  border-radius: var(--r-md);
+  z-index: 5;
+}
+.drop-veil span {
+  background: var(--bg-panel);
+  border-radius: var(--r-pill);
+  padding: 6px 14px;
+  font-size: var(--fs-sm);
+  color: var(--accent-text);
+  box-shadow: var(--shadow-sm);
 }
 .terminal-container {
   width: 100%;

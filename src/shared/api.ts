@@ -1,5 +1,8 @@
 import type {
   AgentStatsPayload,
+  AiAccount,
+  AiAccountInput,
+  AiUsageSnapshot,
   AppSettings,
   CommandSnippet,
   ContainerControlAction,
@@ -289,4 +292,17 @@ export interface DoxApi {
   windowIsMaximized(): Promise<boolean>
   /** 订阅最大化状态变化（图标在 □ / ❐ 之间切） */
   onWindowState(cb: (state: WindowState) => void): () => void
+
+  // ---- AI 容量 ----
+  /** 列出已配置的 AI 账号（不含 key —— key 不出主进程） */
+  aiAccountList(): Promise<Omit<AiAccount, 'encryptedKey'>[]>
+  /** 新增/更新账号；apiKey 留空表示保留旧 key */
+  aiAccountSave(input: AiAccountInput): Promise<void>
+  aiAccountDelete(id: string): Promise<void>
+  /** 最近一次查询快照；还没查过返回 null */
+  aiUsageGet(): Promise<AiUsageSnapshot | null>
+  /** 立即查询一轮（手动刷新；服务内部合并并发） */
+  aiUsageRefresh(): Promise<AiUsageSnapshot>
+  /** 订阅查询结果广播（定时轮询与手动刷新都从这里推） */
+  onAiUsageUpdate(cb: (snapshot: AiUsageSnapshot) => void): () => void
 }

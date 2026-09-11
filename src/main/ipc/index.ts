@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { IpcChannels } from '../../shared/ipc'
 import type {
+  AiAccountInput,
   AppSettings,
   CommandSnippet,
   ContainerControlAction,
@@ -33,6 +34,7 @@ import type { ContainerIO } from '../sftp/TransferManager'
 import { agentVersionOlder } from '../../shared/agentVersion'
 import { createAgentStreamIO } from '../agent/agentStream'
 import type { ProcessService } from '../proc/ProcessService'
+import type { AiUsageService } from '../aiusage/AiUsageService'
 
 /** agentCall 白名单泛通道允许的方法（0.4.0 起；fs_* 是既有方法，走这里也行） */
 const AGENT_CALL_ALLOW = new Set([
@@ -68,7 +70,8 @@ export function registerIpc(
   layoutStore: LayoutStore,
   settingsStore: SettingsStore,
   agentManager: AgentManager,
-  processService: ProcessService
+  processService: ProcessService,
+  aiUsageService: AiUsageService
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle(
@@ -498,4 +501,24 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.windowGetMaximized, (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
   })
+
+  /*
+   * ---- AI 容量 ----
+   * 账号列表返回时剥掉 encryptedKey —— key 的职责是在主进程里完成一次
+   * HTTPS 查询，没有理由越过 IPC 到渲染层（与会话密码同一口径）。
+   */
+  ipcMain.handle(IpcChannels.aiAccountList, () =>
+    configStore.listAiAccounts().map(({ encryptedKey: _k, ...rest }) => rest)
+  )
+  ipcMain.handle(IpcChannels.aiAccountSave, (_event, input: AiAccountInput) => {
+    configStore.saveAiAccount(input)
+    // 账号变了立即查一轮，让界面马上有反馈（而不是等下一个 5 分钟周期）
+    void aiUsageService.refresh()
+  })
+  ipcMain.handle(IpcChannels.aiAccountDelete, (_event, id: string) => {
+    configStore.removeAiAccount(id)
+    void aiUsageService.refresh()
+  })
+  ipcMain.handle(IpcChannels.aiUsageGet, () => aiUsageService.get())
+  ipcMain.handle(IpcChannels.aiUsageRefresh, () => aiUsageService.refresh())
 }

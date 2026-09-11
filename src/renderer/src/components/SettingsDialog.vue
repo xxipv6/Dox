@@ -3,7 +3,7 @@ import { onMounted, ref } from 'vue'
 import { FONT_PRESETS, UI_THEME_OPTIONS, useSettingsStore } from '../stores/settings'
 import { AUTO_THEME_ID, TERMINAL_THEMES } from '../utils/themes'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
-import type { LocalShellInfo } from '@shared/types'
+import type { AiProvider, LocalShellInfo } from '@shared/types'
 
 const settings = useSettingsStore()
 
@@ -13,8 +13,52 @@ useEscapeToClose(
 )
 const shells = ref<LocalShellInfo[]>([])
 
+// ---- AI 容量账号（key 走 safeStorage 加密落盘，列表不回显 key）----
+interface AiAccountRow {
+  id: string
+  name: string
+  provider: AiProvider
+}
+const AI_PROVIDERS: { id: AiProvider; name: string }[] = [
+  { id: 'kimi', name: 'Kimi Code' },
+  { id: 'deepseek', name: 'DeepSeek' },
+  { id: 'glm', name: 'GLM（智谱）' }
+]
+const aiAccounts = ref<AiAccountRow[]>([])
+const aiProvider = ref<AiProvider>('kimi')
+const aiName = ref('')
+const aiKey = ref('')
+const aiBusy = ref(false)
+
+async function loadAiAccounts(): Promise<void> {
+  aiAccounts.value = await window.api.aiAccountList()
+}
+
+async function addAiAccount(): Promise<void> {
+  if (!aiKey.value.trim() || aiBusy.value) return
+  aiBusy.value = true
+  try {
+    await window.api.aiAccountSave({
+      name: aiName.value.trim() || AI_PROVIDERS.find((p) => p.id === aiProvider.value)?.name || '',
+      provider: aiProvider.value,
+      apiKey: aiKey.value.trim()
+    })
+    aiName.value = ''
+    aiKey.value = ''
+    await loadAiAccounts()
+  } finally {
+    aiBusy.value = false
+  }
+}
+
+async function removeAiAccount(id: string): Promise<void> {
+  await window.api.aiAccountDelete(id)
+  await loadAiAccounts()
+}
+
 onMounted(async () => {
   shells.value = await window.api.listLocalShells()
+  await loadAiAccounts()
 })
 </script>
 
@@ -125,6 +169,38 @@ onMounted(async () => {
         <p class="sub-note">
           新开的本地终端生效。支持 shell integration 的 shell 会实时上报工作目录与命令退出码；
           cmd 只能上报目录（无退出码），WSL 暂不支持。
+        </p>
+      </div>
+
+      <div class="field">
+        <label>AI 容量（标题栏速览）</label>
+        <div v-if="aiAccounts.length" class="ai-acc-list">
+          <div v-for="a in aiAccounts" :key="a.id" class="ai-acc-row">
+            <span class="ai-acc-name">{{ a.name }}</span>
+            <span class="ai-acc-provider">{{ AI_PROVIDERS.find((p) => p.id === a.provider)?.name ?? a.provider }}</span>
+            <button class="ai-del" title="删除账号" @click="removeAiAccount(a.id)">×</button>
+          </div>
+        </div>
+        <div class="ai-add">
+          <select v-model="aiProvider" class="ai-provider-select">
+            <option v-for="p in AI_PROVIDERS" :key="p.id" :value="p.id">{{ p.name }}</option>
+          </select>
+          <input v-model="aiName" class="ai-name-input" placeholder="备注名（可空）" spellcheck="false" />
+          <input
+            v-model="aiKey"
+            class="ai-key-input"
+            type="password"
+            placeholder="API Key"
+            spellcheck="false"
+            @keydown.enter="addAiAccount"
+          />
+          <button class="ai-add-btn" :disabled="!aiKey.trim() || aiBusy" @click="addAiAccount">
+            添加
+          </button>
+        </div>
+        <p class="sub-note">
+          配置后标题栏显示剩余容量（Kimi/GLM 看 5 小时滚动窗，DeepSeek 看余额），
+          每 5 分钟自动刷新；Key 经系统钥匙串加密存储，只用于配额查询。
         </p>
       </div>
 
@@ -326,6 +402,93 @@ select:focus {
   color: var(--fg-muted);
   margin: var(--sp-2) 0 0;
   line-height: 1.6;
+}
+
+/* AI 容量账号管理 */
+.ai-acc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: var(--sp-2);
+}
+.ai-acc-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 5px var(--sp-2);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+}
+.ai-acc-row:hover {
+  background: var(--bg-hover);
+}
+.ai-acc-name {
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-acc-provider {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.ai-del {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: var(--fs-md);
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: var(--r-xs);
+}
+.ai-del:hover {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+}
+.ai-add {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: center;
+}
+.ai-provider-select {
+  width: auto;
+  flex-shrink: 0;
+}
+.ai-add input {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  padding: 6px 8px;
+  font-size: var(--fs-sm);
+  outline: none;
+  min-width: 0;
+}
+.ai-add input:focus {
+  border-color: var(--accent);
+}
+.ai-name-input {
+  width: 90px;
+}
+.ai-key-input {
+  flex: 1;
+}
+.ai-add-btn {
+  flex-shrink: 0;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--r-md);
+  color: var(--fg-on-accent);
+  font-size: var(--fs-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.ai-add-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 .note {
   font-size: var(--fs-sm);
