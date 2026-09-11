@@ -299,6 +299,12 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
   「任意 agent 方法」的形，主进程 handler 必须校验 method ∈ 显式集合
   （src/main/ipc/index.ts 的 AGENT_CALL_ALLOW）—— 泛通道不等于泛权限，
   加新 agent 方法时记得同步白名单，否则调用方拿到的是「不在白名单」的错。
+- **「目标解析」函数各有适用域，别互相复用。** TerminalPanel 的
+  `forwardTarget()` 对本机容器**故意**返回 null（端口转发建议：网桥 IP
+  藏在 VM 里，转了也到不了）—— 进程管理拿它当判据，本机容器就吃不到
+  「进程管理」菜单（更阴的是菜单项 v-if 用了另一个更宽的 computed，
+  菜单显示了点下去没反应）。新能力开闸前先想清楚：本机容器/本地终端
+  到底该不该有，再有意识地选判据。
 
 ---
 

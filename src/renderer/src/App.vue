@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { defineAsyncComponent, computed, nextTick, onMounted, ref, watch } from 'vue'
-import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import { useSessionStore, type SessionTab } from './stores/sessions'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
@@ -134,16 +133,16 @@ async function toggleSftp(): Promise<void> {
 }
 
 /**
- * 当前标签的文件面板目标：SSH 标签浏览宿主机；远端容器标签浏览容器
+ * 当前标签的文件面板目标：SSH 标签浏览宿主机；容器标签浏览容器
  * （经容器里的 dox-agent，FileExplorer 内部处理未安装的引导）。
- * 本地终端 / 本机容器没有可浏览的目标。
+ * 本机容器也在内（agent 通道走本机 docker CLI）；本地终端没有可浏览的目标。
  */
 const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: string; containerName: string } } | null>(() => {
   const tab = store.activeTab
   const paneId = store.activePane?.sessionId
   if (!tab || !paneId) return null
   if (tab.kind === 'ssh') return { sessionId: paneId }
-  if (tab.kind === 'container' && tab.container && tab.container.parentSessionId !== LOCAL_CONTAINER_TARGET) {
+  if (tab.kind === 'container' && tab.container) {
     return {
       sessionId: paneId,
       container: {

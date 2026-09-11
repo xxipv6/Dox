@@ -2,12 +2,15 @@ import fs from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { app, type WebContents } from 'electron'
 import type { ClientChannel } from 'ssh2'
 import type { SessionManager } from '../ssh/SessionManager'
 import { execCapture } from '../ssh/remoteExec'
 import { mkdirRemoteRecursive } from '../sftp/sftpUtils'
 import { assertContainerTarget, parseDockerInfoPlatform } from '../container/runtime'
+import { runLocal } from '../container/localRun'
+import { isLocalContainerTarget } from '../../shared/sessionId'
 import { IpcChannels } from '../../shared/ipc'
 
 const REMOTE_BIN = '.dox/dox-agent'
@@ -44,8 +47,52 @@ function keyOf(sessionId: string, containerName?: string): string {
   return containerName ? `${sessionId}::${containerName}` : sessionId
 }
 
+/**
+ * serve 通道的流的最小形状：远端是 SSH exec 通道，本机容器是
+ * `docker exec -i` 子进程的 stdio —— 适配成同一形状后，握手/分发/挂死
+ * 处理一套代码两条路通用。
+ */
+interface ChannelStream {
+  write(data: string): void
+  close(): void
+  onData(cb: (d: Buffer) => void): void
+  /** close 与 error 合一：对上层来说「通道死了」只有一个含义 */
+  onDead(cb: () => void): void
+}
+
+/** SSH exec 通道 → ChannelStream */
+function wrapSshChannel(stream: ClientChannel): ChannelStream {
+  return {
+    write: (d) => stream.write(d),
+    close: () => stream.close(),
+    onData: (cb) => stream.on('data', cb),
+    onDead: (cb) => {
+      stream.on('close', cb)
+      stream.on('error', cb)
+    }
+  }
+}
+
+/** 本机 `docker exec -i` 子进程 → ChannelStream（stderr 继承主进程，便于排查） */
+function wrapLocalProc(proc: ChildProcess): ChannelStream {
+  return {
+    write: (d) => {
+      proc.stdin?.write(d)
+    },
+    close: () => {
+      try { proc.stdin?.end() } catch { /* 已死 */ }
+      proc.kill('SIGKILL')
+    },
+    onData: (cb) => proc.stdout?.on('data', cb),
+    onDead: (cb) => {
+      proc.on('close', cb)
+      proc.on('error', cb)
+    }
+  }
+}
+
 interface Channel {
-  stream: ClientChannel
+  stream: ChannelStream
   nextId: number
   pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>
 }
@@ -88,6 +135,26 @@ export class AgentManager {
     const key = keyOf(sessionId, containerName)
     const cached = this.cache.get(key)
     if (cached) return cached
+    // 本机容器：没有 SSH，状态/安装/通道全部走本机 docker CLI
+    if (isLocalContainerTarget(sessionId)) {
+      if (!containerName) return { installed: false }
+      try {
+        assertContainerTarget(containerName)
+        const binary = await this.resolveRuntime(sessionId)
+        if (!binary) return { installed: false }
+        const res = await runLocal(binary, ['exec', containerName, CTR_BIN, 'version'], {
+          timeoutMs: 8000
+        })
+        const status: AgentStatus = {
+          installed: true,
+          version: (JSON.parse(res.stdout.trim()) as { version: string }).version
+        }
+        this.cache.set(key, status)
+        return status
+      } catch {
+        return { installed: false }
+      }
+    }
     const client = this.sessions.getClient(sessionId)
     if (!client) return { installed: false }
     try {
@@ -128,25 +195,37 @@ export class AgentManager {
     sessionId: string,
     containerName?: string
   ): Promise<{ localBin: string; osArch: string }> {
-    const client = this.sessions.getClient(sessionId)
-    if (!client) throw new Error('会话已断开，无法安装')
-
     let osName: string
     let machine: string
-    if (containerName) {
+    if (isLocalContainerTarget(sessionId)) {
+      // 本机容器：docker info 本机跑。Docker Desktop 的虚拟机架构即容器架构
+      if (!containerName) throw new Error('本机宿主机不在助手支持范围（只有 Linux 构建）')
       assertContainerTarget(containerName)
       const binary = await this.resolveRuntime(sessionId)
-      if (!binary) throw new Error('这台远端没有可用的容器运行时')
-      const res = await execCapture(client, `${binary} info`, { timeoutMs: 10_000 })
+      if (!binary) throw new Error('本机没有可用的容器运行时')
+      const res = await runLocal(binary, ['info'], { timeoutMs: 10_000 })
       const platform = parseDockerInfoPlatform(res.stdout)
       if (!platform) throw new Error('读不到容器运行时的平台信息')
       osName = platform.os
       machine = platform.arch
     } else {
-      const uname = (await execCapture(client, 'uname -sm')).stdout.trim()
-      const parts = uname.split(/\s+/)
-      osName = parts[0] ?? ''
-      machine = parts[1] ?? ''
+      const client = this.sessions.getClient(sessionId)
+      if (!client) throw new Error('会话已断开，无法安装')
+      if (containerName) {
+        assertContainerTarget(containerName)
+        const binary = await this.resolveRuntime(sessionId)
+        if (!binary) throw new Error('这台远端没有可用的容器运行时')
+        const res = await execCapture(client, `${binary} info`, { timeoutMs: 10_000 })
+        const platform = parseDockerInfoPlatform(res.stdout)
+        if (!platform) throw new Error('读不到容器运行时的平台信息')
+        osName = platform.os
+        machine = platform.arch
+      } else {
+        const uname = (await execCapture(client, 'uname -sm')).stdout.trim()
+        const parts = uname.split(/\s+/)
+        osName = parts[0] ?? ''
+        machine = parts[1] ?? ''
+      }
     }
 
     if (osName.toLowerCase() !== 'linux') {
@@ -175,6 +254,25 @@ export class AgentManager {
    * docker cp 保留权限位，容器里不需要 chmod（distroless 没有 chmod）。
    */
   async install(sessionId: string, containerName?: string): Promise<AgentStatus> {
+    // 本机容器：本机文件系统直达，docker cp 直拷，不需要 SSH 中转
+    if (isLocalContainerTarget(sessionId)) {
+      if (!containerName) throw new Error('本机宿主机不在助手支持范围（只有 Linux 构建）')
+      assertContainerTarget(containerName)
+      const { localBin, osArch } = await this.pickBinary(sessionId, containerName)
+      const binary = (await this.resolveRuntime(sessionId))!
+      // docker cp 保留权限位，但本地构建产物未必带 +x（比如从别处拷来的），兜一手
+      await fs.promises.chmod(localBin, 0o755).catch(() => undefined)
+      await runLocal(binary, ['cp', localBin, `${containerName}:${CTR_BIN}`], { timeoutMs: 60_000 })
+      const out = await runLocal(binary, ['exec', containerName, CTR_BIN, 'version'], {
+        timeoutMs: 8000
+      })
+      const version = (JSON.parse(out.stdout.trim()) as { version: string }).version
+      const status: AgentStatus = { installed: true, version, osArch }
+      this.cache.set(keyOf(sessionId, containerName), status)
+      this.restartChannelAfterInstall(keyOf(sessionId, containerName))
+      return status
+    }
+
     const client = this.sessions.getClient(sessionId)
     if (!client) throw new Error('会话已断开，无法安装')
     const { localBin, osArch } = await this.pickBinary(sessionId, containerName)
@@ -359,29 +457,44 @@ export class AgentManager {
     const existing = this.channels.get(key)
     if (existing) return existing
 
-    const client = this.sessions.getClient(sessionId)
-    if (!client) throw new Error('会话已断开')
-
-    let command: string
-    if (containerName) {
+    let stream: ChannelStream
+    if (isLocalContainerTarget(sessionId)) {
+      // 本机容器：本机 spawn docker exec -i 承载 NDJSON（-i 不开 pty，pty 会把 NDJSON 搅脏）
+      if (!containerName) throw new Error('本机宿主机不在助手支持范围')
       assertContainerTarget(containerName)
       const binary = await this.resolveRuntime(sessionId)
-      if (!binary) throw new Error('这台远端没有可用的容器运行时')
-      command = `${binary} exec -i ${containerName} ${CTR_BIN} serve`
+      if (!binary) throw new Error('本机没有可用的容器运行时')
+      const proc = spawn(binary, ['exec', '-i', containerName, CTR_BIN, 'serve'], {
+        stdio: ['pipe', 'pipe', 'inherit']
+      })
+      stream = wrapLocalProc(proc)
     } else {
-      command = `~/.dox/dox-agent serve`
-    }
+      const client = this.sessions.getClient(sessionId)
+      if (!client) throw new Error('会话已断开')
 
-    const stream = await new Promise<ClientChannel>((resolve, reject) => {
-      client.exec(command, { pty: false }, (err, ch) => (err ? reject(err) : resolve(ch)))
-    })
+      let command: string
+      if (containerName) {
+        assertContainerTarget(containerName)
+        const binary = await this.resolveRuntime(sessionId)
+        if (!binary) throw new Error('这台远端没有可用的容器运行时')
+        command = `${binary} exec -i ${containerName} ${CTR_BIN} serve`
+      } else {
+        command = `~/.dox/dox-agent serve`
+      }
+
+      stream = wrapSshChannel(
+        await new Promise<ClientChannel>((resolve, reject) => {
+          client.exec(command, { pty: false }, (err, ch) => (err ? reject(err) : resolve(ch)))
+        })
+      )
+    }
 
     const ch: Channel = { stream, nextId: 1, pending: new Map() }
     this.channels.set(key, ch)
     const w = this.watches.get(key)
 
     let buf = ''
-    stream.on('data', (d: Buffer) => {
+    stream.onData((d: Buffer) => {
       buf += d.toString('utf8')
       let idx: number
       while ((idx = buf.indexOf('\n')) >= 0) {
@@ -408,8 +521,7 @@ export class AgentManager {
       }
     })
     const onDead = (): void => this.dropChannel(key, ch)
-    stream.on('close', onDead)
-    stream.on('error', onDead)
+    stream.onDead(onDead)
 
     // hello 握手：确认对面真是 agent 而不是 shell 报错
     try {

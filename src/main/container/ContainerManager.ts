@@ -365,7 +365,15 @@ export class ContainerManager {
 
   /** 该父会话上的容器 runtime 二进制名（AgentManager 拼 docker exec/cp 命令用） */
   async runtimeBinary(parentSessionId: string): Promise<string | null> {
-    if (isLocalContainerTarget(parentSessionId)) return null
+    // 本机：二进制是我们自己探出来缓存的（docker/podman），不需要 SSH
+    if (isLocalContainerTarget(parentSessionId)) {
+      try {
+        if (!this.runtimeByParent.has(LOCAL_CONTAINER_TARGET)) await this.list(LOCAL_CONTAINER_TARGET)
+        return this.runtimeByParent.get(LOCAL_CONTAINER_TARGET)?.binary ?? null
+      } catch {
+        return null
+      }
+    }
     if (!this.getClient(parentSessionId)) return null
     try {
       if (!this.runtimeByParent.has(parentSessionId)) await this.list(parentSessionId)

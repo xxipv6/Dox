@@ -2,7 +2,6 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { CommandSnippet, ExecResult } from '@shared/types'
 import { agentVersionOlder } from '@shared/agentVersion'
-import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import { useSessionStore } from '../stores/sessions'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
@@ -44,13 +43,13 @@ function pasteOnly(s: CommandSnippet): void {
 
 // ---- 静默执行：不开终端，经 agent exec（argv 不经 shell）跑完拿回输出 ----
 
-/** 静默执行的目标（同进程面板：SSH 标签 → 宿主机；远端容器标签 → 容器） */
+/** 静默执行的目标（同进程面板：SSH 标签 → 宿主机；容器标签 → 容器，本机容器经本机 docker） */
 const execTarget = computed<{ sessionId: string; containerName?: string } | null>(() => {
   const tab = store.activeTab
   const paneId = store.activePane?.sessionId
   if (!tab || !paneId) return null
   if (tab.kind === 'ssh') return { sessionId: paneId }
-  if (tab.kind === 'container' && tab.container && tab.container.parentSessionId !== LOCAL_CONTAINER_TARGET) {
+  if (tab.kind === 'container' && tab.container) {
     return { sessionId: tab.container.parentSessionId, containerName: tab.container.containerName }
   }
   return null

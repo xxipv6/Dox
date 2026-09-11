@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useSessionStore } from '../stores/sessions'
-import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
@@ -30,9 +29,9 @@ const probeFailed = ref(false)
  *
  * 目标解析刻意不用裸 activeSessionId（同 ContainerPanel 的教训）：
  * 聚焦在**容器标签**时 activeSessionId 是 container- 前缀的容器会话，
- * 它没有自己的 SSH 连接（借父会话的 docker exec 通道），拿去装 agent
- * 只会得到「会话已断开」。容器标签下装的是**宿主机**的助手 ——
- * 容器里的端口发现本就由宿主机助手经 docker 完成，不用往容器里装。
+ * 它没有自己的 SSH 连接（借父会话的 docker exec 通道）——容器目标统一
+ * 解析成（父会话, 容器名）；本机容器的父会话是 LOCAL_CONTAINER_TARGET
+ * 哨兵，AgentManager 对它走本机 docker CLI，一样能装。
  */
 
 /** 安装目标：容器标签 → 容器内（父会话承载传输）；普通 SSH 标签 → 宿主机；其余 → null */
@@ -41,7 +40,7 @@ const target = computed<{ sessionId: string; containerName?: string } | null>(()
   if (!id) return null
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === id))
   if (tab?.kind === 'container' && tab.container) {
-    if (tab.container.parentSessionId === LOCAL_CONTAINER_TARGET) return null
+    // 本机容器（LOCAL_CONTAINER_TARGET）也允许：AgentManager 对它走本机 docker CLI，不经 SSH
     return { sessionId: tab.container.parentSessionId, containerName: tab.container.containerName }
   }
   if (tab?.kind === 'local') return null

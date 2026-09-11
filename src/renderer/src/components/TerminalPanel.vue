@@ -670,12 +670,26 @@ function focusTerminal(): void {
   term?.focus()
 }
 
-/** 进程管理的打开目标（同转发落点：SSH → 宿主机；远端容器 → 容器）。本地终端没有 */
-const procTarget = computed(() => forwardTarget())
+/**
+ * 进程管理的打开目标。
+ * SSH 标签 → 宿主机；远端容器 → 容器（经父会话）；本机容器 → 容器
+ * （经本机 docker CLI，AgentManager 的 LOCAL 分支）。本地终端没有这项。
+ * 注意不复用 forwardTarget：端口转发建议对本机容器是**故意**关闭的
+ * （网桥 IP 藏在 VM 里转了也到不了），进程管理没有这个问题。
+ */
+const procTarget = computed(() => {
+  const fwd = forwardTarget()
+  if (fwd) return fwd
+  const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
+  if (tab?.kind === 'container' && tab.container) {
+    return { sessionId: tab.container.parentSessionId, containerName: tab.container.containerName }
+  }
+  return null
+})
 
 function openProcesses(): void {
   closeMenu()
-  const t = forwardTarget()
+  const t = procTarget.value
   if (!t) return
   const tab = store.tabs.find((tb) => tb.panes.some((p) => p.sessionId === props.sessionId))
   store.openProcPanel({
