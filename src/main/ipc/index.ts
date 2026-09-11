@@ -28,6 +28,8 @@ import type { SftpService } from '../sftp/SftpService'
 import type { TransferManager } from '../sftp/TransferManager'
 import type { ForwardManager } from '../forward/ForwardManager'
 import type { AgentManager } from '../agent/AgentManager'
+import { createContainerTransferIO } from '../container/containerTransfer'
+import type { ContainerIO } from '../sftp/TransferManager'
 
 /** 集中注册所有 IPC 路由 */
 export function registerIpc(
@@ -47,6 +49,16 @@ export function registerIpc(
     IpcChannels.sshConnect,
     (event, config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
       sessionManager.connect(config, event.sender, term, opts)
+  )
+  /*
+   * 传输会话（直连容器的承载）：只收已保存设备 id，凭证不出主进程。
+   * 渲染层拿不到也不该拿到这条后台连接的认证信息 —— 它只是容器/文件
+   * 操作的传输层，不是给用户用的终端。
+   */
+  ipcMain.handle(IpcChannels.sshConnectTransport, (event, savedSessionId: string) =>
+    sessionManager.connectTransport(configStore.resolveConnection(savedSessionId), event.sender, {
+      savedSessionId
+    })
   )
   // ---- 本地终端 ----
   ipcMain.handle(IpcChannels.localConnect, (event, term: TermSize, shellId?: string) =>
@@ -112,37 +124,37 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.configDelete, (_event, id: string) => configStore.remove(id))
   ipcMain.handle(IpcChannels.configGetAuth, (_event, id: string) => configStore.resolveAuth(id))
 
-  // ---- SFTP 文件操作 ----
-  ipcMain.handle(IpcChannels.sftpList, (_event, sessionId: string, dir: string) =>
-    sftpService.list(sessionId, dir)
+  // ---- SFTP 文件操作（containerName 给了就走容器内 agent fs 协议）----
+  ipcMain.handle(IpcChannels.sftpList, (_event, sessionId: string, dir: string, containerName?: string) =>
+    sftpService.list(sessionId, dir, containerName)
   )
-  ipcMain.handle(IpcChannels.sftpRealpath, (_event, sessionId: string, path: string) =>
-    sftpService.realpath(sessionId, path)
+  ipcMain.handle(IpcChannels.sftpRealpath, (_event, sessionId: string, path: string, containerName?: string) =>
+    sftpService.realpath(sessionId, path, containerName)
   )
-  ipcMain.handle(IpcChannels.sftpStat, (_event, sessionId: string, path: string) =>
-    sftpService.stat(sessionId, path)
+  ipcMain.handle(IpcChannels.sftpStat, (_event, sessionId: string, path: string, containerName?: string) =>
+    sftpService.stat(sessionId, path, containerName)
   )
-  ipcMain.handle(IpcChannels.sftpMkdir, (_event, sessionId: string, path: string) =>
-    sftpService.mkdir(sessionId, path)
+  ipcMain.handle(IpcChannels.sftpMkdir, (_event, sessionId: string, path: string, containerName?: string) =>
+    sftpService.mkdir(sessionId, path, containerName)
   )
-  ipcMain.handle(IpcChannels.sftpRename, (_event, sessionId: string, from: string, to: string) =>
-    sftpService.rename(sessionId, from, to)
+  ipcMain.handle(IpcChannels.sftpRename, (_event, sessionId: string, from: string, to: string, containerName?: string) =>
+    sftpService.rename(sessionId, from, to, containerName)
   )
   ipcMain.handle(
     IpcChannels.sftpDelete,
-    (_event, sessionId: string, path: string, isDir: boolean) =>
-      sftpService.remove(sessionId, path, isDir)
+    (_event, sessionId: string, path: string, isDir: boolean, containerName?: string) =>
+      sftpService.remove(sessionId, path, isDir, containerName)
   )
-  ipcMain.handle(IpcChannels.sftpReadText, (_event, sessionId: string, path: string) =>
-    sftpService.readText(sessionId, path)
+  ipcMain.handle(IpcChannels.sftpReadText, (_event, sessionId: string, path: string, containerName?: string) =>
+    sftpService.readText(sessionId, path, containerName)
   )
   ipcMain.handle(
     IpcChannels.sftpWriteText,
-    (_event, sessionId: string, path: string, content: string, expectedMtime?: number) =>
-      sftpService.writeText(sessionId, path, content, expectedMtime)
+    (_event, sessionId: string, path: string, content: string, expectedMtime?: number, containerName?: string) =>
+      sftpService.writeText(sessionId, path, content, expectedMtime, containerName)
   )
-  ipcMain.handle(IpcChannels.sftpArchive, (_event, sessionId: string, paths: string[]) =>
-    sftpService.archive(sessionId, paths)
+  ipcMain.handle(IpcChannels.sftpArchive, (_event, sessionId: string, paths: string[], containerName?: string) =>
+    sftpService.archive(sessionId, paths, containerName)
   )
   ipcMain.handle(IpcChannels.remoteListeners, (_event, sessionId: string) =>
     sessionManager.remoteListeners(sessionId)
@@ -164,6 +176,12 @@ export function registerIpc(
   )
   ipcMain.handle(IpcChannels.agentUnwatchStats, (event, sessionId: string, containerName?: string) =>
     agentManager.unwatchStats(sessionId, containerName, event.sender)
+  )
+  ipcMain.handle(IpcChannels.agentFsHold, (event, sessionId: string, containerName?: string) =>
+    agentManager.holdChannel(sessionId, containerName, event.sender)
+  )
+  ipcMain.handle(IpcChannels.agentFsRelease, (event, sessionId: string, containerName?: string) =>
+    agentManager.releaseChannel(sessionId, containerName, event.sender)
   )
 
   // ---- 容器终端 ----
@@ -195,7 +213,39 @@ export function registerIpc(
   )
 
   // ---- 传输队列 ----
-  ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string) => {
+
+  /** 容器传输 IO：docker cp 段 + agent fs 段（容器内目录操作）组合 */
+  const containerIO = (sessionId: string, containerName: string): ContainerIO => ({
+    ...createContainerTransferIO(
+      (id) => sessionManager.getClient(id) ?? null,
+      (id) => containerManager.runtimeBinary(id),
+      sessionId,
+      containerName
+    ),
+    mkdirContainer: async (dir) => {
+      await agentManager.call(sessionId, containerName, 'fs_mkdir', { path: dir })
+    },
+    statContainer: async (path) => {
+      const r = (await agentManager.call(sessionId, containerName, 'fs_stat', { path })) as {
+        is_dir: boolean
+        size: number
+      }
+      return { isDir: r.is_dir, size: r.size }
+    },
+    listContainer: async (dir) => {
+      const r = (await agentManager.call(sessionId, containerName, 'fs_list', { path: dir })) as {
+        entries: { name: string; is_dir: boolean; is_symlink: boolean; size: number }[]
+      }
+      return r.entries.map((e) => ({
+        name: e.name,
+        isDir: e.is_dir,
+        isSymlink: e.is_symlink,
+        size: e.size
+      }))
+    }
+  })
+
+  ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string, containerName?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     const result = await dialog.showOpenDialog(win!, {
       title: '选择要上传的文件',
@@ -203,16 +253,24 @@ export function registerIpc(
     })
     if (result.canceled) return []
     const nested = await Promise.all(
-      result.filePaths.map((p) => transferManager.enqueueUpload(sessionId, p, remoteDir))
+      result.filePaths.map((p) =>
+        containerName
+          ? transferManager.enqueueUploadContainer(sessionId, containerName, p, remoteDir, containerIO(sessionId, containerName))
+          : transferManager.enqueueUpload(sessionId, p, remoteDir)
+      )
     )
     return nested.flat()
   })
 
   ipcMain.handle(
     IpcChannels.transferEnqueueDropped,
-    async (_event, sessionId: string, remoteDir: string, files: DroppedFile[]) => {
+    async (_event, sessionId: string, remoteDir: string, files: DroppedFile[], containerName?: string) => {
       const nested = await Promise.all(
-        files.map((f) => transferManager.enqueueUpload(sessionId, f.path, remoteDir))
+        files.map((f) =>
+          containerName
+            ? transferManager.enqueueUploadContainer(sessionId, containerName, f.path, remoteDir, containerIO(sessionId, containerName))
+            : transferManager.enqueueUpload(sessionId, f.path, remoteDir)
+        )
       )
       return nested.flat()
     }
@@ -220,20 +278,22 @@ export function registerIpc(
 
   ipcMain.handle(
     IpcChannels.transferDownload,
-    async (event, sessionId: string, remotePath: string, fileName: string) => {
+    async (event, sessionId: string, remotePath: string, fileName: string, containerName?: string) => {
       const win = BrowserWindow.fromWebContents(event.sender)
       const result = await dialog.showSaveDialog(win!, {
         title: '下载到',
         defaultPath: join(app.getPath('downloads'), fileName)
       })
       if (result.canceled || !result.filePath) return null
-      return transferManager.enqueueDownload(sessionId, remotePath, result.filePath)
+      return containerName
+        ? transferManager.enqueueDownloadContainer(sessionId, containerName, remotePath, result.filePath, containerIO(sessionId, containerName))
+        : transferManager.enqueueDownload(sessionId, remotePath, result.filePath)
     }
   )
 
   ipcMain.handle(
     IpcChannels.transferDownloadDir,
-    async (event, sessionId: string, remotePath: string) => {
+    async (event, sessionId: string, remotePath: string, containerName?: string) => {
       const win = BrowserWindow.fromWebContents(event.sender)
       const result = await dialog.showOpenDialog(win!, {
         title: '选择保存位置（文件夹将下载到所选目录内）',
@@ -241,7 +301,10 @@ export function registerIpc(
         properties: ['openDirectory', 'createDirectory']
       })
       if (result.canceled || !result.filePaths[0]) return []
-      return transferManager.enqueueDownloadDir(sessionId, remotePath, result.filePaths[0])
+      const dir = result.filePaths[0]
+      return containerName
+        ? transferManager.enqueueDownloadDirContainer(sessionId, containerName, remotePath, dir, containerIO(sessionId, containerName))
+        : transferManager.enqueueDownloadDir(sessionId, remotePath, dir)
     }
   )
 
@@ -253,7 +316,7 @@ export function registerIpc(
    */
   ipcMain.handle(
     IpcChannels.transferDownloadMany,
-    async (event, sessionId: string, items: DownloadRequest[]) => {
+    async (event, sessionId: string, items: DownloadRequest[], containerName?: string) => {
       const win = BrowserWindow.fromWebContents(event.sender)
       const result = await dialog.showOpenDialog(win!, {
         title: `选择保存位置（${items.length} 项将下载到所选目录内）`,
@@ -262,12 +325,17 @@ export function registerIpc(
       })
       if (result.canceled || !result.filePaths[0]) return []
       const dir = result.filePaths[0]
+      const io = containerName ? containerIO(sessionId, containerName) : null
       // 入队本身是串行排队的，这里并发提交只是在建任务记录，不占传输通道
       const nested = await Promise.all(
         items.map((item) =>
-          item.isDir
-            ? transferManager.enqueueDownloadDir(sessionId, item.remotePath, dir)
-            : transferManager.enqueueDownload(sessionId, item.remotePath, join(dir, item.name))
+          io
+            ? item.isDir
+              ? transferManager.enqueueDownloadDirContainer(sessionId, containerName!, item.remotePath, dir, io)
+              : transferManager.enqueueDownloadContainer(sessionId, containerName!, item.remotePath, join(dir, item.name), io)
+            : item.isDir
+              ? transferManager.enqueueDownloadDir(sessionId, item.remotePath, dir)
+              : transferManager.enqueueDownload(sessionId, item.remotePath, join(dir, item.name))
         )
       )
       return nested.flat()

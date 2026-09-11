@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { defineAsyncComponent, nextTick, onMounted, ref } from 'vue'
+import { defineAsyncComponent, computed, nextTick, onMounted, ref } from 'vue'
+import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import { useSessionStore, type SessionTab } from './stores/sessions'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
@@ -96,6 +97,28 @@ async function toggleSftp(): Promise<void> {
   await nextTick()
   if (store.activeTab) refitTab(store.activeTab)
 }
+
+/**
+ * 当前标签的文件面板目标：SSH 标签浏览宿主机；远端容器标签浏览容器
+ * （经容器里的 dox-agent，FileExplorer 内部处理未安装的引导）。
+ * 本地终端 / 本机容器没有可浏览的目标。
+ */
+const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: string; containerName: string } } | null>(() => {
+  const tab = store.activeTab
+  const paneId = store.activePane?.sessionId
+  if (!tab || !paneId) return null
+  if (tab.kind === 'ssh') return { sessionId: paneId }
+  if (tab.kind === 'container' && tab.container && tab.container.parentSessionId !== LOCAL_CONTAINER_TARGET) {
+    return {
+      sessionId: paneId,
+      container: {
+        parentSessionId: tab.container.parentSessionId,
+        containerName: tab.container.containerName
+      }
+    }
+  }
+  return null
+})
 </script>
 
 <template>
@@ -150,10 +173,10 @@ async function toggleSftp(): Promise<void> {
             @click="split('column')"
           ><Icon name="split-down" /></button>
           <button
-            v-if="store.activeTab!.kind === 'ssh'"
+            v-if="sftpTarget"
             class="bar-btn"
             :class="{ on: store.sftpVisible }"
-            title="SFTP 文件面板"
+            :title="store.activeTab!.kind === 'container' ? '容器文件面板（经容器助手）' : 'SFTP 文件面板'"
             @click="toggleSftp"
           ><Icon name="folder" /> SFTP</button>
         </template>
@@ -222,9 +245,10 @@ async function toggleSftp(): Promise<void> {
           </div>
 
           <FileExplorer
-            v-if="store.sftpVisible && store.activeTab?.kind === 'ssh' && store.activeSessionId"
-            :key="store.activeSessionId"
-            :session-id="store.activeSessionId"
+            v-if="store.sftpVisible && sftpTarget"
+            :key="sftpTarget.sessionId"
+            :session-id="sftpTarget.sessionId"
+            :container="sftpTarget.container"
           />
 
           <!-- 双击文件后在此编辑；key 绑定会话，切会话不串内容 -->

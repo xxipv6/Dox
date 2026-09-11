@@ -161,32 +161,78 @@ async function remove(s: SavedSession): Promise<void> {
           <div
             v-for="s in filteredSessions"
             :key="s.id"
-            class="device"
-            :title="`${s.username}@${s.host}:${s.port} — 双击连接`"
-            @dblclick="store.connectSaved(s)"
+            class="device-block"
           >
-            <Icon class="device-icon" name="server" :size="15" />
-            <span class="device-info">
-              <span class="device-name">
-                <span v-if="s.jumpHostId" class="jump-badge" title="经跳板机连接">
-                  <Icon name="link" :size="12" />
-                </span>{{ s.name }}
+            <div
+              class="device"
+              :title="`${s.username}@${s.host}:${s.port} — 双击连接`"
+              @dblclick="store.connectSaved(s)"
+            >
+              <!--
+                展开容器列表（直连容器，Dev Containers 式）：箭头单独一个按钮，
+                不抢整行的双击连接；展开期间设备底下列出运行中的容器，点名字直接进。
+              -->
+              <button
+                class="icon-btn device-expand"
+                :class="{ open: store.expandedDevices.has(s.id) }"
+                :title="store.expandedDevices.has(s.id) ? '收起容器列表' : '列出容器（直连进容器）'"
+                @click.stop="store.toggleDeviceContainers(s)"
+                @dblclick.stop
+              >
+                <Icon name="chevron-right" :size="12" />
+              </button>
+              <Icon class="device-icon" name="server" :size="15" />
+              <span class="device-info">
+                <span class="device-name">
+                  <span v-if="s.jumpHostId" class="jump-badge" title="经跳板机连接">
+                    <Icon name="link" :size="12" />
+                  </span>{{ s.name }}
+                </span>
+                <span class="device-host">{{ s.username }}@{{ s.host }}:{{ s.port }}</span>
               </span>
-              <span class="device-host">{{ s.username }}@{{ s.host }}:{{ s.port }}</span>
-            </span>
-            <!-- 同时拦截 click 与 dblclick：只 stop click 的话，连点两下 × 会
-                 触发整行的 dblclick（去连接），看起来就像「删除没反应」 -->
-            <span class="device-actions" @dblclick.stop>
-              <button class="icon-btn" title="连接" @click.stop="store.connectSaved(s)">
-                <Icon name="play" />
-              </button>
-              <button class="icon-btn" title="编辑" @click.stop="openEdit(s)">
-                <Icon name="pencil" />
-              </button>
-              <button class="icon-btn danger" title="删除" @click.stop="remove(s)">
-                <Icon name="x" />
-              </button>
-            </span>
+              <!-- 同时拦截 click 与 dblclick：只 stop click 的话，连点两下 × 会
+                   触发整行的 dblclick（去连接），看起来就像「删除没反应」 -->
+              <span class="device-actions" @dblclick.stop>
+                <button class="icon-btn" title="连接" @click.stop="store.connectSaved(s)">
+                  <Icon name="play" />
+                </button>
+                <button class="icon-btn" title="编辑" @click.stop="openEdit(s)">
+                  <Icon name="pencil" />
+                </button>
+                <button class="icon-btn danger" title="删除" @click.stop="remove(s)">
+                  <Icon name="x" />
+                </button>
+              </span>
+            </div>
+
+            <!-- 直连容器：不开宿主机终端标签，点容器名直接进（后台传输会话承载） -->
+            <div v-if="store.expandedDevices.has(s.id)" class="device-containers">
+              <div v-if="store.deviceContainers[s.id]?.status === 'loading'" class="container-hint">
+                正在列出容器…
+              </div>
+              <div v-else-if="store.deviceContainers[s.id]?.status === 'error'" class="container-hint">
+                <span class="container-error">{{ store.deviceContainers[s.id].error }}</span>
+                <button class="container-retry" type="button" @click="store.loadDeviceContainers(s.id)">
+                  重试
+                </button>
+              </div>
+              <template v-else>
+                <div v-if="!store.deviceContainers[s.id]?.list.length" class="container-hint">
+                  没有运行中的容器
+                </div>
+                <div
+                  v-for="c in store.deviceContainers[s.id]?.list ?? []"
+                  :key="c.id"
+                  class="device-container"
+                  :title="`进入容器 ${c.name}（${c.image}）`"
+                  @click="store.enterContainerDirect(s, c)"
+                >
+                  <Icon class="container-icon" name="box" :size="13" />
+                  <span class="container-name">{{ c.name }}</span>
+                  <span class="container-image">{{ c.image }}</span>
+                </div>
+              </template>
+            </div>
           </div>
         </div>
       </SidebarSection>
@@ -332,6 +378,94 @@ async function remove(s: SavedSession): Promise<void> {
   transition: background-color var(--dur-fast) var(--ease-out);
 }
 .device:hover {
+  background: var(--bg-hover);
+}
+/*
+ * 行首的容器展开箭头：默认淡到几乎看不见（不是每台设备都有 docker），
+ * 悬停行/已展开时才显形。展开后箭头顺时针倒下（▸ → ▾）。
+ */
+.device-expand {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  opacity: 0;
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.device:hover .device-expand,
+.device-expand.open {
+  opacity: 1;
+}
+.device-expand.open {
+  transform: rotate(90deg);
+}
+/* 设备行底下缩进一层的容器列表（直连容器入口） */
+.device-containers {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 1px 0 3px 26px;
+}
+.device-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px var(--sp-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.device-container:hover {
+  background: var(--bg-hover);
+}
+.container-icon {
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.container-name {
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.container-image {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+.container-hint {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  padding: 4px var(--sp-2);
+  line-height: 1.6;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.container-error {
+  flex: 1;
+  min-width: 0;
+}
+.container-retry {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: none;
+  border-radius: var(--r-sm);
+  padding: 1px 8px;
+  font-size: var(--fs-xs);
+  color: var(--fg);
+  cursor: pointer;
+}
+.container-retry:hover {
   background: var(--bg-hover);
 }
 .device-icon {

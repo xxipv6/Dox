@@ -29,6 +29,33 @@ interface InternalTask extends TransferTask {
    * 这期间点取消不能丢 —— 只置位，等 pipe() 开头自己检查。
    */
   _cancelRequested?: boolean
+  /** 容器传输：SFTP 段之前/之后接的第二段（docker cp），以及中转清理 */
+  _prepare?: () => Promise<void>
+  _finalize?: () => Promise<void>
+  _cleanupStage?: () => void
+}
+
+/**
+ * 剥掉内部字段（`_` 前缀）后的任务快照。
+ *
+ * 内部字段全是函数（取消/容器传输钩子），结构化克隆序列化不了 ——
+ * 带着它们广播或做 invoke 返回值就是 "Failed to serialize arguments"。
+ * 按前缀剥而不是逐字段列：以后再加内部字段不会重蹈覆辙。
+ */
+function publicTask(task: InternalTask): TransferTask {
+  return Object.fromEntries(Object.entries(task).filter(([k]) => !k.startsWith('_'))) as TransferTask
+}
+
+/** 容器传输 IO：docker cp 段 + 容器内目录操作（经 agent fs 协议） */
+export interface ContainerIO {
+  cp(from: string, to: string): Promise<void>
+  rmHostStage(path: string): Promise<void>
+  /** 容器内递归建目录（agent fs_mkdir） */
+  mkdirContainer(dir: string): Promise<void>
+  /** 容器内 stat（agent fs_stat） */
+  statContainer(path: string): Promise<{ isDir: boolean; size: number }>
+  /** 容器内列目录（agent fs_list，下载文件夹时递归展开用） */
+  listContainer(dir: string): Promise<{ name: string; isDir: boolean; isSymlink: boolean; size: number }[]>
 }
 
 interface LocalFileItem {
@@ -97,7 +124,7 @@ export class TransferManager {
   ) {}
 
   list(): TransferTask[] {
-    return [...this.tasks.values()].map(({ _cancel, ...t }) => t)
+    return [...this.tasks.values()].map((t) => publicTask(t))
   }
 
   /** 上传本地文件或文件夹（文件夹递归展开），返回创建的任务列表 */
@@ -208,6 +235,145 @@ export class TransferManager {
     }
   }
 
+  // ---- 容器传输：SFTP（本机 ↔ 宿主机 /tmp 中转）+ docker cp（中转 ↔ 容器）两段接力 ----
+
+  /**
+   * 上传到容器。文件/目录都展开成文件级任务（目录经 walkLocal），
+   * 每个任务自带独立中转目录：SFTP 传到宿主机 /tmp → docker cp 进容器 →
+   * 删中转。逐任务独立中转免去批次协调与并发清理的竞态；
+   * 逐文件 cp 比整包慢（大批小文件明显），换来逐文件进度与取消。
+   */
+  async enqueueUploadContainer(
+    sessionId: string,
+    containerName: string,
+    localPath: string,
+    remoteDir: string,
+    io: ContainerIO
+  ): Promise<TransferTask[]> {
+    this.stopExpansion = false
+    const stat = await fs.promises.stat(localPath)
+
+    const makeTask = (lPath: string, rel: string, size: number, displayName?: string): InternalTask => {
+      const stage = `/tmp/.dox-stage-${randomUUID().slice(0, 8)}`
+      const stagePath = posix.join(stage, posix.basename(rel))
+      const ctrPath = posix.join(remoteDir, rel)
+      const task = this.createTask(sessionId, 'upload', lPath, stagePath, size, displayName, containerName)
+      task._prepare = async () => {
+        const sftp = await this.getSftp(sessionId)
+        await mkdirRemoteRecursive(sftp, stage)
+        await io.mkdirContainer(posix.dirname(ctrPath))
+      }
+      task._finalize = async () => {
+        await io.cp(stagePath, `${containerName}:${ctrPath}`)
+        await io.rmHostStage(stage)
+      }
+      task._cleanupStage = () => void io.rmHostStage(stage)
+      return task
+    }
+
+    if (stat.isFile()) {
+      const task = makeTask(localPath, basename(localPath), stat.size)
+      this.push(task)
+      return [this.snapshot(task)]
+    }
+    if (stat.isDirectory()) {
+      const rootName = basename(localPath)
+      const files = await walkLocal(localPath, () => this.stopExpansion)
+      const created: TransferTask[] = []
+      for (const f of files) {
+        const rel = `${rootName}/${toPosixRel(f.rel)}`
+        const task = makeTask(f.path, rel, f.size, rel)
+        this.push(task)
+        created.push(this.snapshot(task))
+      }
+      return created
+    }
+    return []
+  }
+
+  /** 从容器下载文件：docker cp 到宿主机中转 → SFTP 回本机 → 删中转 */
+  async enqueueDownloadContainer(
+    sessionId: string,
+    containerName: string,
+    remotePath: string,
+    localPath: string,
+    io: ContainerIO
+  ): Promise<TransferTask> {
+    const st = await io.statContainer(remotePath)
+    const stage = `/tmp/.dox-stage-${randomUUID().slice(0, 8)}`
+    const stagePath = posix.join(stage, posix.basename(remotePath))
+    const task = this.createTask(sessionId, 'download', localPath, stagePath, st.size, undefined, containerName)
+    task._prepare = async () => {
+      const sftp = await this.getSftp(sessionId)
+      await mkdirRemoteRecursive(sftp, stage)
+      await io.cp(`${containerName}:${remotePath}`, stagePath)
+    }
+    task._finalize = () => io.rmHostStage(stage)
+    task._cleanupStage = () => void io.rmHostStage(stage)
+    this.push(task)
+    return this.snapshot(task)
+  }
+
+  /** 从容器下载文件夹：容器内经 agent fs_list 递归展开，逐文件两段接力 */
+  async enqueueDownloadDirContainer(
+    sessionId: string,
+    containerName: string,
+    remotePath: string,
+    localDir: string,
+    io: ContainerIO
+  ): Promise<TransferTask[]> {
+    this.stopExpansion = false
+    const rootName = posix.basename(remotePath)
+    const rootLocal = join(localDir, rootName)
+    await fs.promises.mkdir(rootLocal, { recursive: true })
+
+    const created: TransferTask[] = []
+    const walk = async (rDir: string, lDir: string, relDir: string): Promise<void> => {
+      const items = await io.listContainer(rDir)
+      for (const item of items) {
+        if (this.stopExpansion) return
+        if (item.isSymlink) continue // 与宿主机的下载目录一致：符号链接不跟随
+        const rChild = posix.join(rDir, item.name)
+        const rel = relDir ? `${relDir}/${item.name}` : item.name
+        if (item.isDir) {
+          const lChild = join(lDir, item.name)
+          await fs.promises.mkdir(lChild, { recursive: true })
+          await walk(rChild, lChild, rel)
+        } else {
+          const stage = `/tmp/.dox-stage-${randomUUID().slice(0, 8)}`
+          const stagePath = posix.join(stage, item.name)
+          const task = this.createTask(
+            sessionId,
+            'download',
+            join(lDir, item.name),
+            stagePath,
+            item.size,
+            `${rootName}/${rel}`,
+            containerName
+          )
+          task._prepare = async () => {
+            const sftp = await this.getSftp(sessionId)
+            await mkdirRemoteRecursive(sftp, stage)
+            await io.cp(`${containerName}:${rChild}`, stagePath)
+          }
+          task._finalize = () => io.rmHostStage(stage)
+          task._cleanupStage = () => void io.rmHostStage(stage)
+          this.push(task)
+          created.push(this.snapshot(task))
+        }
+      }
+    }
+    await walk(remotePath, rootLocal, '')
+
+    if (created.length === 0) {
+      const task = this.createTask(sessionId, 'download', rootLocal, remotePath, 0, `${rootName}/`)
+      this.settle(task, 'done')
+      this.emit()
+      return [this.snapshot(task)]
+    }
+    return created
+  }
+
   /**
    * 全部取消：停掉所有排队/进行中的任务，并中断还在跑的目录展开。
    *
@@ -273,11 +439,13 @@ export class TransferManager {
     localPath: string,
     remotePath: string,
     size: number,
-    displayName?: string
+    displayName?: string,
+    containerName?: string
   ): InternalTask {
     const task: InternalTask = {
       id: randomUUID(),
       sessionId,
+      containerName,
       direction,
       localPath,
       remotePath,
@@ -327,8 +495,7 @@ export class TransferManager {
   }
 
   private snapshot(task: InternalTask): TransferTask {
-    const { _cancel, ...t } = task
-    return t
+    return publicTask(task)
   }
 
   private async pump(): Promise<void> {
@@ -350,11 +517,14 @@ export class TransferManager {
     this.emit()
     try {
       const sftp = await this.getSftp(task.sessionId)
+      if (task._prepare) await task._prepare()
       await this.pipe(task, sftp)
+      if (task._finalize) await task._finalize()
       task.transferred = task.size
       this.settle(task, 'done')
     } catch (err) {
       const e = err as Error
+      task._cleanupStage?.()
       if (e.message === CANCELED) {
         this.settle(task, 'canceled')
       } else {

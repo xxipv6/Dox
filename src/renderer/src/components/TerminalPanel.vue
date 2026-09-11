@@ -243,12 +243,22 @@ async function startPortWatch(): Promise<void> {
       unsubscribeAgentPorts = window.api.onAgentPorts((id, ctr, data) => {
         if (id !== target.sessionId || (ctr ?? undefined) !== target.containerName) return
         if (data.event === 'agent_closed') {
-          // 通道死了（SSH 断线/容器停止/agent 被杀）：/proc 轮询顶班，订阅保留 ——
-          // SSH 重连后主进程自动重建；容器重启由 scheduleAgentRetry 兜（SSH 没断过）
+          // 通道死了（SSH 断线/容器停止/升级安装后重启/agent 被杀）：
+          // /proc 轮询顶班，订阅保留。
           agentWatchActive = false
           listenerBaseline = null // 换路径重建基线，别把 /proc 全量当差分弹了
           startProcPoll()
-          scheduleAgentRetry(target)
+          // 立即重试一次：升级安装是「掐旧通道换新二进制」，秒级就能接回来；
+          // SSH 断线场景这次调用会失败（无害），之后由重连钩子/节流重试兜底
+          void window.api
+            .agentWatchPorts(target.sessionId, target.containerName)
+            .then(() => {
+              if (disposed || agentWatchActive) return
+              agentWatchActive = true
+              stopProcPoll()
+              listenerBaseline = null
+            })
+            .catch(() => scheduleAgentRetry(target))
           return
         }
         if (!agentWatchActive) {

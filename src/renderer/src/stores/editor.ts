@@ -6,8 +6,11 @@ import { errorText } from '../utils/errors'
 export interface OpenFile {
   /** 远端绝对路径，同时作为唯一标识 */
   path: string
-  /** 会话 id：会话断开时这份文件就没意义了 */
+  /** 会话 id：会话断开时这份文件就没意义了（容器文件记容器标签的 pane id） */
   sessionId: string
+  /** 实际的文件操作目标：宿主机会话 id + 容器名（宿主机文件为 undefined） */
+  fsSessionId?: string
+  containerName?: string
   name: string
   /** 编辑器中的当前内容 */
   content: string
@@ -55,8 +58,12 @@ export const useEditorStore = defineStore('editor', () => {
     return filesOf(sessionId).some(isDirty)
   }
 
-  /** 打开远端文件。已打开的直接切过去，不重复读 */
-  async function open(sessionId: string, path: string): Promise<void> {
+  /** 打开远端文件。已打开的直接切过去，不重复读。fs 给了就是容器文件（经 agent） */
+  async function open(
+    sessionId: string,
+    path: string,
+    fs?: { sessionId: string; containerName: string }
+  ): Promise<void> {
     const list = (filesBySession[sessionId] ??= [])
     const existing = list.find((f) => f.path === path)
     if (existing) {
@@ -69,6 +76,8 @@ export const useEditorStore = defineStore('editor', () => {
     const file = reactive<OpenFile>({
       path,
       sessionId,
+      fsSessionId: fs?.sessionId,
+      containerName: fs?.containerName,
       name,
       content: '',
       savedContent: '',
@@ -82,7 +91,11 @@ export const useEditorStore = defineStore('editor', () => {
     visible.value = true
 
     try {
-      const res: RemoteFileContent = await window.api.sftpReadText(sessionId, path)
+      const res: RemoteFileContent = await window.api.sftpReadText(
+        file.fsSessionId ?? sessionId,
+        path,
+        file.containerName
+      )
       if (res.binary) {
         // 二进制不进编辑器：留在列表里展示错误，用户自己关掉
         file.error = '这是二进制文件，无法以文本方式编辑。请使用「下载」后在本地打开。'
@@ -110,7 +123,7 @@ export const useEditorStore = defineStore('editor', () => {
     file.loading = true
     file.error = ''
     try {
-      const res = await window.api.sftpReadText(sessionId, path)
+      const res = await window.api.sftpReadText(file.fsSessionId ?? sessionId, path, file.containerName)
       if (res.binary) {
         file.error = '这是二进制文件，无法以文本方式编辑。请使用「下载」后在本地打开。'
       } else {
@@ -133,7 +146,13 @@ export const useEditorStore = defineStore('editor', () => {
     file.saving = true
     file.error = ''
     try {
-      file.mtime = await window.api.sftpWriteText(sessionId, path, file.content, file.mtime)
+      file.mtime = await window.api.sftpWriteText(
+        file.fsSessionId ?? sessionId,
+        path,
+        file.content,
+        file.mtime,
+        file.containerName
+      )
       file.savedContent = file.content
       return true
     } catch (err) {

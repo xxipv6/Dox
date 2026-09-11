@@ -31,7 +31,14 @@ const settingsStore = new SettingsStore()
 // 已保存会话解析器：id → 完整连接配置（认证信息解密不出主进程）。
 // 跳板机建链与断线重连都走它 —— 重连时重新解密，主进程不必常驻明文密码。
 const sessionManager = new SessionManager((id) => configStore.resolveConnection(id), knownHosts)
-const sftpService = new SftpService(sessionManager)
+// 容器文件操作桥留一个后注册口：AgentManager 依赖 ContainerManager，构造在更后面
+const agentFsHolder: { bridge?: import('./sftp/SftpService').AgentFsBridge } = {}
+const sftpService = new SftpService(sessionManager, {
+  call: (sessionId, containerName, method, params) => {
+    if (!agentFsHolder.bridge) return Promise.reject(new Error('容器文件通道尚未就绪'))
+    return agentFsHolder.bridge.call(sessionId, containerName, method, params)
+  }
+})
 const transferManager = new TransferManager(
   (sessionId) => sessionManager.sftp(sessionId),
   // 队列变化广播给所有窗口
@@ -57,6 +64,7 @@ const forwardManager = new ForwardManager(
  */
 const containerManager = new ContainerManager((id) => sessionManager.getClient(id))
 const agentManager = new AgentManager(sessionManager, (id) => containerManager.runtimeBinary(id))
+agentFsHolder.bridge = agentManager
 
 // 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped），
 // 并把它承载的容器终端通道一并收掉
@@ -65,6 +73,13 @@ sessionManager.onClosed = (id) => {
   containerManager.stopBySession(id)
   agentManager.invalidate(id)
 }
+/*
+ * 容器标签独立存活（Dev Containers 式）：关宿主终端标签时，若还有容器
+ * exec 通道骑在这条连接上，SessionManager 不掐连接、把它留作孤儿保活；
+ * 最后一个容器通道关闭时再真正断开。
+ */
+sessionManager.shouldKeepAlive = (id) => containerManager.hasActiveChannels(id)
+containerManager.onParentDrained = (id) => sessionManager.releaseOrphan(id)
 // 重连成功后按原参数把该会话的转发规则重新建立起来，
 // 否则隧道会无声死掉，用户还以为它开着
 sessionManager.onReconnected = (id) => void forwardManager.restartBySession(id)

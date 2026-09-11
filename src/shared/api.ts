@@ -36,6 +36,12 @@ export interface DoxApi {
     term: TermSize,
     opts?: { savedSessionId?: string }
   ): Promise<string>
+  /**
+   * 建立传输会话（不开 shell、不开终端标签的后台连接），返回会话 id。
+   * 直连容器的承载：容器列表/容器标签/容器文件操作都借它的 client。
+   * 只收已保存设备 id，凭证不出主进程。
+   */
+  connectTransport(savedSessionId: string): Promise<string>
   /** 打开本地终端，返回 local- 前缀的会话 id；shellId 不传则用设置里的默认值 */
   connectLocal(term: TermSize, shellId?: string): Promise<string>
   /** 列出本机可用的本地 shell */
@@ -73,15 +79,16 @@ export interface DoxApi {
   getSessionAuth(id: string): Promise<SshAuth>
 
   // ---- SFTP 文件操作 ----
-  sftpList(sessionId: string, dir: string): Promise<FileEntry[]>
-  sftpRealpath(sessionId: string, path: string): Promise<string>
+  // containerName 给了就是容器内文件操作（经容器里的 dox-agent，Dev Containers 式）
+  sftpList(sessionId: string, dir: string, containerName?: string): Promise<FileEntry[]>
+  sftpRealpath(sessionId: string, path: string, containerName?: string): Promise<string>
   /** 探路径是文件还是目录；不存在/不可读返回 null（终端路径点击用） */
-  sftpStat(sessionId: string, path: string): Promise<{ isDir: boolean } | null>
-  sftpMkdir(sessionId: string, path: string): Promise<void>
-  sftpRename(sessionId: string, from: string, to: string): Promise<void>
-  sftpDelete(sessionId: string, path: string, isDir: boolean): Promise<void>
+  sftpStat(sessionId: string, path: string, containerName?: string): Promise<{ isDir: boolean } | null>
+  sftpMkdir(sessionId: string, path: string, containerName?: string): Promise<void>
+  sftpRename(sessionId: string, from: string, to: string, containerName?: string): Promise<void>
+  sftpDelete(sessionId: string, path: string, isDir: boolean, containerName?: string): Promise<void>
   /** 读取远端文本文件（内置编辑器用）；超限抛错，二进制返回 binary: true */
-  sftpReadText(sessionId: string, path: string): Promise<RemoteFileContent>
+  sftpReadText(sessionId: string, path: string, containerName?: string): Promise<RemoteFileContent>
   /**
    * 写回远端文本文件，返回新的 mtime。
    * 传 expectedMtime 时若远端 mtime 已变，抛错拒绝覆盖。
@@ -90,7 +97,8 @@ export interface DoxApi {
     sessionId: string,
     path: string,
     content: string,
-    expectedMtime?: number
+    expectedMtime?: number,
+    containerName?: string
   ): Promise<number>
 
   // ---- 容器（Docker / Podman）----
@@ -149,24 +157,25 @@ export interface DoxApi {
   ): Promise<{ ports: number[]; supported: boolean }>
 
   // ---- 传输队列 ----
-  /** 弹出本地文件选择框，选中文件上传到 remoteDir */
-  pickUpload(sessionId: string, remoteDir: string): Promise<TransferTask[]>
+  /** 弹出本地文件选择框，选中文件上传到 remoteDir（containerName = 传到容器里） */
+  pickUpload(sessionId: string, remoteDir: string, containerName?: string): Promise<TransferTask[]>
   /** 拖拽进来的本地上传（路径已解析） */
-  enqueueDropped(sessionId: string, remoteDir: string, files: DroppedFile[]): Promise<TransferTask[]>
+  enqueueDropped(sessionId: string, remoteDir: string, files: DroppedFile[], containerName?: string): Promise<TransferTask[]>
   /** 弹出保存对话框后下载远端文件；用户取消时返回 null */
-  download(sessionId: string, remotePath: string, fileName: string): Promise<TransferTask | null>
+  download(sessionId: string, remotePath: string, fileName: string, containerName?: string): Promise<TransferTask | null>
   /** 弹出目录选择框后递归下载远端文件夹；用户取消时返回空数组 */
-  downloadDir(sessionId: string, remotePath: string): Promise<TransferTask[]>
+  downloadDir(sessionId: string, remotePath: string, containerName?: string): Promise<TransferTask[]>
   /**
    * 批量下载。只弹一次目录选择框，把每一项都放进所选目录 ——
    * 选中十项弹十次保存框是没法用的。用户取消时返回空数组。
    */
-  downloadMany(sessionId: string, items: DownloadRequest[]): Promise<TransferTask[]>
+  downloadMany(sessionId: string, items: DownloadRequest[], containerName?: string): Promise<TransferTask[]>
   /**
    * 打包：在远端当前目录把选中项 tar 成 .tar.gz（不下载），
    * 返回生成的包路径；失败把 tar 的 stderr 原文抛回。
+   * 容器内由 agent 用 Go 标准库产包（不依赖容器里有 tar，distroless 也能打）。
    */
-  sftpArchive(sessionId: string, paths: string[]): Promise<string>
+  sftpArchive(sessionId: string, paths: string[], containerName?: string): Promise<string>
   /**
    * 远端 LISTEN 端口列表（/proc/net/tcp，端口转发建议的静默检测）。
    * supported=false = 远端没有 /proc（非 Linux），调用方应停止轮询。
@@ -209,6 +218,9 @@ export interface DoxApi {
       data: { event: string } & Partial<AgentStatsPayload>
     ) => void
   ): () => void
+  /** 文件面板持有/释放 agent 通道（面板打开期间通道不被退订收掉） */
+  agentFsHold(sessionId: string, containerName?: string): Promise<void>
+  agentFsRelease(sessionId: string, containerName?: string): Promise<void>
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>
   clearFinishedTransfers(): Promise<void>

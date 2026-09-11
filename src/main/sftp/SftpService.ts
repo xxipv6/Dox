@@ -14,6 +14,11 @@ import {
   writeFileP
 } from './sftpUtils'
 
+/** 容器文件操作桥：带 containerName 的调用经 agent fs 协议走（AgentManager.call） */
+export interface AgentFsBridge {
+  call(sessionId: string, containerName: string, method: string, params: unknown): Promise<unknown>
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   const units = ['KB', 'MB', 'GB', 'TB']
@@ -29,11 +34,37 @@ function formatSize(bytes: number): string {
 /**
  * SFTP 文件操作。远端一律按 posix 语义处理路径（服务器基本是 Linux），
  * 与本地平台无关。
+ *
+ * containerName 给了就是**容器内**文件操作：SFTP 摸不到容器的 mount
+ * namespace，这条路经容器里的 dox-agent（fs_* 方法，Dev Containers 式）。
  */
 export class SftpService {
-  constructor(private readonly sessions: SessionManager) {}
+  constructor(
+    private readonly sessions: SessionManager,
+    private readonly agentFs?: AgentFsBridge
+  ) {}
 
-  async list(sessionId: string, dir: string): Promise<FileEntry[]> {
+  private fs(sessionId: string, containerName: string, method: string, params: unknown): Promise<unknown> {
+    if (!this.agentFs) throw new Error('容器文件通道不可用')
+    return this.agentFs.call(sessionId, containerName, method, params)
+  }
+
+  async list(sessionId: string, dir: string, containerName?: string): Promise<FileEntry[]> {
+    if (containerName) {
+      const res = (await this.fs(sessionId, containerName, 'fs_list', { path: dir })) as {
+        entries: { name: string; is_dir: boolean; is_symlink: boolean; size: number; mtime: number }[]
+      }
+      return res.entries
+        .map((e) => ({
+          name: e.name,
+          path: posix.join(dir, e.name),
+          isDir: e.is_dir,
+          isSymlink: e.is_symlink,
+          size: e.size,
+          mtime: e.mtime
+        }))
+        .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
+    }
     const sftp = await this.sessions.sftp(sessionId)
     const items = await readdirP(sftp, dir)
     return items
@@ -50,7 +81,11 @@ export class SftpService {
       .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
   }
 
-  async realpath(sessionId: string, path: string): Promise<string> {
+  async realpath(sessionId: string, path: string, containerName?: string): Promise<string> {
+    if (containerName) {
+      // 容器没有「家目录」概念，面板落地在 /；cwd 跟随由终端侧 OSC 7 提供
+      return path === '.' ? '/' : path
+    }
     const sftp = await this.sessions.sftp(sessionId)
     return new Promise((resolve, reject) => {
       sftp.realpath(path, (err, resolved) => (err ? reject(err) : resolve(resolved)))
@@ -62,8 +97,12 @@ export class SftpService {
    * 不存在 / 不可读 / 已断开都返回 null —— 终端输出里的路径可能只是长得像，
    * 点开没有结果不算错误，不值得抛给用户。
    */
-  async stat(sessionId: string, path: string): Promise<{ isDir: boolean } | null> {
+  async stat(sessionId: string, path: string, containerName?: string): Promise<{ isDir: boolean } | null> {
     try {
+      if (containerName) {
+        const res = (await this.fs(sessionId, containerName, 'fs_stat', { path })) as { is_dir: boolean }
+        return { isDir: res.is_dir }
+      }
       const sftp = await this.sessions.sftp(sessionId)
       const attrs = await statP(sftp, path)
       return { isDir: attrs.isDirectory() }
@@ -72,7 +111,11 @@ export class SftpService {
     }
   }
 
-  async mkdir(sessionId: string, path: string): Promise<void> {
+  async mkdir(sessionId: string, path: string, containerName?: string): Promise<void> {
+    if (containerName) {
+      await this.fs(sessionId, containerName, 'fs_mkdir', { path })
+      return
+    }
     const sftp = await this.sessions.sftp(sessionId)
     await mkdirP(sftp, path)
   }
@@ -86,7 +129,7 @@ export class SftpService {
    * 大目录打包可能远超 execCapture 默认的 10s 上限，给 5 分钟；
    * 期间渲染进程在 await —— 失败会把 tar 的 stderr 原文带回去。
    */
-  async archive(sessionId: string, paths: string[]): Promise<string> {
+  async archive(sessionId: string, paths: string[], containerName?: string): Promise<string> {
     if (!paths.length) throw new Error('没有选中任何项')
     const parent = posix.dirname(paths[0])
     const names = paths.map((p) => posix.basename(p))
@@ -96,12 +139,33 @@ export class SftpService {
       }
     }
 
+    // 撞名避让：foo.tar.gz → foo-2.tar.gz → …（打包不是覆盖别人文件的理由）
+    const base = archiveBaseName(names)
+
+    if (containerName) {
+      // 容器里没有 tar 保证（distroless 连 shell 都没有）——
+      // 打包由容器里的 agent 用 Go 标准库完成（fs_archive），什么镜像都能打
+      let target = base
+      for (let n = 2; ; n++) {
+        try {
+          await this.fs(sessionId, containerName, 'fs_stat', { path: posix.join(parent, target) })
+          target = withSuffix(base, n)
+        } catch {
+          break
+        }
+      }
+      const res = (await this.fs(sessionId, containerName, 'fs_archive', {
+        parent,
+        names,
+        target: posix.join(parent, target)
+      })) as { path: string }
+      return res.path
+    }
+
     const sftp = await this.sessions.sftp(sessionId)
     const client = this.sessions.getClient(sessionId)
     if (!client) throw new Error('会话已断开，无法打包')
 
-    // 撞名避让：foo.tar.gz → foo-2.tar.gz → …（打包不是覆盖别人文件的理由）
-    const base = archiveBaseName(names)
     let target = base
     for (let n = 2; ; n++) {
       try {
@@ -122,7 +186,11 @@ export class SftpService {
     return posix.join(parent, target)
   }
 
-  async rename(sessionId: string, from: string, to: string): Promise<void> {
+  async rename(sessionId: string, from: string, to: string, containerName?: string): Promise<void> {
+    if (containerName) {
+      await this.fs(sessionId, containerName, 'fs_rename', { from, to })
+      return
+    }
     const sftp = await this.sessions.sftp(sessionId)
     await new Promise<void>((resolve, reject) => {
       sftp.rename(from, to, (err) => (err ? reject(err) : resolve()))
@@ -134,7 +202,30 @@ export class SftpService {
    * 先看大小再看内容：大文件直接拒绝（读进来会卡死渲染进程），
    * 开头 8KB 含 NUL 字节则判定为二进制，不交给编辑器（否则是满屏乱码）。
    */
-  async readText(sessionId: string, path: string): Promise<RemoteFileContent> {
+  async readText(sessionId: string, path: string, containerName?: string): Promise<RemoteFileContent> {
+    if (containerName) {
+      const st = (await this.fs(sessionId, containerName, 'fs_stat', { path })) as { size: number }
+      if (st.size > MAX_EDITABLE_BYTES) {
+        throw new Error(
+          `文件 ${formatSize(st.size)} 超过 ${formatSize(MAX_EDITABLE_BYTES)} 上限，` +
+            `无法在内置编辑器中打开。请用「下载」后本地查看。`
+        )
+      }
+      const res = (await this.fs(sessionId, containerName, 'fs_read', { path })) as {
+        data: string
+        size: number
+        mtime: number
+        binary: boolean
+      }
+      const buf = Buffer.from(res.data, 'base64')
+      return {
+        path,
+        content: res.binary ? '' : buf.toString('utf8'),
+        size: res.size,
+        mtime: res.mtime,
+        binary: res.binary
+      }
+    }
     const sftp = await this.sessions.sftp(sessionId)
     const attrs = await statP(sftp, path)
 
@@ -170,8 +261,17 @@ export class SftpService {
     sessionId: string,
     path: string,
     content: string,
-    expectedMtime?: number
+    expectedMtime?: number,
+    containerName?: string
   ): Promise<number> {
+    if (containerName) {
+      const res = (await this.fs(sessionId, containerName, 'fs_write', {
+        path,
+        data: Buffer.from(content, 'utf8').toString('base64'),
+        expected_mtime: expectedMtime ?? null
+      })) as { mtime: number }
+      return res.mtime
+    }
     const sftp = await this.sessions.sftp(sessionId)
 
     if (expectedMtime !== undefined) {
@@ -194,7 +294,11 @@ export class SftpService {
    * 递归删除是高危操作，渲染进程必须显式确认后才允许调用目录分支。
    * 符号链接一律按文件 unlink，绝不跟随进入。
    */
-  async remove(sessionId: string, path: string, isDir: boolean): Promise<void> {
+  async remove(sessionId: string, path: string, isDir: boolean, containerName?: string): Promise<void> {
+    if (containerName) {
+      await this.fs(sessionId, containerName, 'fs_delete', { path, recursive: isDir })
+      return
+    }
     const sftp = await this.sessions.sftp(sessionId)
     if (!isDir) {
       await unlinkP(sftp, path)

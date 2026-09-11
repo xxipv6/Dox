@@ -87,8 +87,42 @@ export class ContainerManager {
   private runtimeByParent = new Map<string, RuntimeInfo>()
   /** `${目标} ${容器名}` → 解析好的 shell。重复进入零成本 */
   private shellByTarget = new Map<string, string>()
+  /**
+   * 父会话 id → 骑在它上面的存活 exec 通道数（仅远端；本机通道没有父连接）。
+   * SessionManager 据此决定关宿主标签时是否把连接留作孤儿保活。
+   */
+  private channelsByParent = new Map<string, number>()
+
+  /**
+   * 某父会话的最后一个容器通道关闭时触发（SessionManager 回收孤儿连接用）。
+   * 只在 1→0 时发一次；通道反复开关不会重复触发。
+   */
+  onParentDrained: ((parentSessionId: string) => void) | null = null
 
   constructor(private readonly getClient: (sessionId: string) => Client | undefined) {}
+
+  /** 该父会话下是否还有存活的容器 exec 通道（宿主标签关闭时的保活判据） */
+  hasActiveChannels(parentSessionId: string): boolean {
+    return (this.channelsByParent.get(parentSessionId) ?? 0) > 0
+  }
+
+  private track(session: ContainerSession): void {
+    if (session.carrier.kind !== 'ssh') return
+    const n = this.channelsByParent.get(session.parentSessionId) ?? 0
+    this.channelsByParent.set(session.parentSessionId, n + 1)
+  }
+
+  /** 与 track 配对：每条容器会话在出表处必须恰好走一次 */
+  private untrack(session: ContainerSession): void {
+    if (session.carrier.kind !== 'ssh') return
+    const n = (this.channelsByParent.get(session.parentSessionId) ?? 0) - 1
+    if (n > 0) {
+      this.channelsByParent.set(session.parentSessionId, n)
+      return
+    }
+    this.channelsByParent.delete(session.parentSessionId)
+    this.onParentDrained?.(session.parentSessionId)
+  }
 
   /**
    * 探测并列出容器。**不抛错** —— 「没装 docker」「没权限」是预期内的状态，
@@ -253,6 +287,7 @@ export class ContainerManager {
       term
     }
     this.sessions.set(id, session)
+    this.track(session)
     this.wire(session)
     if (!owner.isDestroyed()) owner.send(IpcChannels.sshStatus, { id, status: 'connected' })
     return id
@@ -486,6 +521,7 @@ export class ContainerManager {
       term
     }
     this.sessions.set(id, session)
+    this.track(session)
     this.wire(session)
     if (!owner.isDestroyed()) owner.send(IpcChannels.sshStatus, { id, status: 'connected' })
     return id
@@ -612,6 +648,7 @@ export class ContainerManager {
       const current = this.sessions.get(id)
       if (!current || current.carrier.kind !== 'local' || current.carrier.pty !== proc) return
       this.sessions.delete(id)
+      this.untrack(current)
       // 这次失败多半是因为容器没了或镜像里没 shell，缓存不再可信
       this.shellByTarget.delete(`${session.parentSessionId} ${session.containerName}`)
       if (owner.isDestroyed()) return
@@ -637,6 +674,7 @@ export class ContainerManager {
     const session = this.sessions.get(id)
     if (!session || session.carrier.kind !== 'ssh' || session.carrier.channel !== channel) return
     this.sessions.delete(id)
+    this.untrack(session)
 
     const dockerError = [125, 126, 127].includes(info.exitCode ?? 0)
     const failedAtStart =
@@ -707,6 +745,7 @@ export class ContainerManager {
     if (!session) return
     // 先出表：随后的 'close'/'exit' 事件查不到而直接返回，不会重复通知
     this.sessions.delete(id)
+    this.untrack(session)
     if (session.carrier.kind === 'ssh') {
       try {
         session.carrier.channel.close()
@@ -735,6 +774,7 @@ export class ContainerManager {
       if (session.parentSessionId !== parentSessionId) continue
       if (session.carrier.kind === 'local') continue // 理论上到不了，防御一下
       this.sessions.delete(id)
+      this.untrack(session)
       // 父连接断开是「正常结束」，不套用 failedAtStart 那套失败判定：
       // 这里没有 stderr 可看，乱猜一个错误原因比不说更糟
       if (!session.owner.isDestroyed()) {

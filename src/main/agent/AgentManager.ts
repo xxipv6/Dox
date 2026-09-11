@@ -55,6 +55,8 @@ interface WatchEntry {
   containerName?: string
   ports: { owners: Set<WebContents>; active: boolean }
   stats: { owners: Set<WebContents>; active: boolean }
+  /** 文件面板等一次性调用方：持有期间通道不因 watch 退订归零而关闭 */
+  holders: Set<WebContents>
 }
 
 /**
@@ -159,6 +161,12 @@ export class AgentManager {
     return { localBin, osArch: containerName ? `Linux ${machine}（容器）` : `Linux ${machine}` }
   }
 
+  /** 升级安装后掐掉在跑的旧通道：serve 进程内存里还是旧二进制，重连才吃新版本 */
+  private restartChannelAfterInstall(key: string): void {
+    const ch = this.channels.get(key)
+    if (ch) this.dropChannel(key, ch)
+  }
+
   /**
    * 把匹配平台的 agent 二进制推到目标。
    *
@@ -195,6 +203,7 @@ export class AgentManager {
       const version = (JSON.parse(out.stdout.trim()) as { version: string }).version
       const status: AgentStatus = { installed: true, version, osArch }
       this.cache.set(keyOf(sessionId, containerName), status)
+      this.restartChannelAfterInstall(keyOf(sessionId, containerName))
       return status
     }
 
@@ -222,6 +231,7 @@ export class AgentManager {
 
     const status: AgentStatus = { installed: true, version, osArch }
     this.cache.set(keyOf(sessionId), status)
+    this.restartChannelAfterInstall(keyOf(sessionId))
     return status
   }
 
@@ -255,7 +265,8 @@ export class AgentManager {
         sessionId,
         containerName,
         ports: { owners: new Set(), active: false },
-        stats: { owners: new Set(), active: false }
+        stats: { owners: new Set(), active: false },
+        holders: new Set()
       }
       this.watches.set(key, w)
     }
@@ -279,7 +290,10 @@ export class AgentManager {
         if (owner.isDestroyed()) lane.owners.delete(owner)
       }
     }
-    if (w.ports.owners.size + w.stats.owners.size === 0) {
+    for (const holder of w.holders) {
+      if (holder.isDestroyed()) w.holders.delete(holder)
+    }
+    if (w.ports.owners.size + w.stats.owners.size + w.holders.size === 0) {
       if (this.watches.get(key) === w) this.watches.delete(key)
       return
     }
@@ -455,17 +469,48 @@ export class AgentManager {
     this.unwatch(sessionId, containerName, owner, 'stats')
   }
 
-  /** 退订：该泳道归零只是不再推送；两泳道都归零才 stop + 关通道（远端不留闲进程） */
+  /** 退订：该泳道归零只是不再推送；泳道与 holder 全归零才 stop + 关通道（远端不留闲进程） */
   private unwatch(sessionId: string, containerName: string | undefined, owner: WebContents, lane: 'ports' | 'stats'): void {
     const key = keyOf(sessionId, containerName)
     const w = this.watches.get(key)
     if (!w) return
     w[lane].owners.delete(owner)
-    if (w.ports.owners.size + w.stats.owners.size > 0) return
+    if (w.ports.owners.size + w.stats.owners.size + w.holders.size > 0) return
     this.watches.delete(key)
     const ch = this.channels.get(key)
     if (!ch) return
     // stop 是尽力而为：通道可能 already 半死，关流兜底
+    void this.callOn(ch, 'stop', {}).catch(() => undefined)
+    setTimeout(() => {
+      try { ch.stream.close() } catch { /* 已死 */ }
+    }, 500).unref?.()
+  }
+
+  // ---- 一次性调用（fs_* 文件方法等请求/响应式能力）----
+
+  /**
+   * 在目标通道上发一个请求/响应调用（fs_list/fs_read/…）。
+   * 通道不存在就现建 —— 文件面板打开期间由 holdChannel 保证不被退订收掉。
+   */
+  async call(sessionId: string, containerName: string | undefined, method: string, params: unknown): Promise<unknown> {
+    const ch = await this.connect(sessionId, containerName)
+    return this.callOn(ch, method, params)
+  }
+
+  /** 持有通道（文件面板挂载期间）：watch 退订归零也不关；释放后归零才收 */
+  holdChannel(sessionId: string, containerName: string | undefined, owner: WebContents): void {
+    this.watchEntry(sessionId, containerName).holders.add(owner)
+  }
+
+  releaseChannel(sessionId: string, containerName: string | undefined, owner: WebContents): void {
+    const key = keyOf(sessionId, containerName)
+    const w = this.watches.get(key)
+    if (!w) return
+    w.holders.delete(owner)
+    if (w.ports.owners.size + w.stats.owners.size + w.holders.size > 0) return
+    this.watches.delete(key)
+    const ch = this.channels.get(key)
+    if (!ch) return
     void this.callOn(ch, 'stop', {}).catch(() => undefined)
     setTimeout(() => {
       try { ch.stream.close() } catch { /* 已死 */ }

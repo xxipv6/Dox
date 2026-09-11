@@ -36,6 +36,18 @@ interface ActiveSession {
    * 'close' 事件本身不带原因，想给用户一个像样的断线说明就得靠 'error' 先记下来。
    */
   lastError?: string
+  /**
+   * 传输会话（不开 shell、不开终端标签的后台连接）：
+   * 直连容器/容器文件面板的承载 —— VS Code 里那条用户看不见的宿主机 SSH。
+   * 重连时按它决定走 openClient 还是 openShell。
+   */
+  transport?: boolean
+  /**
+   * 孤儿会话：宿主终端标签已关，但容器 exec 通道还骑在这条连接上，
+   * 连接为它们保活（Dev Containers 式：容器不依赖看得见的宿主标签）。
+   * 最后一个容器通道关闭时由 releaseOrphan 真正断开。
+   */
+  orphaned?: boolean
 }
 
 /** 由已保存会话 id 解析出完整连接配置（含解密后的认证信息）。跳板机与断线重连共用。 */
@@ -169,6 +181,44 @@ export class SessionManager {
     return id
   }
 
+  /**
+   * 建立连接但**不开 shell**（返回会话 id），容器/文件等传输用途的后台会话。
+   *
+   * 这是「直连容器」的承载：VS Code 进容器也有一条宿主机 SSH，只是用户
+   * 看不见 —— 我们的 transport 会话同理：有重连、SFTP、exec 的全部机制，
+   * 但没有终端标签，设备行的容器列表与容器标签都借它的 client 工作。
+   */
+  async connectTransport(
+    config: SshSessionConfig,
+    owner: WebContents,
+    opts?: { savedSessionId?: string }
+  ): Promise<string> {
+    const id = randomUUID()
+    const { client, jumps } = await this.openClient(config, owner)
+
+    const session: ActiveSession = {
+      id,
+      client,
+      shell: null,
+      sftpClient: null,
+      jumps,
+      owner,
+      term: { cols: 80, rows: 24 },
+      savedSessionId: opts?.savedSessionId,
+      config: opts?.savedSessionId ? undefined : config,
+      disposed: false,
+      stopped: false,
+      attempt: 0,
+      timer: null,
+      transport: true
+    }
+    this.sessions.set(id, session)
+    this.wireTransport(session, client)
+    this.notifyStatus(session, 'connected')
+    void this.sftp(id).catch(() => undefined)
+    return id
+  }
+
   /** 键盘输入 → 远端 shell */
   write(id: string, data: string | Uint8Array): void {
     this.sessions.get(id)?.shell?.write(data)
@@ -183,9 +233,28 @@ export class SessionManager {
     session.shell?.setWindow(rows, cols, 0, 0)
   }
 
-  disconnect(id: string): void {
+  disconnect(id: string, opts?: { force?: boolean }): void {
     const session = this.sessions.get(id)
     if (!session) return
+    /*
+     * 宿主终端标签关了，但容器 exec 通道还骑在这条连接上：
+     * 不掐连接 —— 把会话转成「孤儿」继续保活（VS Code 里容器也不依赖
+     * 看得见的宿主窗口）。shell 是我们主动结束的，它的 close 事件由
+     * handleClosed 的 orphan 分支吞掉；最后一个容器通道关闭时
+     * ContainerManager 回调 releaseOrphan 才真正断开。
+     */
+    if (!opts?.force && !session.orphaned && this.shouldKeepAlive?.(id)) {
+      session.orphaned = true
+      session.transport = true // 语义上已是纯承载连接；若重连按传输会话处理
+      const shell = session.shell
+      session.shell = null
+      try {
+        shell?.end()
+      } catch {
+        // 壳本就半死，end 失败不影响保活
+      }
+      return
+    }
     session.disposed = true
     this.clearTimer(session)
     // 先出表：client.end() 触发的 'close' 走 handleClosed 时会查不到而直接返回，
@@ -195,9 +264,19 @@ export class SessionManager {
     this.finalize(session)
   }
 
+  /**
+   * 孤儿会话的最后一个容器通道关闭了（ContainerManager 回调）：
+   * 连接再没有任何消费者，真正断开。非孤儿会话忽略 —— 正常会话的
+   * 容器通道开关与连接生命周期无关。
+   */
+  releaseOrphan(id: string): void {
+    if (!this.sessions.get(id)?.orphaned) return
+    this.disconnect(id, { force: true })
+  }
+
   /** 应用退出前清理全部连接 */
   disconnectAll(): void {
-    for (const id of [...this.sessions.keys()]) this.disconnect(id)
+    for (const id of [...this.sessions.keys()]) this.disconnect(id, { force: true })
   }
 
   /**
@@ -248,6 +327,12 @@ export class SessionManager {
 
   /** 会话结束回调（ForwardManager 借此停止关联规则）；每次断开都会触发 */
   onClosed: ((id: string) => void) | null = null
+
+  /**
+   * 断开前问询：该会话是否还有容器通道骑在上面（ContainerManager 提供）。
+   * 返回 true 时 disconnect 不掐连接，只把它转成孤儿会话继续保活。
+   */
+  shouldKeepAlive: ((id: string) => boolean) | null = null
 
   /** 重连成功回调（ForwardManager 借此把转发规则重新建立起来） */
   onReconnected: ((id: string) => void) | null = null
@@ -306,6 +391,36 @@ export class SessionManager {
   }
 
   /**
+   * 建立一条完整的 SSH 连接（含跳板机链），在 ready 时交付。
+   * openShell（终端会话）与 connectTransport（传输会话）共用这一段。
+   */
+  private async openClient(
+    config: SshSessionConfig,
+    owner: WebContents
+  ): Promise<{ client: Client; jumps: Client[] }> {
+    const client = new Client()
+    const { cfg: connectConfig, jumps } = await this.buildConnectConfig(config, 0, owner)
+
+    return new Promise((resolve, reject) => {
+      let settled = false
+      client.on('ready', () => {
+        settled = true
+        resolve({ client, jumps })
+      })
+      // 必须持久监听：settle 之后到 wireSession/wireTransport 接管之前，
+      // 以及会话中途的 error，都需要有监听者，否则 Node 会直接抛出打崩主进程
+      client.on('error', (err: Error) => {
+        if (!settled) {
+          settled = true
+          for (const jump of jumps) jump.end()
+          reject(err)
+        }
+      })
+      client.connect(connectConfig)
+    })
+  }
+
+  /**
    * 建立一条完整的 SSH 连接（含跳板机链）并打开 shell。
    * connect 与断线重连共用这一条路径。
    */
@@ -314,8 +429,7 @@ export class SessionManager {
     owner: WebContents,
     term: TermSize
   ): Promise<{ client: Client; shell: ClientChannel; jumps: Client[] }> {
-    const client = new Client()
-    const { cfg: connectConfig, jumps } = await this.buildConnectConfig(config, 0, owner)
+    const { client, jumps } = await this.openClient(config, owner)
 
     const cleanupJumps = (): void => {
       for (const jump of jumps) jump.end()
@@ -333,40 +447,37 @@ export class SessionManager {
         reject(new Error('连接超时：SSH 已建立但未能在 30 秒内打开 shell 通道'))
       }, SHELL_TIMEOUT_MS)
 
-      client.on('ready', () => {
-        client.shell(
-          { term: 'xterm-256color', cols: term.cols, rows: term.rows },
-          (err, stream) => {
-            if (err) {
-              clearTimeout(timer)
-              client.end()
-              cleanupJumps()
-              if (!settled) {
-                settled = true
-                reject(err)
-              }
-              return
-            }
-            clearTimeout(timer)
-            settled = true
-            resolve({ client, shell: stream, jumps })
-          }
-        )
-      })
-
-      // 必须持久监听：settle 之后到 wireSession 接管之前，
-      // 以及会话中途的 error，都需要有监听者，否则 Node 会直接抛出打崩主进程
-      client.on('error', (err: Error) => {
-        if (!settled) {
-          settled = true
+      client.shell(
+        { term: 'xterm-256color', cols: term.cols, rows: term.rows },
+        (err, stream) => {
           clearTimeout(timer)
-          cleanupJumps()
-          reject(err)
+          if (err) {
+            client.end()
+            cleanupJumps()
+            if (!settled) {
+              settled = true
+              reject(err)
+            }
+            return
+          }
+          settled = true
+          resolve({ client, shell: stream, jumps })
         }
-      })
-
-      client.connect(connectConfig)
+      )
     })
+  }
+
+  /** 传输会话的连接接线：没有 shell 输出要合并，只挂错误与关闭收口 */
+  private wireTransport(session: ActiveSession, client: Client): void {
+    const { id } = session
+    client.on('error', (err: Error) => {
+      const current = this.sessions.get(id)
+      if (current?.client === client) {
+        current.lastError = err.message
+        console.warn(`[ssh] 传输会话出错: ${err.message}`)
+      }
+    })
+    client.on('close', () => this.handleClosed(id, client, false, 'client'))
   }
 
   /**
@@ -394,7 +505,7 @@ export class SessionManager {
       // close 前必须落盘：否则通道最后几毫秒的输出会跟着定时器进坟墓
       batcher.flush()
       batcher.dispose()
-      this.handleClosed(id, client, ctx.shellExited)
+      this.handleClosed(id, client, ctx.shellExited, 'shell')
     })
 
     client.on('error', (err: Error) => {
@@ -406,7 +517,7 @@ export class SessionManager {
         console.warn(`[ssh] 会话出错: ${err.message}`)
       }
     })
-    client.on('close', () => this.handleClosed(id, client, ctx.shellExited))
+    client.on('close', () => this.handleClosed(id, client, ctx.shellExited, 'client'))
   }
 
   /**
@@ -414,11 +525,22 @@ export class SessionManager {
    *
    * source 用于识别迟到的旧连接事件：重连成功后再收到旧连接的 close，
    * 绝不能当成「又断了」——那样会陷入无限重连。
+   *
+   * kind 区分事件来自 shell 还是 client：孤儿会话（宿主标签已关、连接为
+   * 容器保活）的 shell 是 disconnect 自己 end 掉的，那个 close 不该拆会话。
    */
-  private handleClosed(id: string, source?: Client, shellExited = false): void {
+  private handleClosed(
+    id: string,
+    source: Client | undefined,
+    shellExited: boolean,
+    kind: 'shell' | 'client'
+  ): void {
     const session = this.sessions.get(id)
     if (!session) return
     if (source && session.client && session.client !== source) return
+    // 孤儿会话的 shell 是我们转孤儿时主动 end 的 —— 忽略；
+    // 只有连接本身的 close 才走下面的收尾/重连
+    if (session.orphaned && kind === 'shell') return
 
     session.client = null
     session.shell = null
@@ -494,23 +616,26 @@ export class SessionManager {
     }
 
     try {
-      const { client, shell, jumps } = await this.openShell(config, session.owner, session.term)
+      const opened: { client: Client; jumps: Client[]; shell?: ClientChannel } = session.transport
+        ? await this.openClient(config, session.owner)
+        : await this.openShell(config, session.owner, session.term)
 
       // 重连期间用户关掉了标签：新连接已经没人认领，立刻拆掉
       if (session.disposed) {
-        client.end()
-        for (const jump of jumps) jump.end()
+        opened.client.end()
+        for (const jump of opened.jumps) jump.end()
         return
       }
 
-      session.client = client
-      session.shell = shell
-      session.jumps = jumps
+      session.client = opened.client
+      session.shell = opened.shell ?? null
+      session.jumps = opened.jumps
       // 旧 SFTP 通道已随旧连接失效，置空让下次 sftp() 惰性重建
       session.sftpClient = null
       session.attempt = 0
       session.lastError = undefined
-      this.wireSession(session, client, shell)
+      if (session.transport) this.wireTransport(session, opened.client)
+      else this.wireSession(session, opened.client, opened.shell!)
 
       this.notifyStatus(session, 'connected', undefined, { reconnected: true })
       this.onReconnected?.(session.id)

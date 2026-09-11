@@ -68,6 +68,8 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-agent-keepalive.mjs` | agent 通道保活：杀掉应用的 sshd 会话 → 自动重连 → serve 通道按订阅意图自动重建 → 静默 nc 仍被秒推（2.8s）。跑前需 `node scripts/build-agent.mjs` |
 | `verify-agent-stats.mjs` | watch_stats 系统状态条：go test（/proc/stat、meminfo、nvidia-smi CSV 解析）+ 端到端（预装 agent + **假 nvidia-smi** 罐头数据 → 状态条 CPU/MEM/GPU 全出 → 悬停提示有显卡全名显存）。跑前需 `node scripts/build-agent.mjs` |
 | `verify-container-agent.mjs` | 容器内 agent（Dev Containers 式注入）：UI 点「安装到容器」→ 容器内静默 nc 秒推 + 状态条 → `docker restart` 后 45s 节流重试自动复活、推送恢复。前置：dind + inner 容器 |
+| `verify-container-fs.mjs` | 容器文件管理（agent v0.3.0 fs 协议）：UI 安装 → 面板列容器根目录 → 新建文件夹 → 上传文件+目录（SFTP 中转 + docker cp，字节校验）→ 编辑器写回 → 下载文件/递归目录 → 宿主机中转目录零残留 → 容器内打包（Go 标准库 tar.gz，distroless 也能打）+ 撞名避让 → 递归删除。前置：dind + inner 容器 |
+| `verify-direct-container.mjs` | 直连容器（免宿主机标签）+ 容器标签独立存活：保存设备（不连接）→ 设备行展开箭头列出容器（后台传输会话，全程无宿主机终端标签）→ 点容器名直接进 → echo 可交互 → 服务器侧 TCP 连接数证明只有一条传输连接；再验孤儿保活：宿主标签里进的容器，关宿主标签后 echo 仍可交互、连接数不变，最后的容器标签关掉后连接才被回收 |
 | `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |
 | `verify-posix-integration.mjs` | 校验 POSIX 侧的同一契约：zsh（ZDOTDIR 注入）/ bash（--rcfile）/ fish（-C），装了哪个测哪个 |
 | `verify-posix-local-ui.mjs` | 端到端：真实应用里新建本地终端 → 敲 `cd` → 断言标签标题跟随 cwd（守着「zsh 打开即死」那个回归） |
@@ -128,7 +130,7 @@ src/
   - **标签栏**：标签从「等高矩形 + 竖线分割」改成有间距的圆角块，活动标签靠抬升的面 + 顶部高亮线 + 投影三重信号；右侧分屏/SFTP 按钮也改成圆角块 —— 它们和标签混成同一排「格子」时，分不清哪个是可切换的、哪个是动作
 - **自绘标题栏 ✅**：Windows / Linux 上 `frame: false`，最顶上那条由我们自己画 —— logo + Dox + − □ ✕，跟主题同色；macOS 保留系统红绿灯（`titleBarStyle: 'hiddenInset'`）。代价是失去「悬停最大化按钮弹出贴靠布局」，双击最大化与边缘拖拽缩放仍在
 - **应用图标重做 ✅**：`scripts/generate-icon.mjs` 生成，天蓝→草绿竖向渐变 + 白色 `>_`，3 倍超采样抗锯齿；`--preview` 出 16/32/64/128 原生并排图供肉眼核对（缩到 16px 才是真正要过的那关）。侧栏顶栏的品牌已并到标题栏，同一处不再出现两遍「Dox」
-- **远程助手 dox-agent ✅**（红线 opt-in 新口径）：Go 静态二进制（~2MB，linux/amd64+arm64 交叉编译，`node scripts/build-agent.mjs`），侧栏「远程助手」面板**显式点安装**才推送（宿主机：uname 选架构 → SFTP 传 .tmp 再 mv → `~/.dox/dox-agent`，删目录即完全卸载；**容器：Dev Containers 同款注入** —— docker info 选架构（distroless 没有 uname）→ 经宿主机 /tmp 中转 `docker cp` 进容器 `/tmp/dox-agent`，容器删除即消失、stop/start 不影响）。永不静默装/不写系统目录/不自启。传输复用 SSH exec 通道跑 NDJSON 协议（hello / watch_ports / watch_stats / stop，容器态由 `docker exec -i` 承载），watch_ports 在目标本地算 /proc 差分、只推变化；**断线保活**：SSH 自动重连后主进程按订阅意图重建 serve 通道并重发 watch（断档期轮询顶班、agent 帧回来即切回）；容器 restart（SSH 没断、重连钩子管不到）由渲染层 45s 节流重试复活。**系统状态条**（v0.2.0）：终端左下角常驻 CPU/MEM/GPU（/proc/stat 差分 + meminfo + nvidia-smi 存在才报，悬停看显卡全名与显存），与端口推送共用通道、0.1.0 老 agent 自动降级为不显示
+- **远程助手 dox-agent ✅**（红线 opt-in 新口径）：Go 静态二进制（~2MB，linux/amd64+arm64 交叉编译，`node scripts/build-agent.mjs`），侧栏「远程助手」面板**显式点安装**才推送（宿主机：uname 选架构 → SFTP 传 .tmp 再 mv → `~/.dox/dox-agent`，删目录即完全卸载；**容器：Dev Containers 同款注入** —— docker info 选架构（distroless 没有 uname）→ 经宿主机 /tmp 中转 `docker cp` 进容器 `/tmp/dox-agent`，容器删除即消失、stop/start 不影响）。永不静默装/不写系统目录/不自启。传输复用 SSH exec 通道跑 NDJSON 协议（hello / watch_ports / watch_stats / fs_* / stop，容器态由 `docker exec -i` 承载），watch_ports 在目标本地算 /proc 差分、只推变化；**断线保活**：SSH 自动重连后主进程按订阅意图重建 serve 通道并重发 watch（断档期轮询顶班、agent 帧回来即切回）；容器 restart（SSH 没断、重连钩子管不到）由渲染层 45s 节流重试复活。**系统状态条**（v0.2.0）：终端左下角常驻 CPU/MEM/GPU（/proc/stat 差分 + meminfo + nvidia-smi 存在才报，悬停看显卡全名与显存），与端口推送共用通道、0.1.0 老 agent 自动降级为不显示
 - **SOCKS5 一键代理 ✅**：端口转发面板新增「代理 -D」规则类型 —— 本机起 SOCKS5 服务（RFC 1928 仅 CONNECT 免认证，自研握手状态机），每个连接经 SSH forwardOut 从**远端网络出口**发出（ssh -D 等价）。浏览器/终端代理指向 `socks5://127.0.0.1:端口` 即全局走服务器网络；每条连接现取 client，断线重连后无需重建自动恢复
 - **端口转发建议 ✅**：三条检测路径——输出横幅（`localhost:端口`，秒出气泡，字节级门控零开销）+ **agent watch_ports 长连接推送**（装了助手的机器：远端本地算 /proc 差分，新监听 ~2s 推上来；通道断了自动降级）+ **/proc/net/tcp 每 5s 差分**兜底（VS Code "process" 检测源的无 agent 版，首查只建基线不轰炸、只建议 ≥1024 端口、非 Linux 自动停）。点「转发到本机」一键建成 ssh -L；**容器感知**：远端容器标签走 `docker exec` 读**容器 netns** 的 /proc（容器有自己的 netns，宿主机表里看不到），建议目标用 `docker inspect` 解析网桥 IP，没发布端口的容器也能转；本地终端/本机容器不弹。设置里可关
 - **性能优化 ✅**：终端输出 4ms/64KB 批处理合并（三处管理器共用 `chunkBatcher`，刷屏时 IPC 消息降 1-2 个数量级）；ZMODEM Sentry 改触发序列预扫描（常规输出不再逐块做 3 次 O(n) 复制）；SFTP 传输并发 2→4 + 高水位调大（读 1MB / 写 4MB，读了 ssh2 源码确认串行点）；渲染产物开 oxc 压缩 + FileEditor（CodeMirror）懒加载，首包 2.38MB → 0.58MB；更新检查延后 45s 退出启动关键路径；连接 ready 后后台预热 sftp 通道
@@ -142,7 +144,10 @@ src/
   - 进入前先探一次 shell（`bash` → `sh`），**在开标签之前**就把「容器已停止 / exec 被拒 / distroless 没有 shell」区分开；结果按 (目标, 容器) 缓存
   - 容器会话独立成 `ContainerManager`，不塞进 `SessionManager` —— 否则 `disconnect()` 会掐断整条 SSH 连接、`sftp()` 会返回宿主机文件系统、`handleClosed()` 会把它拖进重连循环。于是「容器标签不重连」来自那段代码**根本不存在**
   - 容器标签不进布局快照（父会话 id 重启即失效，存下来只会造出无法恢复的僵尸标签）；父会话重连后容器标签保持「已断开」，再点一次复用同一个标签。本机会话不受 SSH 断线影响 —— 它的 parentSessionId 是哨兵值，与任何真实会话 id 都不相等
-  - 限终端：不做容器内文件浏览（VS Code Dev Containers 那条路要往容器里塞一个 server，直接违反「远端无感」）
+- **直连容器 ✅**（Dev Containers 式，免宿主机标签）：设备行左侧箭头展开即列出那台机器的运行中容器，点容器名直接进 —— 全程不开宿主机终端标签，容器操作骑在一条后台**传输会话**上（无 shell 的 SSH 连接，VS Code 里那条看不见的宿主连接；只收已保存设备 id，凭证不出主进程）。传输会话按需建立、引用归零自动回收（侧栏展开与容器标签各算一份占用）
+  - **容器标签独立存活**：从宿主终端标签里进的容器，关掉宿主标签不再跟着死 —— 主进程发现还有 exec 通道骑在连接上时，把会话留作「孤儿」继续保活，最后一个容器通道关闭才真正断开（`ContainerManager` 按父会话计数通道、1→0 时回调 `SessionManager.releaseOrphan`）
+- **容器文件管理 ✅**（agent v0.3.0 fs 协议）：容器标签的 SFTP 按钮打开的是**容器内**文件面板 —— 浏览/新建/重命名/删除/双击编辑写回全部经容器里的 dox-agent（`fs_list/stat/read/write/mkdir/rename/delete`，编辑器写回带 mtime 乐观锁）；上传下载走两段接力（本机 ↔ SFTP ↔ 宿主机 /tmp 独立中转目录 ↔ docker cp ↔ 容器，逐任务中转免批次协调，跑完自动清）；**打包**由 agent 用 Go 标准库产 tar.gz（不依赖容器里有 tar，distroless 也能打，撞名自动 -2 避让）。容器文件操作在宿主机上零残留
+  - **版本兼容 UX**：面板/文件面板发现容器里是老 agent（缺 fs 方法）时给「升级到 vX」按钮与指路文案，而不是把 `unknown method` 原文糊给用户；升级 = 覆盖安装 + 旧 serve 通道自动重启（老二进制还跑在内存里，不换通道等于没升），终端侧 agent_closed 后立即重试一次新通道
 
 ## 已知待办（代码内 TODO）
 

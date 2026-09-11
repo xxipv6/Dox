@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useSessionStore } from '../stores/sessions'
 import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
+import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
 import SidebarSection from './SidebarSection.vue'
@@ -70,6 +71,12 @@ async function install(): Promise<void> {
   }
 }
 
+/** 已安装但低于应用内置版本：提示升级（升级 = 覆盖安装 + 通道自动重启） */
+const outdated = computed(
+  () => !!status.value?.installed && !!status.value.version &&
+    agentVersionOlder(status.value.version, BUNDLED_AGENT_VERSION)
+)
+
 watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
 </script>
 
@@ -83,14 +90,22 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
     <template v-else>
       <div v-if="status === null" class="empty-hint">查询中…</div>
 
-      <div v-else-if="status.installed" class="agent-ok">
-        <Icon name="check" :size="13" />
-        <span>
-          已安装 v{{ status.version }}
-          <template v-if="target.containerName">（容器 {{ target.containerName }}）</template>
-          <template v-else-if="status.osArch">（{{ status.osArch }}）</template>
-        </span>
-      </div>
+      <template v-else-if="status.installed">
+        <div class="agent-ok">
+          <Icon name="check" :size="13" />
+          <span>
+            已安装 v{{ status.version }}
+            <template v-if="target.containerName">（容器 {{ target.containerName }}）</template>
+            <template v-else-if="status.osArch">（{{ status.osArch }}）</template>
+          </span>
+        </div>
+        <!-- 版本过旧：新应用 + 老助手，新能力（文件管理等）在老二进制上不存在 -->
+        <div v-if="outdated" class="agent-upgrade">
+          <button class="btn primary" :disabled="installing" @click="install">
+            {{ installing ? '升级中…' : `升级到 v${BUNDLED_AGENT_VERSION}` }}
+          </button>
+        </div>
+      </template>
 
       <template v-else>
         <p class="agent-desc">
@@ -125,6 +140,9 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
   padding: 5px 8px;
   font-size: var(--fs-sm);
   color: var(--success-text);
+}
+.agent-upgrade {
+  padding: 0 8px 4px 26px;
 }
 .agent-desc {
   font-size: var(--fs-xs);

@@ -17,7 +17,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.2.0"
+var version = "0.3.0"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -118,7 +118,16 @@ func serve() error {
 			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"bye": true}})
 			return nil
 		default:
-			_ = enc.Encode(response{ID: req.ID, Error: "unknown method: " + req.Method})
+			// fs_* 文件方法统一走分发器（容器文件管理的承载）
+			if result, handled, err := dispatchFS(req.Method, req.Params); handled {
+				if err != nil {
+					_ = enc.Encode(response{ID: req.ID, Error: err.Error()})
+				} else {
+					_ = enc.Encode(response{ID: req.ID, Result: result})
+				}
+			} else {
+				_ = enc.Encode(response{ID: req.ID, Error: "unknown method: " + req.Method})
+			}
 		}
 	}
 	// stdin 关闭 = SSH 通道断了：agent 没有存在的意义，跟着退出

@@ -182,6 +182,8 @@ export type TransferStatus = 'pending' | 'active' | 'done' | 'error' | 'canceled
 export interface TransferTask {
   id: string
   sessionId: string
+  /** 容器传输的目标容器（经宿主机 /tmp 中转 + docker cp）；宿主机传输为 undefined */
+  containerName?: string
   direction: TransferDirection
   localPath: string
   remotePath: string

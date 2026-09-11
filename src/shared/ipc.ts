@@ -2,6 +2,8 @@
 export const IpcChannels = {
   // SSH 会话
   sshConnect: 'ssh:connect',
+  /** 传输会话：不开 shell 的后台连接（直连容器的承载，入参为已保存设备 id） */
+  sshConnectTransport: 'ssh:connectTransport',
   sshInput: 'ssh:input',
   sshResize: 'ssh:resize',
   sshDisconnect: 'ssh:disconnect',
@@ -52,6 +54,9 @@ export const IpcChannels = {
   agentWatchStats: 'agent:watchStats',
   agentUnwatchStats: 'agent:unwatchStats',
   agentStats: 'agent:stats',
+  /** 文件面板持有/释放 agent 通道（持有期间退订归零也不关通道） */
+  agentFsHold: 'agent:fsHold',
+  agentFsRelease: 'agent:fsRelease',
   /*
    * 容器终端（Docker / Podman）。
    *

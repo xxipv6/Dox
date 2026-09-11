@@ -18,6 +18,8 @@ import type {
 const api: DoxApi = {
   connect: (config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
     ipcRenderer.invoke(IpcChannels.sshConnect, config, term, opts),
+  connectTransport: (savedSessionId: string) =>
+    ipcRenderer.invoke(IpcChannels.sshConnectTransport, savedSessionId),
   connectLocal: (term: TermSize, shellId?: string) =>
     ipcRenderer.invoke(IpcChannels.localConnect, term, shellId),
   listLocalShells: () => ipcRenderer.invoke(IpcChannels.localListShells),
@@ -59,17 +61,22 @@ const api: DoxApi = {
   getSessionAuth: (id: string) => ipcRenderer.invoke(IpcChannels.configGetAuth, id),
 
   // ---- SFTP ----
-  sftpList: (sessionId, dir) => ipcRenderer.invoke(IpcChannels.sftpList, sessionId, dir),
-  sftpRealpath: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpRealpath, sessionId, path),
-  sftpStat: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpStat, sessionId, path),
-  sftpMkdir: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpMkdir, sessionId, path),
-  sftpRename: (sessionId, from, to) =>
-    ipcRenderer.invoke(IpcChannels.sftpRename, sessionId, from, to),
-  sftpDelete: (sessionId, path, isDir) =>
-    ipcRenderer.invoke(IpcChannels.sftpDelete, sessionId, path, isDir),
-  sftpReadText: (sessionId, path) => ipcRenderer.invoke(IpcChannels.sftpReadText, sessionId, path),
-  sftpWriteText: (sessionId, path, content, expectedMtime) =>
-    ipcRenderer.invoke(IpcChannels.sftpWriteText, sessionId, path, content, expectedMtime),
+  sftpList: (sessionId, dir, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpList, sessionId, dir, containerName),
+  sftpRealpath: (sessionId, path, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpRealpath, sessionId, path, containerName),
+  sftpStat: (sessionId, path, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpStat, sessionId, path, containerName),
+  sftpMkdir: (sessionId, path, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpMkdir, sessionId, path, containerName),
+  sftpRename: (sessionId, from, to, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpRename, sessionId, from, to, containerName),
+  sftpDelete: (sessionId, path, isDir, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpDelete, sessionId, path, isDir, containerName),
+  sftpReadText: (sessionId, path, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpReadText, sessionId, path, containerName),
+  sftpWriteText: (sessionId, path, content, expectedMtime, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpWriteText, sessionId, path, content, expectedMtime, containerName),
 
   // ---- 容器 ----
   listContainers: (parentSessionId) =>
@@ -86,18 +93,18 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.containerListeners, parentSessionId, containerName),
 
   // ---- 传输队列 ----
-  pickUpload: (sessionId, remoteDir) =>
-    ipcRenderer.invoke(IpcChannels.transferPickUpload, sessionId, remoteDir),
-  enqueueDropped: (sessionId, remoteDir, files: DroppedFile[]) =>
-    ipcRenderer.invoke(IpcChannels.transferEnqueueDropped, sessionId, remoteDir, files),
-  download: (sessionId, remotePath, fileName) =>
-    ipcRenderer.invoke(IpcChannels.transferDownload, sessionId, remotePath, fileName),
-  downloadDir: (sessionId, remotePath) =>
-    ipcRenderer.invoke(IpcChannels.transferDownloadDir, sessionId, remotePath),
-  downloadMany: (sessionId, items) =>
-    ipcRenderer.invoke(IpcChannels.transferDownloadMany, sessionId, items),
-  sftpArchive: (sessionId, paths) =>
-    ipcRenderer.invoke(IpcChannels.sftpArchive, sessionId, paths),
+  pickUpload: (sessionId, remoteDir, containerName) =>
+    ipcRenderer.invoke(IpcChannels.transferPickUpload, sessionId, remoteDir, containerName),
+  enqueueDropped: (sessionId, remoteDir, files: DroppedFile[], containerName) =>
+    ipcRenderer.invoke(IpcChannels.transferEnqueueDropped, sessionId, remoteDir, files, containerName),
+  download: (sessionId, remotePath, fileName, containerName) =>
+    ipcRenderer.invoke(IpcChannels.transferDownload, sessionId, remotePath, fileName, containerName),
+  downloadDir: (sessionId, remotePath, containerName) =>
+    ipcRenderer.invoke(IpcChannels.transferDownloadDir, sessionId, remotePath, containerName),
+  downloadMany: (sessionId, items, containerName) =>
+    ipcRenderer.invoke(IpcChannels.transferDownloadMany, sessionId, items, containerName),
+  sftpArchive: (sessionId, paths, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpArchive, sessionId, paths, containerName),
   remoteListeners: (sessionId) =>
     ipcRenderer.invoke(IpcChannels.remoteListeners, sessionId),
   agentStatus: (sessionId, containerName) =>
@@ -122,6 +129,10 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.agentWatchStats, sessionId, containerName),
   agentUnwatchStats: (sessionId, containerName) =>
     ipcRenderer.invoke(IpcChannels.agentUnwatchStats, sessionId, containerName),
+  agentFsHold: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentFsHold, sessionId, containerName),
+  agentFsRelease: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentFsRelease, sessionId, containerName),
   onAgentStats: (cb) => {
     const listener = (
       _e: IpcRendererEvent,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { DroppedFile, FileEntry, TransferTask } from '@shared/types'
+import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
@@ -8,15 +9,28 @@ import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 
-const props = defineProps<{ sessionId: string }>()
+const props = defineProps<{
+  /** 面板归属的会话（cwd 跟随/编辑器分组用这个；容器标签 = 容器 pane id） */
+  sessionId: string
+  /** 容器目标：文件操作经容器里的 dox-agent（fs 调用用 parentSessionId + containerName） */
+  container?: { parentSessionId: string; containerName: string }
+}>()
 const store = useSessionStore()
 const editor = useEditorStore()
+
+/** 实际的文件操作会话（容器 = 父 SSH 会话；宿主机 = 自己） */
+const fsSessionId = computed(() => props.container?.parentSessionId ?? props.sessionId)
+const ctrName = computed(() => props.container?.containerName)
 
 const cwd = ref('')
 const entries = ref<FileEntry[]>([])
 const loading = ref(false)
 const errorMsg = ref('')
 const dragOver = ref(false)
+/** 容器标签但还没装容器助手：文件面板无米下锅，指路去装 */
+const agentMissing = ref(false)
+/** 容器助手版本过旧（没有 fs_* 方法）：指路去升级（空串 = 不过旧） */
+const agentOutdated = ref('')
 
 // 内联新建文件夹 / 重命名
 const creatingDir = ref(false)
@@ -83,7 +97,7 @@ async function load(dir?: string): Promise<void> {
   clearSelection()
   try {
     if (dir) cwd.value = dir
-    entries.value = await window.api.sftpList(props.sessionId, cwd.value)
+    entries.value = await window.api.sftpList(fsSessionId.value, cwd.value, ctrName.value)
     // 与终端的 cwd 跟踪保持同步（作为下次 cd 相对路径的基准）
     store.setCwd(props.sessionId, cwd.value)
   } catch (err) {
@@ -94,9 +108,27 @@ async function load(dir?: string): Promise<void> {
 }
 
 async function init(): Promise<void> {
+  // 容器标签先看助手在不在：没装就是「无米下锅」，指路比报错好
+  if (props.container) {
+    const st = await window.api
+      .agentStatus(props.container.parentSessionId, props.container.containerName)
+      .catch(() => null)
+    if (!st?.installed) {
+      agentMissing.value = true
+      return
+    }
+    // 版本过旧（没有 fs_* 方法的老助手）：糊 unknown method 原文不如指路升级
+    if (st.version && agentVersionOlder(st.version, BUNDLED_AGENT_VERSION)) {
+      agentOutdated.value = st.version
+      return
+    }
+    agentOutdated.value = ''
+    agentMissing.value = false
+    void window.api.agentFsHold(props.container.parentSessionId, props.container.containerName)
+  }
   try {
-    // 以远端 home 目录为起点
-    const home = await window.api.sftpRealpath(props.sessionId, '.')
+    // 以远端 home 目录为起点（容器落地 /，由主进程 realpath 分路处理）
+    const home = await window.api.sftpRealpath(fsSessionId.value, '.', ctrName.value)
     await load(home)
   } catch {
     await load('/')
@@ -112,7 +144,14 @@ function goUp(): void {
 function openEntry(entry: FileEntry): void {
   // 目录进目录；文件交给内置编辑器（二进制/超限由主编解读取时判定并报错）
   if (entry.isDir) void load(entry.path)
-  else void editor.open(props.sessionId, entry.path)
+  else
+    void editor.open(
+      props.sessionId,
+      entry.path,
+      props.container
+        ? { sessionId: props.container.parentSessionId, containerName: props.container.containerName }
+        : undefined
+    )
 }
 
 // ---- 新建文件夹 ----
@@ -120,7 +159,7 @@ async function submitNewDir(): Promise<void> {
   const name = newDirName.value.trim()
   if (name) {
     try {
-      await window.api.sftpMkdir(props.sessionId, `${cwd.value}/${name}`)
+      await window.api.sftpMkdir(fsSessionId.value, `${cwd.value}/${name}`, ctrName.value)
       await load()
     } catch (err) {
       alert(`新建文件夹失败：${errorText(err)}`)
@@ -140,7 +179,7 @@ async function submitRename(entry: FileEntry): Promise<void> {
   const name = renameValue.value.trim()
   if (name && name !== entry.name) {
     try {
-      await window.api.sftpRename(props.sessionId, entry.path, `${cwd.value}/${name}`)
+      await window.api.sftpRename(fsSessionId.value, entry.path, `${cwd.value}/${name}`, ctrName.value)
       await load()
     } catch (err) {
       alert(`重命名失败：${errorText(err)}`)
@@ -154,7 +193,7 @@ async function removeEntry(entry: FileEntry): Promise<void> {
   const hint = entry.isDir ? `目录 ${entry.name} 及其全部内容（递归删除，不可恢复）` : `文件 ${entry.name}`
   if (!confirm(`确认删除${hint}？`)) return
   try {
-    await window.api.sftpDelete(props.sessionId, entry.path, entry.isDir)
+    await window.api.sftpDelete(fsSessionId.value, entry.path, entry.isDir, ctrName.value)
     await load()
   } catch (err) {
     alert(`删除失败：${errorText(err)}`)
@@ -174,13 +213,13 @@ async function guard(action: () => Promise<unknown>): Promise<void> {
 async function downloadEntry(entry: FileEntry): Promise<void> {
   await guard(() =>
     entry.isDir
-      ? window.api.downloadDir(props.sessionId, entry.path)
-      : window.api.download(props.sessionId, entry.path, entry.name)
+      ? window.api.downloadDir(fsSessionId.value, entry.path, ctrName.value)
+      : window.api.download(fsSessionId.value, entry.path, entry.name, ctrName.value)
   )
 }
 
 async function pickUpload(): Promise<void> {
-  await guard(() => window.api.pickUpload(props.sessionId, cwd.value))
+  await guard(() => window.api.pickUpload(fsSessionId.value, cwd.value, ctrName.value))
 }
 
 // ---- 右键菜单 ----
@@ -215,7 +254,8 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
         icon: 'download'
       },
       {
-        // 就地打包：远端当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」
+        // 就地打包：当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」。
+        // 容器里也能打 —— 由容器里的 agent 用 Go 标准库产包，不依赖容器里有 tar
         id: 'archive',
         label: many ? `打包这 ${targets.length} 项` : '打包',
         icon: 'box'
@@ -250,8 +290,9 @@ async function onMenuSelect(id: string): Promise<void> {
 async function archiveTargets(targets: FileEntry[]): Promise<void> {
   await guard(async () => {
     await window.api.sftpArchive(
-      props.sessionId,
-      targets.map((t) => t.path)
+      fsSessionId.value,
+      targets.map((t) => t.path),
+      ctrName.value
     )
     clearSelection()
     await load()
@@ -266,8 +307,9 @@ async function downloadTargets(targets: FileEntry[]): Promise<void> {
   }
   await guard(() =>
     window.api.downloadMany(
-      props.sessionId,
-      targets.map((t) => ({ remotePath: t.path, name: t.name, isDir: t.isDir }))
+      fsSessionId.value,
+      targets.map((t) => ({ remotePath: t.path, name: t.name, isDir: t.isDir })),
+      ctrName.value
     )
   )
 }
@@ -283,7 +325,7 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
   try {
     // 逐项删：一项失败不该把剩下的都吞掉，删成的那些也要如实反映出来
     for (const t of targets) {
-      await window.api.sftpDelete(props.sessionId, t.path, t.isDir)
+      await window.api.sftpDelete(fsSessionId.value, t.path, t.isDir, ctrName.value)
     }
   } catch (err) {
     alert(`删除过程中出错：${errorText(err)}`)
@@ -308,7 +350,7 @@ function onDrop(e: DragEvent): void {
     size: f.size
   }))
   // 会话已断/远端不可写时不能静默失败，否则用户以为拖进去了
-  if (files.length) void guard(() => window.api.enqueueDropped(props.sessionId, cwd.value, files))
+  if (files.length) void guard(() => window.api.enqueueDropped(fsSessionId.value, cwd.value, files, ctrName.value))
 }
 
 // ---- 上传完成后自动刷新 ----
@@ -334,6 +376,13 @@ function isUnderCwd(remotePath: string): boolean {
   return remotePath.startsWith(base)
 }
 
+/** 这条任务是不是「我这个面板」的上传：容器认 containerName（remotePath 是中转路径，认不了目录），宿主机认目录归属 */
+function isMyUpload(t: TransferTask): boolean {
+  if (t.direction !== 'upload') return false
+  if (props.container) return t.containerName === props.container.containerName
+  return !t.containerName && isUnderCwd(t.remotePath)
+}
+
 function scheduleRefresh(): void {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer)
   refreshTimer = window.setTimeout(() => {
@@ -352,13 +401,7 @@ function watchTransfers(): void {
       const was = lastStatus.get(t.id)
       // was === undefined 是挂载后的第一份快照：里面已经是完成的那些不算数，
       // 否则一打开面板就会为一个早就传完的文件白刷一次
-      if (
-        was !== undefined &&
-        was !== 'done' &&
-        t.status === 'done' &&
-        t.direction === 'upload' &&
-        isUnderCwd(t.remotePath)
-      ) {
+      if (was !== undefined && was !== 'done' && t.status === 'done' && isMyUpload(t)) {
         touched = true
       }
     }
@@ -369,6 +412,14 @@ function watchTransfers(): void {
 
 // 会话切换时重新加载
 watch(() => props.sessionId, init)
+
+// 在面板开着的时候装上/升级了容器助手：从「无米下锅/版本过旧」进入正常态
+watch(
+  () => store.agentInstallStamp,
+  () => {
+    if (props.container && (agentMissing.value || agentOutdated.value)) void init()
+  }
+)
 
 // 跟随终端 cd（终端 → SFTP 方向联动）
 watch(
@@ -385,6 +436,9 @@ onMounted(() => {
 onBeforeUnmount(() => {
   unsubscribeTransfers?.()
   if (refreshTimer !== null) window.clearTimeout(refreshTimer)
+  if (props.container && !agentMissing.value) {
+    void window.api.agentFsRelease(props.container.parentSessionId, props.container.containerName)
+  }
   entries.value = []
 })
 </script>
@@ -427,7 +481,20 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="errorMsg" class="error-banner">{{ errorMsg }}</div>
-    <div v-if="loading" class="hint">加载中…</div>
+
+    <!-- 容器标签但没装容器助手：指路比报错好 -->
+    <div v-if="agentMissing" class="hint">
+      浏览容器文件需要容器里的 dox-agent。<br />
+      请在侧栏「远程助手」点「安装到容器 {{ props.container?.containerName }}」。
+    </div>
+
+    <!-- 容器助手版本过旧：老二进制没有 fs_* 方法 -->
+    <div v-else-if="agentOutdated" class="hint">
+      容器助手 v{{ agentOutdated }} 过旧，文件管理需要 v{{ BUNDLED_AGENT_VERSION }}。<br />
+      请在侧栏「远程助手」点「升级到 v{{ BUNDLED_AGENT_VERSION }}」。
+    </div>
+
+    <div v-else-if="loading" class="hint">加载中…</div>
 
     <!-- 文件列表；点空白处取消选中（和资源管理器一致） -->
     <div

@@ -124,6 +124,15 @@ src/
 只删表 + 关通道是不够的：通道随后的 `'close'` 事件走到 `handleClosed` 时已经查不到这条记录，
 会直接 return —— 界面于是停在「已连接」，而终端其实早就死了。那是最糟的一种错：不报错，但显示的是假的。
 
+**例外：用户关宿主终端标签 ≠ 父会话断开。** 还有容器 exec 通道骑在连接上时，
+`SessionManager.disconnect()` 不掐连接，把会话转成「孤儿」保活（`shouldKeepAlive`
+由 ContainerManager 的通道计数提供；1→0 时 `onParentDrained` 回调
+`releaseOrphan` 才真正断开）。孤儿自己的 shell 是主动 end 的，它的 close 事件
+由 `handleClosed` 的 orphan 分支按 kind==='shell' 吞掉 —— 没有这层区分，
+转孤儿时 end shell 会立刻把刚保活的会话拆掉。网络掉线不算此列：连接一死
+exec 通道全灭，消费者没了，连接跟着埋（drain → releaseOrphan 在
+finalize 里同步完成，不会再重连）。
+
 ### 3.3 颜色只能来自令牌层
 
 `src/renderer/src/styles.css` 是**唯一**允许写死颜色的文件。组件里一律 `var(--token)`。
@@ -245,6 +254,28 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
   而且毫无线索可查（实测踩过：监控条「没出现」，查到最后是上一轮测试留下的
   `false`）。凡是会落盘的改动，脚本收尾一律恢复原状——与「远端临时文件自己删掉」
   是同一类卫生要求，只不过这份垃圾留在本机配置里。
+- **任务/载荷对象里带函数字段 = IPC 序列化炸弹。** TransferManager 的容器传输
+  给任务挂了 `_prepare/_finalize/_cleanupStage` 钩子函数，而 `list()`/`snapshot()`
+  当初只剥 `_cancel` —— 函数过不了结构化克隆，广播与 invoke 返回值全线
+  "Failed to serialize arguments"，handler 直接报错、界面队列卡死。内部字段
+  一律 `_` 前缀 + `publicTask()` 按前缀剥，**不要**逐字段列清单（加新内部字段
+  时必然漏）。排查套路：page 没崩但 evaluate 莫名其妙失败/handler 报错时，
+  抓主进程 stderr（`app.process().stderr`）—— 这类错只在主进程日志里。
+- **容器 shell 就绪前敲键盘 = 输入被丢。** 容器标签从「标签出现」到
+  `docker exec` 通道就绪有 1-3s（dind 更慢），这期间 pane.sessionId 还是 null，
+  敲进去的字符直接蒸发 —— 表现为「echo 不回显」，其实是命令压根没送进去。
+  脚本先等 xterm-rows 里出现提示符（如 `/ #`）再 type。
+- **模糊文本按钮会点错。** `button:has-text("保存")` 同时命中「保存」和
+  「保存并连接」（后者开了个宿主机标签，「全程无宿主标签」的断言就这么挂的）。
+  对话框按钮一律 `text-is` 精确匹配。
+- **测试容器里 sshd 听的是 2222 不是 22**（verify-direct-container 数连接数
+  踩过）：`netstat | grep ':22 '` 永远是 0，按实际端口过滤。另外 conn 计数
+  只能相对比较（夹具自己的 ssh 连接也算一条），别断言绝对值。
+- **Vue 的 `v-else` 绑的是紧邻的前一个 `v-if`，不是你以为的那个。**
+  AgentPanel 里「已安装」行用 `v-else-if`，后面跟了个独立的
+  `v-if="outdated"` 升级按钮，再后面的 `<template v-else>` 就绑到了升级按钮上 ——
+  结果「已安装且不需升级」时安装按钮照样渲染（用户：装完了怎么还显示「安装到 xxx」）。
+  条件分支一多就用嵌套 template 显式分组，别靠 v-else 链条的隐式绑定。
 
 ---
 

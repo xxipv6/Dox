@@ -117,6 +117,96 @@ export const useSessionStore = defineStore('sessions', () => {
     agentInstallStamp.value++
   }
 
+  // ---- 直连容器（Dev Containers 式：不开宿主机终端标签，后台传输会话承载）----
+
+  /** savedSessionId → 传输会话 id（无 shell 的后台 SSH 连接，容器操作的承载） */
+  const transports = reactive<Record<string, string>>({})
+  /** 连接去重：同一台设备并发 ensure 只连一次 */
+  const transportPending = new Map<string, Promise<string>>()
+  /** 侧栏正展开着容器列表的设备（展开本身也是传输会话的一种占用） */
+  const expandedDevices = reactive(new Set<string>())
+  /** savedSessionId → 该设备的容器列表加载状态 */
+  const deviceContainers = reactive<
+    Record<string, { status: 'loading' | 'ok' | 'error'; list: ContainerInfo[]; error?: string }>
+  >({})
+
+  /**
+   * 取某台已保存设备的传输会话，没有就连一条。
+   * 传输会话没有 shell、没有终端标签 —— 它只是 docker exec / 容器文件操作的
+   * 承载连接（VS Code Remote-Containers 里那条看不见的宿主机 SSH）。
+   */
+  async function ensureTransport(savedId: string): Promise<string> {
+    const live = transports[savedId]
+    if (live) return live
+    const pending = transportPending.get(savedId)
+    if (pending) return pending
+    const p = window.api
+      .connectTransport(savedId)
+      .then((id) => {
+        transports[savedId] = id
+        // 首条 connected 事件到达时登记表还没建（invoke 未返回），已落进 pendingStatus，清掉
+        pendingStatus.delete(id)
+        return id
+      })
+      .finally(() => transportPending.delete(savedId))
+    transportPending.set(savedId, p)
+    return p
+  }
+
+  /**
+   * 传输会话空闲回收：侧栏没展开它、也没有任何容器标签挂在它上面时断开。
+   * 调用点：收起设备行、关掉容器标签、删除设备。
+   */
+  function releaseTransportIfIdle(savedId: string): void {
+    const tid = transports[savedId]
+    if (!tid || expandedDevices.has(savedId)) return
+    const inUse = tabs.value.some(
+      (t) => t.kind === 'container' && t.container?.parentSessionId === tid
+    )
+    if (inUse) return
+    window.api.disconnect(tid)
+    delete transports[savedId]
+  }
+
+  async function loadDeviceContainers(savedId: string): Promise<void> {
+    deviceContainers[savedId] = { status: 'loading', list: [] }
+    try {
+      const tid = await ensureTransport(savedId)
+      const probe = await window.api.listContainers(tid)
+      if (!expandedDevices.has(savedId)) return // 加载期间已被收起，结果直接丢
+      deviceContainers[savedId] = probe.ok
+        ? { status: 'ok', list: probe.list.containers }
+        : { status: 'error', list: [], error: probe.message }
+    } catch (err) {
+      if (!expandedDevices.has(savedId)) return
+      deviceContainers[savedId] = { status: 'error', list: [], error: errorText(err) }
+    }
+  }
+
+  /** 侧栏设备行的展开/收起：展开即拉容器列表，收起顺手回收空闲传输会话 */
+  async function toggleDeviceContainers(saved: SavedSession): Promise<void> {
+    if (expandedDevices.has(saved.id)) {
+      expandedDevices.delete(saved.id)
+      delete deviceContainers[saved.id]
+      releaseTransportIfIdle(saved.id)
+      return
+    }
+    expandedDevices.add(saved.id)
+    await loadDeviceContainers(saved.id)
+  }
+
+  /**
+   * 直连进容器：不开宿主机终端标签，传输会话当承载。
+   * 传输会话由这里按需建立，标签关掉后由 releaseTransportIfIdle 回收。
+   */
+  async function enterContainerDirect(
+    saved: SavedSession,
+    box: Pick<ContainerInfo, 'name' | 'image'>
+  ): Promise<void> {
+    const tid = await ensureTransport(saved.id)
+    await enterContainer(tid, box)
+  }
+
   /** 保存的密码解密失败时，请求侧栏打开该设备的编辑框（重输密码即自愈） */
   const editSessionRequest = ref<SavedSession | null>(null)
 
@@ -159,6 +249,23 @@ export const useSessionStore = defineStore('sessions', () => {
   const pendingStatus = new Map<string, { status: SessionStatus; error?: string }>()
 
   window.api.onStatus(({ id, status, error }) => {
+    // 传输会话不属于任何 pane：断线只影响挂在它上面的直连容器。
+    // 清掉登记表，下次 ensureTransport 自然会重连一条。
+    const transportSavedId = Object.keys(transports).find((k) => transports[k] === id)
+    if (transportSavedId) {
+      if (status === 'closed' || status === 'error') {
+        delete transports[transportSavedId]
+        const dc = deviceContainers[transportSavedId]
+        if (dc?.status === 'loading') {
+          deviceContainers[transportSavedId] = {
+            status: 'error',
+            list: [],
+            error: error ?? '连接已断开'
+          }
+        }
+      }
+      return
+    }
     const pane = findPane(id)
     if (!pane) {
       pendingStatus.set(id, { status, error })
@@ -447,6 +554,12 @@ export const useSessionStore = defineStore('sessions', () => {
       }
     }
     tabs.value = tabs.value.filter((t) => t.tabId !== tab.tabId)
+    // 直连容器标签关掉后，承载它的传输会话若已无人使用（侧栏也没展开）顺手断掉
+    if (tab.kind === 'container' && tab.container) {
+      const parent = tab.container.parentSessionId
+      const savedId = Object.keys(transports).find((k) => transports[k] === parent)
+      if (savedId) releaseTransportIfIdle(savedId)
+    }
     if (activeTabId.value === tab.tabId) {
       activeTabId.value = tabs.value.at(-1)?.tabId ?? null
     }
@@ -461,6 +574,14 @@ export const useSessionStore = defineStore('sessions', () => {
 
   async function deleteSaved(id: string): Promise<void> {
     await window.api.deleteSession(id)
+    // 设备没了，它的传输会话与展开的容器列表也一起收掉
+    expandedDevices.delete(id)
+    delete deviceContainers[id]
+    const tid = transports[id]
+    if (tid) {
+      window.api.disconnect(tid)
+      delete transports[id]
+    }
     await refreshSaved()
   }
 
@@ -518,7 +639,12 @@ export const useSessionStore = defineStore('sessions', () => {
     connect,
     connectSaved,
     enterContainer,
+    enterContainerDirect,
     viewContainerLogs,
+    expandedDevices,
+    deviceContainers,
+    toggleDeviceContainers,
+    loadDeviceContainers,
     connectLocal,
     restoreUnsavedTab,
     splitActive,
