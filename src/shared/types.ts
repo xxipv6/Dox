@@ -205,8 +205,8 @@ export interface HostKeyVerifyRequest {
 /** trust = 信任并保存；once = 仅本次；reject = 拒绝连接 */
 export type HostKeyDecision = 'trust' | 'once' | 'reject'
 
-/** local = 本地转发（ssh -L）；remote = 远程转发（ssh -R） */
-export type ForwardType = 'local' | 'remote'
+/** local = 本地转发（ssh -L）；remote = 远程转发（ssh -R）；socks = 动态转发（ssh -D，SOCKS5） */
+export type ForwardType = 'local' | 'remote' | 'socks'
 
 /** 端口转发规则 */
 export interface ForwardRule {

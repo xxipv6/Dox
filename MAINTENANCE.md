@@ -196,6 +196,10 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
 
 - **别用 `includes` 认标记。** 终端**会回显敲进去的命令**，命令里往往就含那个标记。
   用 `hasOutputLine`（断言标记独占一行）。
+- **测试容器 sshd 的真配置在 `/config/sshd/sshd_config`**（进程以 `-f` 指定），
+  不是 `/etc/ssh/sshd_config` —— 改错文件折腾一轮。凡涉及转发的 e2e
+  （verify-port-suggest / port-watch / socks）都要求该配置里
+  `AllowTcpForwarding yes`；莫名全部「Channel open failure」先查它。
 - **macOS 上 Ctrl+点击 = 系统级右键。** Playwright 里做「多选」用 `modifiers: ['Meta']`，
   用 `Control` 会开出上下文菜单 —— 菜单背板（.menu-backdrop）随即拦截后续所有点击，
   表现为「莫名其妙的超时/点错行」。真实用户同理：Mac 上多选就是 Cmd，应用代码不用改。

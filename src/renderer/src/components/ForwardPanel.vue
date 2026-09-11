@@ -15,7 +15,7 @@ const rules = ref<ForwardRule[]>([])
 const badge = computed(() => (rules.value.length ? String(rules.value.length) : undefined))
 const formVisible = ref(false)
 const form = reactive({
-  type: 'local' as 'local' | 'remote',
+  type: 'local' as 'local' | 'remote' | 'socks',
   listenPort: 8080,
   targetHost: '127.0.0.1',
   targetPort: 80
@@ -23,13 +23,12 @@ const form = reactive({
 
 const validPort = (p: number): boolean => Number.isInteger(p) && p > 0 && p < 65536
 /** 端口清空会成为 NaN，落盘会被序列化成 null，必须挡住 */
-const formValid = computed(
-  () =>
-    !!store.activeSessionId &&
-    !!form.targetHost.trim() &&
-    validPort(form.listenPort) &&
-    validPort(form.targetPort)
-)
+const formValid = computed(() => {
+  if (!store.activeSessionId || !validPort(form.listenPort)) return false
+  // SOCKS5 是动态转发：没有固定目标，浏览器/应用自己决定去哪
+  if (form.type === 'socks') return true
+  return !!form.targetHost.trim() && validPort(form.targetPort)
+})
 
 let unsubscribe: (() => void) | null = null
 
@@ -65,8 +64,9 @@ async function add(): Promise<void> {
       sessionId: store.activeSessionId,
       type: form.type,
       listenPort: form.listenPort,
-      targetHost: form.targetHost.trim(),
-      targetPort: form.targetPort
+      // socks 没有固定目标，占位字段给空值（类型要求是 string/number）
+      targetHost: form.type === 'socks' ? '' : form.targetHost.trim(),
+      targetPort: form.type === 'socks' ? 0 : form.targetPort
     })
     formVisible.value = false
   } catch (err) {
@@ -101,16 +101,23 @@ const statusText: Record<ForwardRule['status'], string> = {
       <label :class="{ active: form.type === 'remote' }">
         <input v-model="form.type" type="radio" value="remote" /> 远程 -R
       </label>
+      <label :class="{ active: form.type === 'socks' }">
+        <input v-model="form.type" type="radio" value="socks" /> 代理 -D
+      </label>
     </div>
     <div class="form-row">
       <input v-model.number="form.listenPort" type="number" min="1" max="65535" placeholder="监听端口" />
-      <input v-model="form.targetHost" placeholder="目标主机" />
-      <input v-model.number="form.targetPort" type="number" min="1" max="65535" placeholder="目标端口" class="port-input" />
+      <template v-if="form.type !== 'socks'">
+        <input v-model="form.targetHost" placeholder="目标主机" />
+        <input v-model.number="form.targetPort" type="number" min="1" max="65535" placeholder="目标端口" class="port-input" />
+      </template>
     </div>
     <p class="form-hint">
-      {{ form.type === 'local'
-        ? `本机 :${form.listenPort} → 经SSH→ ${form.targetHost || '…'}:${form.targetPort}`
-        : `远端 :${form.listenPort} → 回传→ ${form.targetHost || '…'}:${form.targetPort}（本地可达地址）` }}
+      {{ form.type === 'socks'
+        ? `SOCKS5 代理 本机 :${form.listenPort} → 全部流量从远端网络出口（浏览器/应用代理指向它）`
+        : form.type === 'local'
+          ? `本机 :${form.listenPort} → 经SSH→ ${form.targetHost || '…'}:${form.targetPort}`
+          : `远端 :${form.listenPort} → 回传→ ${form.targetHost || '…'}:${form.targetPort}（本地可达地址）` }}
     </p>
     <button class="btn primary" :disabled="!formValid" @click="add">启动转发</button>
     <p v-if="errorMsg" class="form-error">{{ errorMsg }}</p>
@@ -121,9 +128,10 @@ const statusText: Record<ForwardRule['status'], string> = {
   </div>
 
   <div v-for="rule in sortedRules" :key="rule.id" class="rule" :class="{ inactive: rule.sessionId !== store.activeSessionId }">
-    <span class="rule-type" :class="rule.type">{{ rule.type === 'local' ? 'L' : 'R' }}</span>
-    <span class="rule-desc" :title="rule.error">
-      :{{ rule.listenPort }} → {{ rule.targetHost }}:{{ rule.targetPort }}
+    <span class="rule-type" :class="rule.type">{{ rule.type === 'local' ? 'L' : rule.type === 'remote' ? 'R' : 'D' }}</span>
+    <span class="rule-desc" :title="rule.error ?? (rule.type === 'socks' ? `socks5://${rule.listenHost}:${rule.listenPort}` : undefined)">
+      <template v-if="rule.type === 'socks'">:{{ rule.listenPort }} → SOCKS5 动态代理</template>
+      <template v-else>:{{ rule.listenPort }} → {{ rule.targetHost }}:{{ rule.targetPort }}</template>
     </span>
     <span class="rule-status" :class="rule.status">{{ statusText[rule.status] }}</span>
     <button class="icon-btn danger" title="移除" @click="api.removeForward(rule.id)">
@@ -238,6 +246,10 @@ const statusText: Record<ForwardRule['status'], string> = {
 .rule-type.remote {
   background: var(--success-soft);
   color: var(--success-text);
+}
+.rule-type.socks {
+  background: var(--warning-soft, var(--accent-soft));
+  color: var(--warning-text, var(--accent-text));
 }
 .rule-desc {
   flex: 1;

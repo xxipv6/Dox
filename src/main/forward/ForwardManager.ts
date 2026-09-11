@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import net from 'node:net'
 import type { Client, ClientChannel, TcpConnectionDetails } from 'ssh2'
 import type { ForwardRule, ForwardRuleInput } from '../../shared/types'
+import { handleSocks5 } from './socks'
 
 interface InternalRule extends ForwardRule {
   /** 本地转发的 TCP server */
@@ -49,6 +50,7 @@ export class ForwardManager {
 
     try {
       if (rule.type === 'local') await this.startLocal(rule, client)
+      else if (rule.type === 'socks') await this.startSocks(rule)
       else await this.startRemote(rule, client)
       rule.status = 'active'
     } catch (err) {
@@ -71,6 +73,9 @@ export class ForwardManager {
   stopBySession(sessionId: string): void {
     let changed = false
     for (const rule of this.rules.values()) {
+      // SOCKS5 规则不停：它的 server 在本机、每条连接现取 client，
+      // 会话恢复后不用任何重建就自己通了 —— 停掉反而要用户手动重开
+      if (rule.type === 'socks') continue
       if (rule.sessionId === sessionId && rule.status === 'active') {
         // 必须先 await 停止再改状态：否则监听端口可能仍在 listen，
         // 同端口重新添加必然 EADDRINUSE，只有重启应用才能恢复
@@ -119,9 +124,49 @@ export class ForwardManager {
     this.emit()
   }
 
-  /** 本地转发：net.createServer → forwardOut 管道 */
-  private startLocal(rule: InternalRule, client: Client): Promise<void> {
+  /**
+   * SOCKS5 动态转发（ssh -D）：本机起 SOCKS5 服务，每个 CONNECT 经 SSH
+   * forwardOut 从远端网络出口连接目标。
+   *
+   * 与 startLocal 的关键差别：**不在启动时绑死 client**，每条入站连接现取
+   * —— 会话断线重连后下一条 CONNECT 自动走新连接，规则无需重建
+   * （stopBySession 也因此跳过 socks 规则）。
+   */
+  private startSocks(rule: InternalRule): Promise<void> {
     return new Promise((resolve, reject) => {
+      const sockets = new Set<net.Socket>()
+      rule.sockets = sockets
+
+      const server = net.createServer((socket) => {
+        sockets.add(socket)
+        socket.on('close', () => sockets.delete(socket))
+        handleSocks5(socket, (host, port, cb) => {
+          const client = this.getClient(rule.sessionId)
+          if (!client) {
+            cb(new Error('会话已断开'))
+            return
+          }
+          client.forwardOut('127.0.0.1', 0, host, port, (err, stream) =>
+            cb(err ?? null, stream)
+          )
+        })
+      })
+
+      let listening = false
+      server.on('error', (err: Error) => {
+        if (!listening) reject(err)
+        else console.warn(`[forward] SOCKS5 ${rule.listenHost}:${rule.listenPort} 错误: ${err.message}`)
+      })
+      server.listen(rule.listenPort, rule.listenHost, () => {
+        listening = true
+        resolve()
+      })
+      rule.server = server
+    })
+  }
+
+  /** 本地转发：net.createServer → forwardOut 管道 */
+  private startLocal(rule: InternalRule, client: Client): Promise<void> {    return new Promise((resolve, reject) => {
       const sockets = new Set<net.Socket>()
       rule.sockets = sockets
 
