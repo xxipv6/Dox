@@ -33,24 +33,29 @@ onUnmounted(() => off?.())
 
 const accounts = computed(() => snapshot.value?.accounts ?? [])
 
-/** 头部紧凑显示：剩余百分比的整数，或余额字符串 */
+/**
+ * 头部紧凑显示：**已用**百分比（5h 窗 + 每周窗），DeepSeek 显示余额。
+ * 用「已用」而不是「剩余」：报警语义顺（数字越大越危险），
+ * 也和平台后台自己的展示口径一致。
+ */
 function headText(a: AiUsageResult): string {
   if (!a.ok) return '⚠'
   if (a.provider === 'deepseek') {
     return a.totalBalance !== undefined ? `${a.currency ?? '¥'}${a.totalBalance.toFixed(1)}` : '—'
   }
-  if (a.fiveHourRemaining !== undefined) return `${Math.round(a.fiveHourRemaining)}%`
-  if (a.weeklyRemaining !== undefined) return `周${Math.round(a.weeklyRemaining)}%`
-  return '—'
+  const parts: string[] = []
+  if (a.fiveHourUsed !== undefined) parts.push(`5h:${Math.round(a.fiveHourUsed)}%`)
+  if (a.weeklyUsed !== undefined) parts.push(`7d:${Math.round(a.weeklyUsed)}%`)
+  return parts.length ? parts.join(' ') : '—'
 }
 
-/** 余量档位：驱动颜色（<30% 警示，<10% 危险） */
+/** 用量档位：驱动颜色（已用 ≥70% 警示，≥90% 危险） */
 function level(a: AiUsageResult): 'ok' | 'warn' | 'danger' | 'err' {
   if (!a.ok) return 'err'
-  const rem = a.provider === 'deepseek' ? null : (a.fiveHourRemaining ?? a.weeklyRemaining ?? null)
-  if (rem === null) return 'ok'
-  if (rem < 10) return 'danger'
-  if (rem < 30) return 'warn'
+  const used = a.provider === 'deepseek' ? null : (a.fiveHourUsed ?? a.weeklyUsed ?? null)
+  if (used === null) return 'ok'
+  if (used >= 90) return 'danger'
+  if (used >= 70) return 'warn'
   return 'ok'
 }
 
@@ -91,7 +96,8 @@ function openSettings(): void {
         :key="a.id"
         class="ai-acc"
         :class="level(a)"
-      >{{ PROVIDER_LABEL[a.provider] ?? a.provider }} {{ headText(a) }}</span>
+        :title="`${a.name}（${PROVIDER_LABEL[a.provider] ?? a.provider}）`"
+      >{{ a.name }} {{ headText(a) }}</span>
     </button>
 
     <!-- 明细浮层：点击其他区域关闭 -->
@@ -116,19 +122,27 @@ function openSettings(): void {
         </div>
         <div v-if="!a.ok" class="ai-err">{{ a.error }}</div>
         <template v-else>
-          <div v-if="a.fiveHourRemaining !== undefined" class="ai-bar-row">
+          <div v-if="a.fiveHourUsed !== undefined" class="ai-bar-row">
             <span class="ai-bar-label">5 小时窗</span>
             <span class="ai-bar">
-              <span class="ai-bar-fill" :class="level(a)" :style="{ width: `${Math.min(100, a.fiveHourRemaining)}%` }"></span>
+              <span
+                class="ai-bar-fill"
+                :class="level(a)"
+                :style="{ width: `${Math.min(100, a.fiveHourUsed)}%` }"
+              ></span>
             </span>
-            <span class="ai-bar-val">{{ Math.round(a.fiveHourRemaining) }}%</span>
+            <span class="ai-bar-val">{{ Math.round(a.fiveHourUsed) }}%</span>
           </div>
-          <div v-if="a.weeklyRemaining !== undefined" class="ai-bar-row">
+          <div v-if="a.weeklyUsed !== undefined" class="ai-bar-row">
             <span class="ai-bar-label">每周</span>
             <span class="ai-bar">
-              <span class="ai-bar-fill ok" :style="{ width: `${Math.min(100, a.weeklyRemaining)}%` }"></span>
+              <span
+                class="ai-bar-fill"
+                :class="(a.weeklyUsed ?? 0) >= 90 ? 'danger' : (a.weeklyUsed ?? 0) >= 70 ? 'warn' : 'ok'"
+                :style="{ width: `${Math.min(100, a.weeklyUsed)}%` }"
+              ></span>
             </span>
-            <span class="ai-bar-val">{{ Math.round(a.weeklyRemaining) }}%</span>
+            <span class="ai-bar-val">{{ Math.round(a.weeklyUsed) }}%</span>
           </div>
           <div v-if="a.totalBalance !== undefined" class="ai-line">
             余额 {{ a.currency ?? '' }}{{ a.totalBalance.toFixed(2) }}

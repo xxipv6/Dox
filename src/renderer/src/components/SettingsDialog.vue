@@ -199,8 +199,9 @@ onMounted(async () => {
           </button>
         </div>
         <p class="sub-note">
-          配置后标题栏显示剩余容量（Kimi/GLM 看 5 小时滚动窗，DeepSeek 看余额），
+          配置后标题栏显示已用容量（Kimi/GLM 看 5 小时滚动窗与每周窗，DeepSeek 看余额），
           每 5 分钟自动刷新；Key 经系统钥匙串加密存储，只用于配额查询。
+          有多个同平台账号时，用「备注名」区分（标题栏显示的是备注名）。
         </p>
       </div>
 
