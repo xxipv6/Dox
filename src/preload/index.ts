@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'ele
 import { IpcChannels } from '../shared/ipc'
 import type { DoxApi } from '../shared/api'
 import type {
+  AgentStatsPayload,
   DownloadRequest,
   DroppedFile,
   ForwardRule,
@@ -111,6 +112,17 @@ const api: DoxApi = {
     ): void => cb(sessionId, data)
     ipcRenderer.on(IpcChannels.agentPorts, listener)
     return () => ipcRenderer.removeListener(IpcChannels.agentPorts, listener)
+  },
+  agentWatchStats: (sessionId) => ipcRenderer.invoke(IpcChannels.agentWatchStats, sessionId),
+  agentUnwatchStats: (sessionId) => ipcRenderer.invoke(IpcChannels.agentUnwatchStats, sessionId),
+  onAgentStats: (cb) => {
+    const listener = (
+      _e: IpcRendererEvent,
+      sessionId: string,
+      data: { event: string } & Partial<AgentStatsPayload>
+    ): void => cb(sessionId, data)
+    ipcRenderer.on(IpcChannels.agentStats, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.agentStats, listener)
   },
   listTransfers: () => ipcRenderer.invoke(IpcChannels.transferList),
   cancelTransfer: (id) => ipcRenderer.invoke(IpcChannels.transferCancel, id),

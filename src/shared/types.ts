@@ -37,6 +37,22 @@ export interface SessionStatusEvent {
   reconnected?: boolean
 }
 
+/** dox-agent watch_stats 推送的单卡状态（nvidia-smi 存在才有这项） */
+export interface AgentGpuStat {
+  name: string
+  util_percent: number
+  mem_used_mb: number
+  mem_total_mb: number
+}
+
+/** dox-agent watch_stats 推送帧（CPU 为两次采样差分百分比） */
+export interface AgentStatsPayload {
+  cpu_percent: number
+  mem_total_mb: number
+  mem_used_mb: number
+  gpus?: AgentGpuStat[]
+}
+
 /** 持久化到本地的会话配置（敏感字段经 safeStorage 加密，base64 存储） */
 export interface SavedSession {
   id: string

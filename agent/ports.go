@@ -7,7 +7,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"os"
 	"sort"
 	"strconv"
@@ -69,7 +68,7 @@ func sortedKeys(m map[uint16]bool) []uint16 {
 }
 
 // watchPorts 周期读表，只在集合变化时推事件（含首帧全量）
-func watchPorts(intervalMs int, enc *json.Encoder, stop chan struct{}) {
+func watchPorts(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 	ticker := time.NewTicker(time.Duration(intervalMs) * time.Millisecond)
 	defer ticker.Stop()
 

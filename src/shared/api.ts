@@ -1,4 +1,5 @@
 import type {
+  AgentStatsPayload,
   AppSettings,
   CommandSnippet,
   ContainerControlAction,
@@ -183,6 +184,13 @@ export interface DoxApi {
       sessionId: string,
       data: { event: string; listening?: number[]; added?: number[]; removed?: number[] }
     ) => void
+  ): () => void
+  /** 订阅/退订 agent 系统状态推送（CPU/内存/GPU，与端口推送共用通道） */
+  agentWatchStats(sessionId: string): Promise<void>
+  agentUnwatchStats(sessionId: string): Promise<void>
+  /** agent 状态帧（event='stats' 时载荷为 AgentStatsPayload），或 agent_closed */
+  onAgentStats(
+    cb: (sessionId: string, data: { event: string } & Partial<AgentStatsPayload>) => void
   ): () => void
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>

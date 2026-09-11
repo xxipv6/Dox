@@ -17,7 +17,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.1.0"
+var version = "0.2.0"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -60,11 +60,14 @@ func serve() error {
 	// stdin 可能被塞入大请求（未来传文件），缓冲给宽一点
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	enc := json.NewEncoder(os.Stdout)
+	// watch 协程与主循环共用一个编码器：必须加锁（见 stats.go safeEncoder）
+	enc := &safeEncoder{enc: json.NewEncoder(os.Stdout)}
 
-	// watch_ports 的停止信号：stop 或 stdin 关闭都收
-	stopWatch := make(chan struct{})
-	watchRunning := false
+	// watch_ports / watch_stats 各有停止信号：stop 或 stdin 关闭都收
+	stopPorts := make(chan struct{})
+	portsRunning := false
+	stopStats := make(chan struct{})
+	statsRunning := false
 
 	for scanner.Scan() {
 		var req request
@@ -87,14 +90,30 @@ func serve() error {
 			if p.IntervalMs <= 0 {
 				p.IntervalMs = 3000
 			}
-			if !watchRunning {
-				watchRunning = true
-				go watchPorts(p.IntervalMs, enc, stopWatch)
+			if !portsRunning {
+				portsRunning = true
+				go watchPorts(p.IntervalMs, enc, stopPorts)
+			}
+			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"watching": true}})
+		case "watch_stats":
+			var p struct {
+				IntervalMs int `json:"interval_ms"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			if p.IntervalMs <= 0 {
+				p.IntervalMs = 3000
+			}
+			if !statsRunning {
+				statsRunning = true
+				go watchStats(p.IntervalMs, enc, stopStats)
 			}
 			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"watching": true}})
 		case "stop":
-			if watchRunning {
-				close(stopWatch)
+			if portsRunning {
+				close(stopPorts)
+			}
+			if statsRunning {
+				close(stopStats)
 			}
 			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"bye": true}})
 			return nil

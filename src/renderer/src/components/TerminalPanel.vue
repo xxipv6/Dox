@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, computed, watch } from 'vue'
 import { Terminal, type ILink } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
@@ -8,6 +8,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
 import { isPlainSshId, LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
+import type { AgentStatsPayload } from '@shared/types'
 import { useSettingsStore } from '../stores/settings'
 import { useEditorStore } from '../stores/editor'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
@@ -173,6 +174,31 @@ let agentWatchActive = false
 /** 是否已在主进程登记订阅（卸载时据此退订；降级期意图仍在主进程，不能漏退） */
 let agentSubscribed = false
 
+// ---- agent 系统状态条（CPU/内存/GPU）：与端口推送同一条通道、同一 opt-in ----
+const agentStats = ref<AgentStatsPayload | null>(null)
+/** 推送是否活着（agent_closed 时藏起来，重建后首帧自动回来） */
+const statsLive = ref(false)
+let unsubscribeAgentStats: (() => void) | null = null
+let statsSubscribed = false
+
+const memPercent = computed(() => {
+  const s = agentStats.value
+  if (!s || !s.mem_total_mb) return 0
+  return Math.round((s.mem_used_mb / s.mem_total_mb) * 100)
+})
+
+/** 悬停看全量：内存与显存的具体数字放 title，条上只留百分比 */
+const statsTooltip = computed(() => {
+  const s = agentStats.value
+  if (!s) return ''
+  const g = (n: number): string => (n >= 1024 ? `${(n / 1024).toFixed(1)}G` : `${n}M`)
+  const parts = [`内存 ${g(s.mem_used_mb)} / ${g(s.mem_total_mb)}`]
+  for (const [i, gpu] of (s.gpus ?? []).entries()) {
+    parts.push(`GPU${(s.gpus ?? []).length > 1 ? i : ''} ${gpu.name} · 显存 ${g(gpu.mem_used_mb)} / ${g(gpu.mem_total_mb)}`)
+  }
+  return parts.join('\n')
+})
+
 /** agent 差分帧：首帧全量即基线（不弹），之后 added 才是「新起的服务」 */
 function handleAgentPorts(data: { listening?: number[]; added?: number[] }): void {
   if (!settings.suggestPortForward) return
@@ -227,6 +253,30 @@ async function startPortWatch(): Promise<void> {
         }
         handleAgentPorts(data)
       })
+
+      // 系统状态条：同一条通道、同一个 opt-in（装助手即同意）。
+      // 失败不拖累端口推送 —— 状态条本来就是锦上添花
+      try {
+        await window.api.agentWatchStats(props.sessionId)
+        if (!disposed) {
+          statsSubscribed = true
+          unsubscribeAgentStats = window.api.onAgentStats((id, data) => {
+            if (id !== props.sessionId) return
+            if (data.event === 'agent_closed') {
+              statsLive.value = false
+              return
+            }
+            if (data.event !== 'stats') return
+            const { event: _e, ...payload } = data
+            agentStats.value = payload as AgentStatsPayload
+            statsLive.value = true
+          })
+        } else {
+          void window.api.agentUnwatchStats(props.sessionId)
+        }
+      } catch {
+        // 老版本 agent（0.1.0）没有 watch_stats：unknown method，状态条不出现即可
+      }
       return
     } catch {
       // agent 起不来（二进制被删/权限变化）：走老路
@@ -752,6 +802,8 @@ onBeforeUnmount(() => {
   stopProcPoll()
   unsubscribeAgentPorts?.()
   if (agentSubscribed) void window.api.agentUnwatchPorts(props.sessionId)
+  unsubscribeAgentStats?.()
+  if (statsSubscribed) void window.api.agentUnwatchStats(props.sessionId)
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
   unsubscribeStatus?.()
@@ -841,6 +893,15 @@ defineExpose({ refitAndFocus })
           <span :title="s.error">转发失败：{{ s.error }}</span>
         </template>
       </div>
+    </div>
+
+    <!-- 远端系统状态条：agent 推送活着才显示（装了助手即视为同意看这些数） -->
+    <div v-if="agentStats && statsLive" class="agent-stats" :title="statsTooltip">
+      <span>CPU {{ agentStats.cpu_percent.toFixed(0) }}%</span>
+      <span>MEM {{ memPercent }}%</span>
+      <span v-for="(g, i) in agentStats.gpus ?? []" :key="i">
+        GPU{{ (agentStats.gpus ?? []).length > 1 ? i : '' }} {{ g.util_percent }}%
+      </span>
     </div>
 
     <!-- 右键菜单 -->
@@ -1047,5 +1108,24 @@ defineExpose({ refitAndFocus })
   background: none;
   color: var(--fg-muted);
   cursor: pointer;
+}
+
+/* 远端系统状态条：左下细条，与右下的端口建议遥遥相对，都不挡输出 */
+.agent-stats {
+  position: absolute;
+  left: 16px;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  gap: 12px;
+  padding: 4px 10px;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
+  border: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  white-space: pre-line;
+  pointer-events: auto;
 }
 </style>

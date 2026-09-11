@@ -128,7 +128,7 @@ export class AgentManager {
   invalidate(sessionId: string): void {
     this.cache.delete(sessionId)
     // serve 通道随连接一起死：关掉并通知渲染层降级。
-    // 订阅意图（portWatchers）不清 —— SSH 自动重连成功后按意图重建。
+    // 订阅意图（watches）不清 —— SSH 自动重连成功后按意图重建。
     const ch = this.channels.get(sessionId)
     if (ch) this.dropChannel(sessionId, ch)
   }
@@ -142,58 +142,92 @@ export class AgentManager {
   }>()
 
   /**
-   * 端口推送的**订阅意图**：谁订阅了、watch 是否在活通道上跑着。
+   * 流式能力的**订阅意图**：谁订阅了、watch 是否在活通道上跑着。
    * 与通道记录分离 —— 通道随 SSH 断线死掉时意图保留，
-   * SessionManager 报「重连成功」后按它重建通道并重发 watch_ports，
+   * SessionManager 报「重连成功」后按它重建通道并重发 watch_*，
    * 渲染层不用重开标签（agent_closed 期间 /proc 轮询顶班）。
+   * ports / stats 两路订阅共用一条 serve 通道：两路都退订干净才关。
    */
-  private portWatchers = new Map<string, {
-    owners: Set<WebContents>
-    /** watch_ports 是否跑在当前活通道上（通道死即归 false） */
-    active: boolean
+  private watches = new Map<string, {
+    ports: { owners: Set<WebContents>; active: boolean }
+    stats: { owners: Set<WebContents>; active: boolean }
   }>()
 
-  /** 断线重连成功 → 按订阅意图重建 serve 通道 */
+  private watchEntry(sessionId: string): {
+    ports: { owners: Set<WebContents>; active: boolean }
+    stats: { owners: Set<WebContents>; active: boolean }
+  } {
+    let w = this.watches.get(sessionId)
+    if (!w) {
+      w = { ports: { owners: new Set(), active: false }, stats: { owners: new Set(), active: false } }
+      this.watches.set(sessionId, w)
+    }
+    return w
+  }
+
+  /** 断线重连成功 → 按订阅意图重建 serve 通道并重开各 watch */
   private onSessionStatus = (e: { id: string; status: string; reconnected?: boolean }): void => {
     if (e.status !== 'connected' || !e.reconnected) return
-    const watcher = this.portWatchers.get(e.id)
-    if (!watcher || watcher.active) return
-    void this.rebuildWatch(e.id, watcher)
+    const w = this.watches.get(e.id)
+    if (!w || (w.ports.active || w.ports.owners.size === 0) && (w.stats.active || w.stats.owners.size === 0)) return
+    void this.rebuildWatch(e.id, w)
   }
 
   private async rebuildWatch(
     sessionId: string,
-    watcher: { owners: Set<WebContents>; active: boolean }
+    w: {
+      ports: { owners: Set<WebContents>; active: boolean }
+      stats: { owners: Set<WebContents>; active: boolean }
+    }
   ): Promise<void> {
     // 重建期间渲染层可能已全部退订/窗口已关：意图没了就别开通道
-    for (const owner of watcher.owners) {
-      if (owner.isDestroyed()) watcher.owners.delete(owner)
+    for (const lane of [w.ports, w.stats]) {
+      for (const owner of lane.owners) {
+        if (owner.isDestroyed()) lane.owners.delete(owner)
+      }
     }
-    if (watcher.owners.size === 0 || this.portWatchers.get(sessionId) !== watcher) {
-      if (watcher.owners.size === 0) this.portWatchers.delete(sessionId)
+    if (w.ports.owners.size + w.stats.owners.size === 0) {
+      if (this.watches.get(sessionId) === w) this.watches.delete(sessionId)
       return
     }
     try {
       const ch = await this.connect(sessionId)
-      // connect 等待期间意图被撤（最后一个订阅者退订）→ 通道白建了，关掉
-      if (this.portWatchers.get(sessionId) !== watcher) {
+      // connect 等待期间意图被撤 → 通道白建了，关掉
+      if (this.watches.get(sessionId) !== w) {
         this.dropChannel(sessionId, ch)
         return
       }
-      await this.callOn(ch, 'watch_ports', { interval_ms: 3000 })
-      watcher.active = true
+      if (w.ports.owners.size > 0 && !w.ports.active) {
+        await this.callOn(ch, 'watch_ports', { interval_ms: 3000 })
+        w.ports.active = true
+      }
+      if (w.stats.owners.size > 0 && !w.stats.active) {
+        await this.callOn(ch, 'watch_stats', { interval_ms: 3000 })
+        w.stats.active = true
+      }
     } catch {
       // 重建失败：留在降级态（渲染层 /proc 轮询顶着），下次重连再试
       this.broadcast(sessionId, { event: 'agent_closed' })
     }
   }
 
-  /** 统一广播：端口事件/agent_closed 都走这里（订阅者以意图表为准） */
-  private broadcast(sessionId: string, payload: object): void {
-    const watcher = this.portWatchers.get(sessionId)
-    if (!watcher) return
-    for (const owner of watcher.owners) {
-      if (!owner.isDestroyed()) owner.send(IpcChannels.agentPorts, sessionId, payload)
+  /**
+   * 统一广播：按事件类型路由到对应泳道的订阅者（订阅者以意图表为准）。
+   * agent_closed 两泳道都通知 —— 它是通道级事件，不是业务事件。
+   */
+  private broadcast(sessionId: string, payload: { event?: string } & object): void {
+    const w = this.watches.get(sessionId)
+    if (!w) return
+    const statsLane = payload.event === 'stats' || payload.event === 'stats_error'
+    const channel = statsLane ? IpcChannels.agentStats : IpcChannels.agentPorts
+    const owners =
+      payload.event === 'agent_closed'
+        ? new Set([...w.ports.owners, ...w.stats.owners])
+        : statsLane
+          ? w.stats.owners
+          : w.ports.owners
+    for (const owner of owners) {
+      if (!owner.isDestroyed()) owner.send(channel, sessionId, payload)
     }
   }
 
@@ -203,8 +237,11 @@ export class AgentManager {
     for (const p of ch.pending.values()) p.reject(new Error('agent 通道已断开'))
     ch.pending.clear()
     try { ch.stream.close() } catch { /* 已死 */ }
-    const watcher = this.portWatchers.get(sessionId)
-    if (watcher) watcher.active = false
+    const w = this.watches.get(sessionId)
+    if (w) {
+      w.ports.active = false
+      w.stats.active = false
+    }
     this.broadcast(sessionId, { event: 'agent_closed' })
   }
 
@@ -293,31 +330,47 @@ export class AgentManager {
 
   /**
    * 订阅端口推送：登记意图（首个订阅者建通道并开 watch_ports）；
-   * 退订归零后给 agent 发 stop 并关通道（远端不留闲进程）。
    * 通道死不代表退订 —— 重连后自动重建，渲染层无需重订。
    */
   async watchPorts(sessionId: string, owner: WebContents): Promise<void> {
-    let watcher = this.portWatchers.get(sessionId)
-    if (!watcher) {
-      watcher = { owners: new Set(), active: false }
-      this.portWatchers.set(sessionId, watcher)
-    }
-    watcher.owners.add(owner)
-    if (watcher.active) return
+    const w = this.watchEntry(sessionId)
+    w.ports.owners.add(owner)
+    if (w.ports.active) return
     const ch = await this.connect(sessionId)
     await this.callOn(ch, 'watch_ports', { interval_ms: 3000 })
     // connect/callOn 等待期间可能已退订归零：意图没了就不标 active
-    if (this.portWatchers.get(sessionId) === watcher && watcher.owners.size > 0) {
-      watcher.active = true
+    if (this.watches.get(sessionId) === w && w.ports.owners.size > 0) {
+      w.ports.active = true
+    }
+  }
+
+  /** 订阅系统状态推送（CPU/内存/GPU），机制与 watchPorts 相同、共用通道 */
+  async watchStats(sessionId: string, owner: WebContents): Promise<void> {
+    const w = this.watchEntry(sessionId)
+    w.stats.owners.add(owner)
+    if (w.stats.active) return
+    const ch = await this.connect(sessionId)
+    await this.callOn(ch, 'watch_stats', { interval_ms: 3000 })
+    if (this.watches.get(sessionId) === w && w.stats.owners.size > 0) {
+      w.stats.active = true
     }
   }
 
   unwatchPorts(sessionId: string, owner: WebContents): void {
-    const watcher = this.portWatchers.get(sessionId)
-    if (!watcher) return
-    watcher.owners.delete(owner)
-    if (watcher.owners.size > 0) return
-    this.portWatchers.delete(sessionId)
+    this.unwatch(sessionId, owner, 'ports')
+  }
+
+  unwatchStats(sessionId: string, owner: WebContents): void {
+    this.unwatch(sessionId, owner, 'stats')
+  }
+
+  /** 退订：该泳道归零只是不再推送；两泳道都归零才 stop + 关通道（远端不留闲进程） */
+  private unwatch(sessionId: string, owner: WebContents, lane: 'ports' | 'stats'): void {
+    const w = this.watches.get(sessionId)
+    if (!w) return
+    w[lane].owners.delete(owner)
+    if (w.ports.owners.size + w.stats.owners.size > 0) return
+    this.watches.delete(sessionId)
     const ch = this.channels.get(sessionId)
     if (!ch) return
     // stop 是尽力而为：通道可能 already 半死，关流兜底

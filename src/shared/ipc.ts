@@ -48,6 +48,10 @@ export const IpcChannels = {
   agentWatchPorts: 'agent:watchPorts',
   agentUnwatchPorts: 'agent:unwatchPorts',
   agentPorts: 'agent:ports',
+  /** 订阅/退订 agent 系统状态推送（watch_stats 事件经 agent:stats 下行） */
+  agentWatchStats: 'agent:watchStats',
+  agentUnwatchStats: 'agent:unwatchStats',
+  agentStats: 'agent:stats',
   /*
    * 容器终端（Docker / Podman）。
    *

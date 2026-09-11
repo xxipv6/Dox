@@ -66,6 +66,7 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-agent-watch.mjs` | 转发建议接 agent 推送：端到端（预装 agent → 静默 nc → 气泡 **1.8s** 内出现（时序即路径证明，/proc 要 ~10s）→ 转发连通），跑前需 `node scripts/build-agent.mjs`（需主机参数） |
 | `verify-container-watch.mjs` | 容器标签静默端口发现：dind 端到端（容器里静默 nc → docker exec /proc 差分弹气泡 → 转发目标 = 容器网桥 IP → 本机连通）。前置：dox-sshd-test 为 privileged + 内部 dockerd（vfs）+ inner 容器 |
 | `verify-agent-keepalive.mjs` | agent 通道保活：杀掉应用的 sshd 会话 → 自动重连 → serve 通道按订阅意图自动重建 → 静默 nc 仍被秒推（2.8s）。跑前需 `node scripts/build-agent.mjs` |
+| `verify-agent-stats.mjs` | watch_stats 系统状态条：go test（/proc/stat、meminfo、nvidia-smi CSV 解析）+ 端到端（预装 agent + **假 nvidia-smi** 罐头数据 → 状态条 CPU/MEM/GPU 全出 → 悬停提示有显卡全名显存）。跑前需 `node scripts/build-agent.mjs` |
 | `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |
 | `verify-posix-integration.mjs` | 校验 POSIX 侧的同一契约：zsh（ZDOTDIR 注入）/ bash（--rcfile）/ fish（-C），装了哪个测哪个 |
 | `verify-posix-local-ui.mjs` | 端到端：真实应用里新建本地终端 → 敲 `cd` → 断言标签标题跟随 cwd（守着「zsh 打开即死」那个回归） |
@@ -126,7 +127,7 @@ src/
   - **标签栏**：标签从「等高矩形 + 竖线分割」改成有间距的圆角块，活动标签靠抬升的面 + 顶部高亮线 + 投影三重信号；右侧分屏/SFTP 按钮也改成圆角块 —— 它们和标签混成同一排「格子」时，分不清哪个是可切换的、哪个是动作
 - **自绘标题栏 ✅**：Windows / Linux 上 `frame: false`，最顶上那条由我们自己画 —— logo + Dox + − □ ✕，跟主题同色；macOS 保留系统红绿灯（`titleBarStyle: 'hiddenInset'`）。代价是失去「悬停最大化按钮弹出贴靠布局」，双击最大化与边缘拖拽缩放仍在
 - **应用图标重做 ✅**：`scripts/generate-icon.mjs` 生成，天蓝→草绿竖向渐变 + 白色 `>_`，3 倍超采样抗锯齿；`--preview` 出 16/32/64/128 原生并排图供肉眼核对（缩到 16px 才是真正要过的那关）。侧栏顶栏的品牌已并到标题栏，同一处不再出现两遍「Dox」
-- **远程助手 dox-agent v1 ✅**（红线 opt-in 新口径）：Go 静态二进制（~2MB，linux/amd64+arm64 交叉编译，`node scripts/build-agent.mjs`），侧栏「远程助手」面板**显式点「安装到这台机器」**才推送（uname 探测选架构 → SFTP 传 .tmp 再 mv → chmod → version 自检；落点 `~/.dox/dox-agent`，删目录即完全卸载，永不静默装/不写系统目录/不自启）。传输复用 SSH exec 通道跑 NDJSON 协议（hello / watch_ports / stop），watch_ports 在远端本地算 /proc 差分、只推变化；**断线保活**：SSH 自动重连成功后主进程按订阅意图重建 serve 通道并重发 watch（渲染层无需重订，断档期 /proc 轮询顶班、agent 帧回来即切回）
+- **远程助手 dox-agent v1 ✅**（红线 opt-in 新口径）：Go 静态二进制（~2MB，linux/amd64+arm64 交叉编译，`node scripts/build-agent.mjs`），侧栏「远程助手」面板**显式点「安装到这台机器」**才推送（uname 探测选架构 → SFTP 传 .tmp 再 mv → chmod → version 自检；落点 `~/.dox/dox-agent`，删目录即完全卸载，永不静默装/不写系统目录/不自启）。传输复用 SSH exec 通道跑 NDJSON 协议（hello / watch_ports / watch_stats / stop），watch_ports 在远端本地算 /proc 差分、只推变化；**断线保活**：SSH 自动重连成功后主进程按订阅意图重建 serve 通道并重发 watch（渲染层无需重订，断档期 /proc 轮询顶班、agent 帧回来即切回）。**系统状态条**（v0.2.0）：终端左下角常驻 CPU/MEM/GPU（/proc/stat 差分 + meminfo + nvidia-smi 存在才报，悬停看显卡全名与显存），与端口推送共用通道、0.1.0 老 agent 自动降级为不显示
 - **SOCKS5 一键代理 ✅**：端口转发面板新增「代理 -D」规则类型 —— 本机起 SOCKS5 服务（RFC 1928 仅 CONNECT 免认证，自研握手状态机），每个连接经 SSH forwardOut 从**远端网络出口**发出（ssh -D 等价）。浏览器/终端代理指向 `socks5://127.0.0.1:端口` 即全局走服务器网络；每条连接现取 client，断线重连后无需重建自动恢复
 - **端口转发建议 ✅**：三条检测路径——输出横幅（`localhost:端口`，秒出气泡，字节级门控零开销）+ **agent watch_ports 长连接推送**（装了助手的机器：远端本地算 /proc 差分，新监听 ~2s 推上来；通道断了自动降级）+ **/proc/net/tcp 每 5s 差分**兜底（VS Code "process" 检测源的无 agent 版，首查只建基线不轰炸、只建议 ≥1024 端口、非 Linux 自动停）。点「转发到本机」一键建成 ssh -L；**容器感知**：远端容器标签走 `docker exec` 读**容器 netns** 的 /proc（容器有自己的 netns，宿主机表里看不到），建议目标用 `docker inspect` 解析网桥 IP，没发布端口的容器也能转；本地终端/本机容器不弹。设置里可关
 - **性能优化 ✅**：终端输出 4ms/64KB 批处理合并（三处管理器共用 `chunkBatcher`，刷屏时 IPC 消息降 1-2 个数量级）；ZMODEM Sentry 改触发序列预扫描（常规输出不再逐块做 3 次 O(n) 复制）；SFTP 传输并发 2→4 + 高水位调大（读 1MB / 写 4MB，读了 ssh2 源码确认串行点）；渲染产物开 oxc 压缩 + FileEditor（CodeMirror）懒加载，首包 2.38MB → 0.58MB；更新检查延后 45s 退出启动关键路径；连接 ready 后后台预热 sftp 通道
