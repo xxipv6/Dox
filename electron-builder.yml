@@ -11,6 +11,11 @@ files:
   - package.json
   - build/icon.png
 
+# dox-agent 各平台构建：安装助手时按远端架构从 resources/agent 里挑
+extraResources:
+  - from: build/agent
+    to: agent
+
 asar: true
 
 # ---------- Windows ----------

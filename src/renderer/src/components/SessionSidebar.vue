@@ -8,6 +8,7 @@ import SidebarSection from './SidebarSection.vue'
 import ForwardPanel from './ForwardPanel.vue'
 import SnippetPanel from './SnippetPanel.vue'
 import ContainerPanel from './ContainerPanel.vue'
+import AgentPanel from './AgentPanel.vue'
 import type { SavedSession } from '@shared/types'
 
 const store = useSessionStore()
@@ -192,6 +193,7 @@ async function remove(s: SavedSession): Promise<void> {
 
       <ForwardPanel />
       <ContainerPanel />
+      <AgentPanel />
       <SnippetPanel />
     </div>
 

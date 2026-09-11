@@ -97,6 +97,8 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.sftpArchive, sessionId, paths),
   remoteListeners: (sessionId) =>
     ipcRenderer.invoke(IpcChannels.remoteListeners, sessionId),
+  agentStatus: (sessionId) => ipcRenderer.invoke(IpcChannels.agentStatus, sessionId),
+  agentInstall: (sessionId) => ipcRenderer.invoke(IpcChannels.agentInstall, sessionId),
   listTransfers: () => ipcRenderer.invoke(IpcChannels.transferList),
   cancelTransfer: (id) => ipcRenderer.invoke(IpcChannels.transferCancel, id),
   clearFinishedTransfers: () => ipcRenderer.invoke(IpcChannels.transferClearFinished),

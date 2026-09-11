@@ -1,0 +1,107 @@
+// dox-agent：跑在远端的轻量助手（opt-in 安装，用户显式触发才会被推上去）。
+//
+// 传输即标准输入输出：应用经 SSH exec 通道启动 `dox-agent serve`，
+// 协议是换行分隔的 JSON（NDJSON）——不开端口、不动防火墙、不额外认证，
+// SSH 会话就是全部权限边界。
+//
+// 子命令：
+//   version  打印一行 JSON 版本信息（安装校验用）
+//   serve    进入请求/事件循环（hello / watch_ports / stop）
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+// version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
+var version = "0.1.0"
+
+type request struct {
+	ID     int             `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
+
+type response struct {
+	ID     int         `json:"id"`
+	Result interface{} `json:"result,omitempty"`
+	Error  string      `json:"error,omitempty"`
+}
+
+type event struct {
+	Event string      `json:"event"`
+	Data  interface{} `json:"data"`
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: dox-agent <version|serve>")
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "version":
+		// 单行 JSON：安装流程据此确认落盘的二进制能跑、版本对得上
+		fmt.Printf(`{"agent":"dox-agent","version":%q}`+"\n", version)
+	case "serve":
+		if err := serve(); err != nil {
+			fmt.Fprintln(os.Stderr, "serve:", err)
+			os.Exit(1)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "unknown subcommand:", os.Args[1])
+		os.Exit(2)
+	}
+}
+
+func serve() error {
+	// stdin 可能被塞入大请求（未来传文件），缓冲给宽一点
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	enc := json.NewEncoder(os.Stdout)
+
+	// watch_ports 的停止信号：stop 或 stdin 关闭都收
+	stopWatch := make(chan struct{})
+	watchRunning := false
+
+	for scanner.Scan() {
+		var req request
+		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+			// 坏行不致命：协议对端是自家应用，记一笔继续跑
+			continue
+		}
+		switch req.Method {
+		case "hello":
+			_ = enc.Encode(response{ID: req.ID, Result: map[string]interface{}{
+				"agent":   "dox-agent",
+				"version": version,
+				"pid":     os.Getpid(),
+			}})
+		case "watch_ports":
+			var p struct {
+				IntervalMs int `json:"interval_ms"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			if p.IntervalMs <= 0 {
+				p.IntervalMs = 3000
+			}
+			if !watchRunning {
+				watchRunning = true
+				go watchPorts(p.IntervalMs, enc, stopWatch)
+			}
+			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"watching": true}})
+		case "stop":
+			if watchRunning {
+				close(stopWatch)
+			}
+			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"bye": true}})
+			return nil
+		default:
+			_ = enc.Encode(response{ID: req.ID, Error: "unknown method: " + req.Method})
+		}
+	}
+	// stdin 关闭 = SSH 通道断了：agent 没有存在的意义，跟着退出
+	return scanner.Err()
+}

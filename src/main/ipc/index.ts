@@ -27,6 +27,7 @@ import type { ConfigStore } from '../store/configStore'
 import type { SftpService } from '../sftp/SftpService'
 import type { TransferManager } from '../sftp/TransferManager'
 import type { ForwardManager } from '../forward/ForwardManager'
+import type { AgentManager } from '../agent/AgentManager'
 
 /** 集中注册所有 IPC 路由 */
 export function registerIpc(
@@ -38,7 +39,8 @@ export function registerIpc(
   containerManager: ContainerManager,
   localPtyManager: LocalPtyManager,
   layoutStore: LayoutStore,
-  settingsStore: SettingsStore
+  settingsStore: SettingsStore,
+  agentManager: AgentManager
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle(
@@ -144,6 +146,12 @@ export function registerIpc(
   )
   ipcMain.handle(IpcChannels.remoteListeners, (_event, sessionId: string) =>
     sessionManager.remoteListeners(sessionId)
+  )
+  ipcMain.handle(IpcChannels.agentStatus, (_event, sessionId: string) =>
+    agentManager.status(sessionId)
+  )
+  ipcMain.handle(IpcChannels.agentInstall, (_event, sessionId: string) =>
+    agentManager.install(sessionId)
   )
 
   // ---- 容器终端 ----

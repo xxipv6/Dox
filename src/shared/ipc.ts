@@ -41,6 +41,9 @@ export const IpcChannels = {
   sftpArchive: 'sftp:archive',
   /** 远端 LISTEN 端口列表（/proc/net/tcp，端口转发建议的静默检测） */
   remoteListeners: 'remote:listeners',
+  /** 远程助手：查询安装状态 / 显式安装（opt-in，永不静默） */
+  agentStatus: 'agent:status',
+  agentInstall: 'agent:install',
   /*
    * 容器终端（Docker / Podman）。
    *

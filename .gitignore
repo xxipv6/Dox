@@ -7,3 +7,4 @@ dist-electron/
 shots/
 .DS_Store
 Thumbs.db
+build/agent/

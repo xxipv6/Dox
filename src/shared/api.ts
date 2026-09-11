@@ -162,6 +162,9 @@ export interface DoxApi {
    * supported=false = 远端没有 /proc（非 Linux），调用方应停止轮询。
    */
   remoteListeners(sessionId: string): Promise<{ ports: number[]; supported: boolean }>
+  /** 远程助手状态（installed/version/osArch）与显式安装（opt-in） */
+  agentStatus(sessionId: string): Promise<{ installed: boolean; version?: string; osArch?: string }>
+  agentInstall(sessionId: string): Promise<{ installed: boolean; version?: string; osArch?: string }>
   listTransfers(): Promise<TransferTask[]>
   cancelTransfer(id: string): Promise<void>
   clearFinishedTransfers(): Promise<void>

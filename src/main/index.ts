@@ -13,6 +13,7 @@ import { TransferManager } from './sftp/TransferManager'
 import { ForwardManager } from './forward/ForwardManager'
 import { ContainerManager } from './container/ContainerManager'
 import { LocalPtyManager } from './local/LocalPtyManager'
+import { AgentManager } from './agent/AgentManager'
 import { prewarmShells } from './local/shells'
 import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
@@ -55,12 +56,14 @@ const forwardManager = new ForwardManager(
  * 不需要任何 guard，因为这里根本没有那套代码。
  */
 const containerManager = new ContainerManager((id) => sessionManager.getClient(id))
+const agentManager = new AgentManager(sessionManager)
 
 // 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped），
 // 并把它承载的容器终端通道一并收掉
 sessionManager.onClosed = (id) => {
   forwardManager.stopBySession(id)
   containerManager.stopBySession(id)
+  agentManager.invalidate(id)
 }
 // 重连成功后按原参数把该会话的转发规则重新建立起来，
 // 否则隧道会无声死掉，用户还以为它开着
@@ -162,7 +165,8 @@ app.whenReady().then(() => {
     containerManager,
     localPtyManager,
     layoutStore,
-    settingsStore
+    settingsStore,
+    agentManager
   )
   createWindow()
   setupAutoUpdater()
