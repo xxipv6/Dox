@@ -69,5 +69,6 @@
     "esbuild@0.28.2": true,
     "electron@44.3.0": true,
     "node-pty@1.1.0": true
-  }
+  },
+  "author": "xxipv6 <3264549@qq.com>"
 }
