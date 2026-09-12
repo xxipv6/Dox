@@ -3,8 +3,8 @@
  * 性能监控面板（右侧栏，任务管理器式三页签）。
  *
  *  - 概览：总 CPU + **每核一个格子**（agent 0.6.0 的 cpus 帧字段）、内存、GPU。
- *    数据源是被动的 onAgentStats 监听 —— 订阅由发起页的 TerminalPanel 持有
- *    （同一 webContents 共用一个 owner，这里不能再订/退，否则互相踩踏）。
+ *    watch_stats 订阅由本面板自己持有（终端没有状态条了，全窗口唯一 owner），
+ *    卸载时退订。
  *  - 网络：netstat 式连接表（agent 0.6.0 net_conns，/proc 直读不依赖 netstat）。
  *  - 进程：原「进程管理」全部能力（过滤/排序/两级结束）。
  *
@@ -47,6 +47,10 @@ watch(
 const stats = ref<AgentStatsPayload | null>(null)
 const statsLive = ref(false)
 let offStats: (() => void) | null = null
+/** 订阅成功后才赋值的退订函数（只在订阅成功后退订，避免误删别人的意图） */
+let unwatchStats: (() => void) | null = null
+/** 卸载标记：watch_stats 是异步登记，返回时面板可能已关 */
+let disposed = false
 
 const memPercent = computed(() => {
   const s = stats.value
@@ -156,6 +160,16 @@ const filteredProcs = computed(() => {
   })
 })
 
+/**
+ * 渲染上限：大宿主机上千级进程每 2s 全量重绘能把 Electron 渲染进程
+ * 打满（真实案例：1822 进程 × 2s 刷新 = 面板本身 80%+ CPU）。
+ * 排序照全量排，只渲染前 N 行；要找人用过滤框。
+ */
+const PROC_RENDER_CAP = 300
+const CONN_RENDER_CAP = 300
+const shownProcs = computed(() => filteredProcs.value.slice(0, PROC_RENDER_CAP))
+const shownConns = computed(() => filteredConns.value.slice(0, CONN_RENDER_CAP))
+
 function toggleSort(key: SortKey): void {
   if (sortKey.value === key) sortAsc.value = !sortAsc.value
   else {
@@ -239,7 +253,6 @@ watch(tab, (t) => {
 })
 
 onMounted(() => {
-  // 被动监听 stats 帧（订阅由 TerminalPanel 持有，见文件头注释）
   offStats = window.api.onAgentStats((id, ctr, data) => {
     if (id !== props.sessionId || (ctr ?? undefined) !== props.containerName) return
     if (data.event === 'agent_closed') {
@@ -252,6 +265,19 @@ onMounted(() => {
     statsLive.value = true
   })
 
+  // 面板自己持有 watch_stats 订阅（终端不再订阅，全窗口就这一个 owner）。
+  // 老 agent 没有 watch_stats → unknown method，概览页停在等待文案即可
+  void (async () => {
+    const st = await window.api.agentStatus(props.sessionId, props.containerName).catch(() => null)
+    if (!st?.installed) return
+    try {
+      await window.api.agentWatchStats(props.sessionId, props.containerName)
+      // 异步返回时面板可能已关：立即退订别漏通道
+      if (disposed) void window.api.agentUnwatchStats(props.sessionId, props.containerName)
+      else unwatchStats = () => window.api.agentUnwatchStats(props.sessionId, props.containerName)
+    } catch { /* 老版本助手没有 watch_stats */ }
+  })()
+
   if (tab.value === 'network') void refreshConns()
   if (tab.value === 'processes') void refreshProcs()
   else procLoading.value = false
@@ -259,8 +285,10 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   if (timer) clearInterval(timer)
   offStats?.()
+  unwatchStats?.()
 })
 </script>
 
@@ -357,7 +385,7 @@ onBeforeUnmount(() => {
           <span class="n-state">状态</span>
           <span class="n-proc">进程</span>
         </div>
-        <div v-for="(c, i) in filteredConns" :key="i" class="row conn-row">
+        <div v-for="(c, i) in shownConns" :key="i" class="row conn-row">
           <span class="n-proto">{{ c.proto }}</span>
           <span class="n-addr mono" :title="`${c.local_addr}:${c.local_port}`">{{ c.local_addr }}:{{ c.local_port }}</span>
           <span class="n-addr mono" :title="c.remote_port ? `${c.remote_addr}:${c.remote_port}` : ''">{{
@@ -369,6 +397,9 @@ onBeforeUnmount(() => {
           }}</span>
         </div>
         <div v-if="!filteredConns.length" class="hint">{{ connsFilter || connsPid !== null ? '没有匹配的连接' : '没有连接' }}</div>
+        <div v-else-if="filteredConns.length > shownConns.length" class="hint">
+          共 {{ filteredConns.length }} 条，只渲染前 {{ shownConns.length }} 条（用过滤缩小范围）
+        </div>
       </div>
     </div>
 
@@ -396,7 +427,7 @@ onBeforeUnmount(() => {
           <span class="c-act"></span>
         </div>
         <div
-          v-for="p in filteredProcs"
+          v-for="p in shownProcs"
           :key="p.pid"
           class="row"
           :class="{ 'term-sent': termSentAt[p.pid] !== undefined }"
@@ -422,6 +453,9 @@ onBeforeUnmount(() => {
           </span>
         </div>
         <div v-if="!filteredProcs.length" class="hint">{{ filter ? '没有匹配的进程' : '没有进程' }}</div>
+        <div v-else-if="filteredProcs.length > shownProcs.length" class="hint">
+          共 {{ filteredProcs.length }} 个进程，只渲染前 {{ shownProcs.length }} 个（用过滤缩小范围）
+        </div>
       </div>
     </div>
 

@@ -491,7 +491,6 @@ export class AgentManager {
 
     const ch: Channel = { stream, nextId: 1, pending: new Map() }
     this.channels.set(key, ch)
-    const w = this.watches.get(key)
 
     let buf = ''
     stream.onData((d: Buffer) => {
@@ -507,8 +506,11 @@ export class AgentManager {
           continue
         }
         if (msg.event) {
+          // 意图表必须现查：通道可能是 agentCall 先建的（彼时还没有任何
+          // watch 条目），闭包捕获会把之后订阅的帧全部静默丢掉
+          const wcur = this.watches.get(key)
           // agent 的行格式是 {event, data:{…}}，拍平成渲染层契约的平铺载荷
-          if (w) this.broadcast(w, { event: msg.event, ...((msg as { data?: object }).data ?? {}) })
+          if (wcur) this.broadcast(wcur, { event: msg.event, ...((msg as { data?: object }).data ?? {}) })
           continue
         }
         if (msg.id !== undefined) {

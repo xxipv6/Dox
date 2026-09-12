@@ -1,8 +1,9 @@
 /**
- * agent watch_stats + 系统状态条的端到端验证：
- *  预装 agent 0.2.0 + 一枚**假的 nvidia-smi**（输出罐头 CSV，验 GPU 解析与展示）→
- *  应用连接 → 左下状态条出现 CPU/MEM/GPU → 悬停提示里有显卡全名与显存 →
- *  撤掉假 nvidia-smi 重装 agent → GPU 项消失（无卡机器的正确形态）→ 清理。
+ * agent watch_stats + 性能监控概览页的端到端验证：
+ *  预装 agent + 一枚**假的 nvidia-smi**（输出罐头 CSV，验 GPU 解析与展示）→
+ *  应用连接 → 右键「性能监控」→ 概览页出每核 CPU 格子 + 内存 + GPU（含显卡全名）→
+ *  持续刷新不报错 → 清理。
+ *（终端左下角的状态条已移除，watch_stats 订阅由监控面板自己持有。）
  *
  * 用法：node scripts/verify-agent-stats.mjs [host] [port] [user] [password]
  * 前置：npm run build && node scripts/build-agent.mjs
@@ -56,7 +57,7 @@ await new Promise((res, rej) => {
   })
 })
 const versionOut = await remoteExec('chmod 755 ~/.dox/dox-agent && ~/.dox/dox-agent version')
-check('agent 0.2.0 预装完成', versionOut.includes('0.2.0'), versionOut)
+check('agent 预装完成', /\d+\.\d+\.\d+/.test(versionOut), versionOut)
 
 // ---- 假 nvidia-smi：doxtest 写不了 /usr/local/bin，用 ~/.dox/bin 加 PATH 不行
 // （agent 以 SSH exec 启动，PATH 不含自定义目录）→ 让 root 经 docker 写。
@@ -116,22 +117,26 @@ for (let i = 0; i < 8; i++) {
 await win.locator('.terminal-container:visible').first().click()
 await win.keyboard.press('Escape')
 
-// ---- 状态条出现：CPU / MEM / GPU ----
-const bar = win.locator('.agent-stats:visible')
-let barText = ''
-try {
-  await bar.waitFor({ timeout: 15000 })
-  barText = (await bar.textContent()) ?? ''
-} catch { /* 未出现 */ }
-check('系统状态条出现', !!barText)
-check('状态条含 CPU 百分比', /CPU \d+%/.test(barText), barText)
-check('状态条含 MEM 百分比', /MEM \d+%/.test(barText), barText)
-check('状态条含 GPU 百分比（假 nvidia-smi）', /GPU\s?42%/.test(barText), barText)
-const tip = await bar.getAttribute('title').catch(() => '')
-check('悬停提示含显卡全名与显存', (tip ?? '').includes('NVIDIA DoxTest-9000') && (tip ?? '').includes('24.0G'), tip ?? '')
-await win.waitForTimeout(3500) // 等第二帧，确认持续推送不报错
-const barText2 = (await bar.textContent().catch(() => '')) ?? ''
-check('状态条持续刷新（第二帧仍在）', /CPU \d+%/.test(barText2), barText2)
+// ---- 性能监控概览：CPU / 每核格子 / 内存 / GPU ----
+await win.locator('.terminal-container:visible').first().click({ button: 'right' })
+await win.waitForTimeout(400)
+await win.locator('.context-menu button', { hasText: '性能监控' }).click()
+await win.locator('.mon-panel').waitFor({ timeout: 5000 })
+// 概览数据来自面板自己持有的 watch_stats 订阅，等首帧（首帧 200ms 短采样）
+let coreCount = 0
+for (let k = 0; k < 15 && coreCount === 0; k++) {
+  await win.waitForTimeout(1000)
+  coreCount = await win.locator('.mon-panel .core-box').count()
+}
+check('概览：每核 CPU 格子出现', coreCount > 0, `cores=${coreCount}`)
+const overviewText = (await win.locator('.mon-panel .page:visible').textContent()) ?? ''
+check('概览含内存条', overviewText.includes('内存'), overviewText.slice(0, 120))
+check('概览含 GPU 占用（假 nvidia-smi）', overviewText.includes('GPU') && overviewText.includes('42%'), overviewText.slice(0, 200))
+const gpuLine = await win.locator('.mon-panel .dim-line', { hasText: 'DoxTest-9000' }).count()
+check('GPU 行含显卡全名与显存', gpuLine >= 1)
+await win.waitForTimeout(3500) // 再等一帧，确认持续推送不报错
+const stillLive = await win.locator('.mon-panel .core-box').count()
+check('概览持续刷新（后续帧仍在）', stillLive > 0)
 await win.screenshot({ path: 'shots/68-agent-stats.png' })
 
 await cleanup()

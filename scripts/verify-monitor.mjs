@@ -1,6 +1,6 @@
 /**
  * 性能监控面板端到端（全程本机容器）：
- *  本机 alpine 容器 → 装助手 0.6.1 → 右键「性能监控」→
+ *  本机 alpine 容器 → 装助手 → 右键「性能监控」→
  *  概览：每核格子数 > 0 + 内存条 →
  *  网络：nc 起一个监听，连接表出现 LISTEN:8321（带进程名）→
  *  进程：列出 sleep 3600 → 点 PID 跳网络页且过滤预设 →
@@ -61,7 +61,7 @@ try {
   await win.locator('.sidebar .agent-ok', { hasText: '已安装' }).waitFor({ timeout: 30000 })
   installOk = true
 } catch { /* 超时 */ }
-check('助手 0.6.1 安装成功', installOk)
+check('助手安装成功（当前内置版本）', installOk)
 
 // nc 监听一个端口，让连接表有东西可看
 await win.evaluate(async (name) => {
@@ -80,10 +80,21 @@ await win.locator('.context-menu button', { hasText: '性能监控' }).click()
 await win.locator('.mon-panel').waitFor({ timeout: 5000 })
 
 // ---- 概览：每核格子 + 内存条 ----
+// 埋事件钩子：概览没数时能看到帧到底来没来
+await win.evaluate(() => {
+  window.__statsEvents = []
+  window.api.onAgentStats((id, ctr, data) => {
+    window.__statsEvents.push([ctr, data.event, data.cpus?.length ?? null])
+  })
+})
 let coreCount = 0
 for (let i = 0; i < 15 && coreCount === 0; i++) {
   await win.waitForTimeout(1000)
   coreCount = await win.locator('.mon-panel .core-box').count()
+}
+if (coreCount === 0) {
+  const dump = await win.evaluate(() => window.__statsEvents)
+  console.log('  stats 事件流:', JSON.stringify(dump))
 }
 check('概览：每核格子出现', coreCount > 0, `cores=${coreCount}`)
 check('概览：内存条出现', (await win.locator('.mon-panel .big-bar').count()) >= 1)

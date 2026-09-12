@@ -2,7 +2,7 @@
  * 容器内 agent（Dev Containers 式注入）的端到端验证：
  *  SSH 连 dind → 进 inner 容器标签 → 助手面板点「安装到容器」→ 已安装 →
  *  容器里静默 nc：气泡 ~3s 出现（agent 推送；轮询要 ~10s，时序即路径证明）→
- *  状态条出现（容器标签也有 CPU/MEM）→
+ *  右键「性能监控」概览页出每核 CPU 格子（容器标签也有 watch_stats）→
  *  docker restart inner（SSH 全程没断，主进程重连钩子管不到）→
  *  45s 节流重试自动复活 → 再静默 nc 仍秒推 → 清理。
  *
@@ -152,24 +152,26 @@ try {
 check('阶段1：容器内 agent 推送生效（<8s）', aMs >= 0, `latency=${aMs}`)
 if (aMs >= 0) console.log(`  气泡延迟 ${(aMs / 1000).toFixed(1)}s`)
 
-// ---- 状态条（容器标签也有）----
-// 宽限 30s：装完 agent 的重试链路是 agentStatus→watchPorts→watchStats 一串
-// SSH exec，dind 里每条 docker exec 都要几百 ms，实测曾擦着 15s 线出现
-const bar = win.locator('.agent-stats:visible')
-let barText = ''
-try {
-  await bar.waitFor({ timeout: 30000 })
-  barText = (await bar.textContent()) ?? ''
-} catch { /* 未出现 */ }
-check('容器标签状态条出现（CPU/MEM）', /CPU \d+%/.test(barText) && /MEM \d+%/.test(barText), barText)
-if (!barText) {
+// ---- 性能监控概览（容器标签；终端状态条已移除，概览页是 watch_stats 的落点）----
+await win.locator('.terminal-container:visible').first().click({ button: 'right' })
+await win.waitForTimeout(400)
+await win.locator('.context-menu button', { hasText: '性能监控' }).click()
+await win.locator('.mon-panel').waitFor({ timeout: 5000 })
+let coreCount = 0
+for (let k = 0; k < 20 && coreCount === 0; k++) {
+  await win.waitForTimeout(1000)
+  coreCount = await win.locator('.mon-panel .core-box').count()
+}
+check('容器标签性能监控概览出现（每核格子）', coreCount > 0, `cores=${coreCount}`)
+if (coreCount === 0) {
   const dump = await win.evaluate(() => ({
     statsEvents: window.__statsEvents,
-    barCount: document.querySelectorAll('.agent-stats').length
+    panelCount: document.querySelectorAll('.mon-panel').length
   }))
-  console.log('  stats 事件流:', JSON.stringify(dump.statsEvents), 'bar 节点数:', dump.barCount)
+  console.log('  stats 事件流:', JSON.stringify(dump.statsEvents), '面板节点数:', dump.panelCount)
 }
 await win.screenshot({ path: 'shots/70-container-agent.png' })
+await win.locator('.mon-panel button[title="关闭"]').click()
 
 // ---- 阶段 2：docker restart → 45s 节流重试自动复活 ----
 await remoteExec(`docker restart ${INNER}`)

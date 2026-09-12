@@ -9,7 +9,6 @@ import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
 import { isPlainSshId, LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
-import type { AgentStatsPayload } from '@shared/types'
 import { useSettingsStore } from '../stores/settings'
 import { useEditorStore } from '../stores/editor'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
@@ -187,33 +186,6 @@ let agentSubscribed = false
 /** 订阅时的目标（卸载时标签可能已从 store 摘掉，forwardTarget 会拿不到了） */
 let subscribedTarget: { sessionId: string; containerName?: string } | null = null
 
-// ---- agent 系统状态条（CPU/内存/GPU/top 进程）：与端口推送同一条通道、同一 opt-in ----
-const agentStats = ref<AgentStatsPayload | null>(null)
-/** 推送是否活着（agent_closed 时藏起来，重建后首帧自动回来） */
-const statsLive = ref(false)
-let unsubscribeAgentStats: (() => void) | null = null
-let statsSubscribed = false
-/** 订阅时的目标（卸载时标签可能已从 store 摘掉，procTarget 会拿不到） */
-let statsTarget: { sessionId: string; containerName?: string } | null = null
-
-const memPercent = computed(() => {
-  const s = agentStats.value
-  if (!s || !s.mem_total_mb) return 0
-  return Math.round((s.mem_used_mb / s.mem_total_mb) * 100)
-})
-
-/** 悬停看全量：内存与显存的具体数字放 title，条上只留百分比 */
-const statsTooltip = computed(() => {
-  const s = agentStats.value
-  if (!s) return ''
-  const g = (n: number): string => (n >= 1024 ? `${(n / 1024).toFixed(1)}G` : `${n}M`)
-  const parts = [`内存 ${g(s.mem_used_mb)} / ${g(s.mem_total_mb)}`]
-  for (const [i, gpu] of (s.gpus ?? []).entries()) {
-    parts.push(`GPU${(s.gpus ?? []).length > 1 ? i : ''} ${gpu.name} · 显存 ${g(gpu.mem_used_mb)} / ${g(gpu.mem_total_mb)}`)
-  }
-  return parts.join('\n')
-})
-
 /*
  * agent 差分帧的处理。
  * 宿主机：首帧全量即基线（不弹）——机器上常驻服务多，连上就弹是轰炸。
@@ -249,9 +221,6 @@ function handleAgentPorts(data: { listening?: number[]; added?: number[] }): voi
  * 容器 docker exec，pollRemoteListeners 内部按目标分路）。
  */
 async function startPortWatch(): Promise<void> {
-  // 状态条独立于端口推送：本机容器没有转发落点（forwardTarget 为 null），
-  // 但装了助手就值得看 CPU/内存/top 进程 —— 目标集合与 procTarget 一致
-  void startStatsWatch()
   const target = forwardTarget()
   if (!target) return
   const st = await window.api.agentStatus(target.sessionId, target.containerName).catch(() => null)
@@ -302,45 +271,6 @@ async function startPortWatch(): Promise<void> {
     }
   }
   if (!disposed) startProcPoll()
-}
-
-/**
- * 系统状态条订阅：独立于端口推送。
- *
- * 本机容器没有转发落点（forwardTarget 为 null，startPortWatch 直接返回），
- * 但助手能做的它都能做 —— CPU/内存/top 进程不该因此缺席。目标集合与
- * procTarget 一致（助手能到哪，状态条就到哪）；主进程侧在通道重建后会
- * 按订阅意图自动重发 watch_stats，所以这里只需订一次。
- */
-async function startStatsWatch(): Promise<void> {
-  if (statsSubscribed) return
-  const target = procTarget.value
-  if (!target) return
-  const st = await window.api.agentStatus(target.sessionId, target.containerName).catch(() => null)
-  if (!st?.installed) return
-  try {
-    await window.api.agentWatchStats(target.sessionId, target.containerName)
-    // 挂载期间异步返回的：面板可能已卸载，立即退订别漏通道
-    if (disposed) {
-      void window.api.agentUnwatchStats(target.sessionId, target.containerName)
-      return
-    }
-    statsSubscribed = true
-    statsTarget = target
-    unsubscribeAgentStats = window.api.onAgentStats((id, ctr, data) => {
-      if (id !== target.sessionId || (ctr ?? undefined) !== target.containerName) return
-      if (data.event === 'agent_closed') {
-        statsLive.value = false
-        return
-      }
-      if (data.event !== 'stats') return
-      const { event: _e, ...payload } = data
-      agentStats.value = payload as AgentStatsPayload
-      statsLive.value = true
-    })
-  } catch {
-    // 老版本 agent 没有 watch_stats：unknown method，状态条不出现即可
-  }
 }
 
 /**
@@ -740,30 +670,6 @@ function openProcesses(): void {
   })
 }
 
-/** 状态条点名的「罪魁进程」：帧间 CPU 差分 top1，≥10% 才显示（空闲机器点名是噪音） */const topProc = computed(() => {
-  const t = agentStats.value?.top_procs?.[0]
-  return t && t.cpu_percent >= 10 ? t : null
-})
-/** 命令的短名：取 argv[0] 的 basename，截到 20 字符 */
-const topProcName = computed(() => {
-  const cmd = topProc.value?.command ?? ''
-  const base = (cmd.split(/\s+/)[0] ?? '').split('/').pop() ?? cmd
-  return base.length > 20 ? base.slice(0, 20) + '…' : base
-})
-
-function openTopProc(): void {
-  const t = procTarget.value
-  const top = topProc.value
-  if (!t || !top) return
-  const tab = store.tabs.find((tb) => tb.panes.some((p) => p.sessionId === props.sessionId))
-  store.openMonitor({
-    ...t,
-    label: t.containerName ? `容器 ${t.containerName}` : (tab?.title ?? '主机'),
-    tab: 'processes',
-    filter: String(top.pid)
-  })
-}
-
 /*
  * ---- 拖文件进终端 ----
  *
@@ -1048,12 +954,8 @@ onBeforeUnmount(() => {
     agentRetryTimer = null
   }
   unsubscribeAgentPorts?.()
-  unsubscribeAgentStats?.()
   if (agentSubscribed && subscribedTarget) {
     void window.api.agentUnwatchPorts(subscribedTarget.sessionId, subscribedTarget.containerName)
-  }
-  if (statsSubscribed && statsTarget) {
-    void window.api.agentUnwatchStats(statsTarget.sessionId, statsTarget.containerName)
   }
   window.removeEventListener('click', closeMenu)
   unsubscribeData?.()
@@ -1153,28 +1055,6 @@ defineExpose({ refitAndFocus })
           <span :title="s.error">转发失败：{{ s.error }}</span>
         </template>
       </div>
-    </div>
-
-    <!--
-      远端系统状态条：收到过帧就常驻。通道掉线时**不撤条**——数值变灰 + 连接中，
-      凭空消失读起来像 bug；从没收过帧（没装助手）才不渲染。
-    -->
-    <div v-if="agentStats" class="agent-stats" :class="{ offline: !statsLive }" :title="statsTooltip">
-      <template v-if="statsLive">
-        <span>CPU {{ agentStats.cpu_percent.toFixed(0) }}%</span>
-        <span>MEM {{ memPercent }}%</span>
-        <span v-for="(g, i) in agentStats.gpus ?? []" :key="i">
-          GPU{{ (agentStats.gpus ?? []).length > 1 ? i : '' }} {{ g.util_percent }}%
-        </span>
-        <!-- 谁在吃 CPU（0.5.0 帧字段）：≥10% 才值得点名，点击开进程面板定位 -->
-        <span
-          v-if="topProc"
-          class="top-proc"
-          :title="`${topProc.command}（PID ${topProc.pid}）— 点击打开进程管理`"
-          @click="openTopProc"
-        >· {{ topProcName }}</span>
-      </template>
-      <span v-else>助手连接中…</span>
     </div>
 
     <!-- 右键菜单 -->
@@ -1405,38 +1285,4 @@ defineExpose({ refitAndFocus })
   cursor: pointer;
 }
 
-/* 远端系统状态条：左下细条，与右下的端口建议遥遥相对，都不挡输出 */
-.agent-stats {
-  position: absolute;
-  left: 16px;
-  bottom: 12px;
-  z-index: 5;
-  display: flex;
-  gap: 12px;
-  padding: 4px 10px;
-  border-radius: var(--r-md);
-  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
-  border: 1px solid var(--border);
-  font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
-  color: var(--fg-muted);
-  white-space: pre-line;
-  pointer-events: auto;
-}
-/* 通道掉线：条还在、数值收起来，一句话说清状态（凭空消失读起来像 bug） */
-.agent-stats.offline {
-  opacity: 0.65;
-  font-style: italic;
-}
-/* 状态条里的「罪魁进程」：可点，悬停给信号 */
-.top-proc {
-  cursor: pointer;
-  color: var(--accent-text);
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.top-proc:hover {
-  text-decoration: underline;
-}
 </style>

@@ -4,8 +4,7 @@
  *  ① fs_du：/ 的直接子项按大小排序返回 →
  *  ② 续传协议位：fs_write_begin 重入返回 existing_size，偏移补齐后 commit 内容正确 →
  *  ③ watch_stats top_procs：容器里跑 CPU 燃烧器，帧里点名它（≥10%）→
- *  ④ 本机容器的状态条（0.5.0 起不再依赖转发落点）+ top 进程 chip →
- *     点击 chip 打开进程面板且过滤框预设为该 PID →
+ *  ④ 本机容器右键「性能监控」→ 概览页每核格子 + 「谁在吃 CPU」点名 →
  *  ⑤ SFTP 面板点用量条展开 du 分解。
  *
  * 用法：node scripts/verify-agent-v050.mjs
@@ -125,40 +124,21 @@ check(
   JSON.stringify(topProc)
 )
 
-// ---- ④ 本机容器状态条 + top 进程 chip（0.5.0：不再依赖转发落点）----
-// 装完助手触发了重订阅，状态条应该自己出现；燃烧器还在跑，chip 会点名
-const statsBar = win.locator('.tab-content:not([style*="display: none"]) .agent-stats')
-let statsUp = false
-try {
-  await statsBar.waitFor({ timeout: 15000 })
-  statsUp = true
-} catch { /* 超时 */ }
-check('本机容器标签出现状态条（CPU/MEM）', statsUp)
-
-let chipPid = ''
-try {
-  const chip = statsBar.locator('.top-proc')
-  await chip.waitFor({ timeout: 15000 })
-  // title 形如「sh -c …2>&1（PID 86）— …」：命令里可能含数字，必须锚定 PID 组
-  chipPid = /PID (\d+)/.exec((await chip.getAttribute('title')) ?? '')?.[1] ?? ''
-  check('状态条点名 top 进程 chip', chipPid !== '', await chip.getAttribute('title'))
-  await chip.click()
-  await win.locator('.mon-panel').waitFor({ timeout: 5000 })
-  // 读完 title 到点击之间可能来了新帧（top 换人）：以面板实际过滤值为准，
-  // 验证它是纯数字且过滤后确实有那一行
-  const filterVal = await win.locator('.mon-panel .page:visible .filter-row input').inputValue()
-  await win.waitForTimeout(2000)
-  const rowHit = await win.locator('.mon-panel .page:visible .row', { hasText: filterVal }).count()
-  check(
-    '点击 chip 打开进程面板且过滤预设为 PID',
-    /^\d+$/.test(filterVal) && rowHit >= 1,
-    `filter=${filterVal} rows=${rowHit}`
-  )
-  await win.screenshot({ path: 'shots/88-v050-topproc.png' })
-  await win.locator('.mon-panel button[title="关闭"]').click()
-} catch {
-  check('状态条点名 top 进程 chip', false, 'chip 未出现')
+// ---- ④ 本机容器性能监控概览（终端状态条已移除，概览页是 watch_stats 的落点）----
+await win.locator('.terminal-container:visible').first().click({ button: 'right' })
+await win.waitForTimeout(400)
+await win.locator('.context-menu button', { hasText: '性能监控' }).click()
+await win.locator('.mon-panel').waitFor({ timeout: 5000 })
+let coreCount = 0
+for (let k = 0; k < 15 && coreCount === 0; k++) {
+  await win.waitForTimeout(1000)
+  coreCount = await win.locator('.mon-panel .core-box').count()
 }
+check('本机容器性能监控概览出现（每核格子）', coreCount > 0, `cores=${coreCount}`)
+const ovText = (await win.locator('.mon-panel .page:visible').textContent()) ?? ''
+check('概览点名 top 进程（谁在吃 CPU）', ovText.includes('谁在吃 CPU'), ovText.slice(0, 200))
+await win.screenshot({ path: 'shots/88-v050-topproc.png' })
+await win.locator('.mon-panel button[title="关闭"]').click()
 
 // ---- ⑤ SFTP 面板：点用量条展开 du 分解 ----
 await win.locator('button.bar-btn:has-text("SFTP")').click()

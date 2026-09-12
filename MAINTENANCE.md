@@ -331,6 +331,14 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
   （sys 10s+）——「就几千个文件很快」的假设不成立。凡是全量扫 /proc
   的代码必须：先确定要找什么（inode 集合）、找到即早退、再设总时间
   预算（net.go 的 socketScanBudget = 800ms），超预算返回部分结果。
+- **通道闭包别捕获「彼时的」意图表。** AgentManager.connect() 的 onData
+  闭包曾捕获建连瞬间的 watches 条目 —— 通道若是 agentCall 先建的
+  （彼时没有任何订阅），之后订阅的帧会全部静默丢弃（`if (w)` 永远 false）。
+  派发时必须现查（`this.watches.get(key)`）。症状：UI 偶尔整页没数据，
+  且和点击顺序有关。
+- **大表格必须限制渲染行数。** 千级进程的宿主机上，进程表全量 v-for
+  每 2s 重绘能把 Electron 渲染进程打到 80%+ —— 排序照全量排，只渲染
+  前 300 行，尾部给「共 N 条」提示（MonitorPanel 的 *_RENDER_CAP）。
 
 ---
 

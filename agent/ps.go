@@ -233,10 +233,12 @@ func psList(params json.RawMessage) (interface{}, error) {
 		if !seen {
 			continue // 第一轮之后才出生的进程没有差分基准，下轮再见
 		}
-		after, ok := readProcSample(pid)
+		after, ok := readProcSampleLight(pid) // 第二轮只要差分字段（utime/stime/rss），status/cmdline 白读两次是浪费
 		if !ok {
 			continue // 采样间隙退出了
 		}
+		// 轻量采样不带 uid/command：沿用第一轮的（采样窗内不会变）
+		after.uid, after.command = before.uid, before.command
 		user := passwd[after.uid]
 		if user == "" {
 			user = after.uid
