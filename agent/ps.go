@@ -42,26 +42,27 @@ type procSample struct {
 // parseProcStat 解析 /proc/<pid>/stat。
 // comm 在括号里且可以含空格甚至括号本身（线程名 "（lunarlens）" 这类），
 // 所以不能用 Fields 直接切：先找最后一个 ')'，后面的字段从 state(3) 开始数。
-func parseProcStat(content string) (pid, ppid int, utime, stime uint64, comm string, ok bool) {
+func parseProcStat(content string) (pid, ppid int, utime, stime uint64, rssPages int64, comm string, ok bool) {
 	open := strings.IndexByte(content, '(')
 	closeIdx := strings.LastIndexByte(content, ')')
 	if open < 0 || closeIdx < open {
-		return 0, 0, 0, 0, "", false
+		return 0, 0, 0, 0, 0, "", false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(content[:open]))
 	if err != nil {
-		return 0, 0, 0, 0, "", false
+		return 0, 0, 0, 0, 0, "", false
 	}
 	comm = content[open+1 : closeIdx]
 	rest := strings.Fields(content[closeIdx+1:])
-	// rest[0]=state(3) rest[1]=ppid(4) … rest[11]=utime(14) rest[12]=stime(15)
-	if len(rest) < 13 {
-		return 0, 0, 0, 0, "", false
+	// rest[0]=state(3) rest[1]=ppid(4) … rest[11]=utime(14) rest[12]=stime(15) … rest[21]=rss(24，页)
+	if len(rest) < 22 {
+		return 0, 0, 0, 0, 0, "", false
 	}
 	ppid, _ = strconv.Atoi(rest[1])
 	utime, _ = strconv.ParseUint(rest[11], 10, 64)
 	stime, _ = strconv.ParseUint(rest[12], 10, 64)
-	return pid, ppid, utime, stime, comm, true
+	rssPages, _ = strconv.ParseInt(rest[21], 10, 64)
+	return pid, ppid, utime, stime, rssPages, comm, true
 }
 
 // readProcSample 读一个 pid 的 stat/status/cmdline；进程已走返回 ok=false
@@ -71,7 +72,7 @@ func readProcSample(pid int) (procSample, bool) {
 	if err != nil {
 		return s, false
 	}
-	spid, ppid, utime, stime, comm, ok := parseProcStat(string(statRaw))
+	spid, ppid, utime, stime, _, comm, ok := parseProcStat(string(statRaw))
 	if !ok || spid != pid {
 		return s, false
 	}
@@ -94,15 +95,43 @@ func readProcSample(pid int) (procSample, bool) {
 	}
 
 	// cmdline 是 NUL 分隔；内核线程为空，退回 [comm]
-	if cmdRaw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
-		cmd := strings.Join(strings.Fields(strings.ReplaceAll(string(cmdRaw), "\x00", " ")), " ")
-		if cmd != "" {
-			s.command = cmd
-		}
+	if cmd := readProcCmdline(pid); cmd != "" {
+		s.command = cmd
 	}
 	if s.command == "" {
 		s.command = "[" + comm + "]"
 	}
+	return s, true
+}
+
+// readProcCmdline 读完整命令行（NUL 分隔 → 空格）；读不到返回空串
+func readProcCmdline(pid int) string {
+	cmdRaw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.ReplaceAll(string(cmdRaw), "\x00", " ")), " ")
+}
+
+// readProcSampleLight 只读 stat（utime/stime + rss 页数 + comm）。
+// watch_stats 每帧全量采样走它：每进程省掉 status/cmdline 两次文件读
+// （千级进程的宿主机上这是帧成本的大头），完整 cmdline 只在 top 榜
+// 点名后补读。
+func readProcSampleLight(pid int) (procSample, bool) {
+	var s procSample
+	statRaw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return s, false
+	}
+	spid, ppid, utime, stime, rssPages, comm, ok := parseProcStat(string(statRaw))
+	if !ok || spid != pid {
+		return s, false
+	}
+	s.pid, s.ppid, s.utime, s.stime = pid, ppid, utime, stime
+	if rssPages > 0 {
+		s.rss = rssPages * int64(os.Getpagesize())
+	}
+	s.command = "[" + comm + "]"
 	return s, true
 }
 
@@ -249,7 +278,7 @@ func sampleProcTimes() map[int]procSample {
 		return out
 	}
 	for _, pid := range pids {
-		if s, ok := readProcSample(pid); ok {
+		if s, ok := readProcSampleLight(pid); ok {
 			out[pid] = s
 		}
 	}
@@ -278,6 +307,12 @@ func topProcs(prev, cur map[int]procSample, totalDelta float64, memTotalBytes fl
 	sort.Slice(all, func(i, j int) bool { return all[i].CPUPercent > all[j].CPUPercent })
 	if len(all) > n {
 		all = all[:n]
+	}
+	// 只有上榜的几个值得补读完整 cmdline（全量读每帧太费）
+	for i := range all {
+		if cmd := readProcCmdline(all[i].Pid); cmd != "" {
+			all[i].Command = cmd
+		}
 	}
 	return all
 }

@@ -341,6 +341,12 @@ export const useSessionStore = defineStore('sessions', () => {
     delete homeBySession[sessionId]
     delete exitCodeBySession[sessionId]
     pendingStatus.delete(sessionId)
+    // 监控面板的宿主机目标死了就收面板 —— 概览的数据订阅挂在发起页上，
+    // 发起页没了会定格假数据；本机容器目标的轮询还会重新 spawn agent
+    // 通道而没有任何代码路径关它
+    if (monitorTarget.value && !monitorTarget.value.containerName && monitorTarget.value.sessionId === sessionId) {
+      closeMonitor()
+    }
   }
 
   async function connectPane(tab: SessionTab, pane: PaneState): Promise<void> {
@@ -636,6 +642,11 @@ export const useSessionStore = defineStore('sessions', () => {
     tabs.value = tabs.value.filter((t) => t.tabId !== tab.tabId)
     // 直连容器标签关掉后，承载它的传输会话若已无人使用（侧栏也没展开）顺手断掉
     if (tab.kind === 'container' && tab.container) {
+      // 监控面板的目标是这个容器也一起收（它的 sessionId 是父会话，clearSessionState 管不到）
+      const m = monitorTarget.value
+      if (m && m.containerName === tab.container.containerName && m.sessionId === tab.container.parentSessionId) {
+        closeMonitor()
+      }
       const parent = tab.container.parentSessionId
       const savedId = Object.keys(transports).find((k) => transports[k] === parent)
       if (savedId) releaseTransportIfIdle(savedId)

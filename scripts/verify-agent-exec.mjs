@@ -71,7 +71,7 @@ check('会话已建立', !!sid)
 
 // 安装宿主机助手（opt-in 的显式调用，等同 UI 点按钮）
 const st = await win.evaluate((id) => window.api.agentInstall(id), sid)
-check('宿主机助手安装成功（0.4.0）', st.installed && st.version === '0.4.0', JSON.stringify(st))
+check('宿主机助手安装成功（当前内置版本）', st.installed && typeof st.version === 'string' && st.version.length > 0, JSON.stringify(st))
 
 const call = (method, params) =>
   win.evaluate(({ id, method, params }) => window.api.agentCall(id, undefined, method, params), { id: sid, method, params })

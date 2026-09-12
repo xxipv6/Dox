@@ -31,6 +31,17 @@ const props = defineProps<{
 const store = useSessionStore()
 const tab = ref(props.initialTab ?? 'overview')
 
+// App.vue 的 :key 只含 sessionId:containerName —— 面板已开时再点状态条的
+// top 进程 chip（openMonitor 带新 tab/filter），组件不重挂载，props 的
+// 变化要靠这个 watch 同步进来，否则点击毫无反馈
+watch(
+  () => [props.initialTab, props.initialFilter] as const,
+  ([t, f]) => {
+    if (t) tab.value = t
+    if (f !== undefined) filter.value = f
+  }
+)
+
 // ================= 概览：watch_stats 被动监听 =================
 
 const stats = ref<AgentStatsPayload | null>(null)
@@ -61,11 +72,17 @@ const connsTruncated = ref(false)
 const connsError = ref('')
 const connsLoading = ref(false)
 const connsFilter = ref('')
+/** 进程页「看它的连接」带过来的精确 PID 过滤（全文搜索框会被端口子串污染：
+ *  PID 443 会把所有 :443 端口的连接都捞进来，所以走独立字段精确匹配） */
+const connsPid = ref<number | null>(null)
+let connsInFlight = false
 
 const filteredConns = computed(() => {
+  let list = conns.value
+  if (connsPid.value !== null) list = list.filter((c) => c.pid === connsPid.value)
   const q = connsFilter.value.trim().toLowerCase()
-  if (!q) return conns.value
-  return conns.value.filter(
+  if (!q) return list
+  return list.filter(
     (c) =>
       c.local_addr.includes(q) ||
       c.remote_addr.includes(q) ||
@@ -77,6 +94,10 @@ const filteredConns = computed(() => {
 })
 
 async function refreshConns(): Promise<void> {
+  // net_conns 的 socketOwners 是全量 /proc/[pid]/fd 扫描，慢机器上秒级；
+  // 上一次没回来就再发，请求会在 agent 串行循环里只进不出地积压
+  if (connsInFlight) return
+  connsInFlight = true
   connsLoading.value = conns.value.length === 0
   try {
     const r = (await window.api.agentCall(props.sessionId, props.containerName, 'net_conns', {})) as {
@@ -92,6 +113,7 @@ async function refreshConns(): Promise<void> {
       ? '连接表需要助手 v0.6.0，请在侧栏「远程助手」升级'
       : msg
   } finally {
+    connsInFlight = false
     connsLoading.value = false
   }
 }
@@ -154,7 +176,11 @@ function formatRss(bytes: number): string {
   return `${v.toFixed(1)} ${units[i]}`
 }
 
+let procInFlight = false
+
 async function refreshProcs(): Promise<void> {
+  if (procInFlight) return
+  procInFlight = true
   try {
     const r = await window.api.procList(props.sessionId, props.containerName)
     processes.value = r.processes
@@ -167,6 +193,7 @@ async function refreshProcs(): Promise<void> {
   } catch (err) {
     procError.value = err instanceof Error ? err.message : String(err)
   } finally {
+    procInFlight = false
     procLoading.value = false
   }
 }
@@ -189,9 +216,10 @@ function canForceKill(pid: number): boolean {
   return t !== undefined && Date.now() - t > 5000
 }
 
-/** 进程页行点击 → 网络页按 PID 过滤（从「谁」跳到「它在和谁说话」） */
+/** 进程页行点击 → 网络页按 PID 精确过滤（从「谁」跳到「它在和谁说话」） */
 function jumpToConns(p: ProcInfo): void {
-  connsFilter.value = String(p.pid)
+  connsPid.value = p.pid
+  connsFilter.value = ''
   tab.value = 'network'
 }
 
@@ -299,8 +327,9 @@ onBeforeUnmount(() => {
         </div>
       </template>
       <div v-else class="hint">
-        <Spinner v-if="statsLive === false && !stats" text="等待状态推送…（需要安装远程助手）" />
-        <template v-else>助手连接中…</template>
+        <!-- 从未收到帧 = 等待推送；收到过又断了 = 断线（定格旧数据不能假装在线） -->
+        <Spinner v-if="!stats" text="等待状态推送…（需要安装远程助手）" />
+        <template v-else>助手已断线，等待重连…</template>
       </div>
     </div>
 
@@ -309,6 +338,10 @@ onBeforeUnmount(() => {
       <div class="filter-row">
         <Icon name="search" :size="13" />
         <input v-model="connsFilter" placeholder="过滤：地址 / 端口 / 进程 / 状态 / PID" spellcheck="false" />
+        <span v-if="connsPid !== null" class="pid-chip" title="只看这个进程的连接">
+          PID {{ connsPid }}
+          <button class="chip-x" title="清除 PID 过滤" @click="connsPid = null"><Icon name="x" :size="11" /></button>
+        </span>
         <span v-if="connsTruncated" class="via-note" title="连接太多被截断">截断</span>
       </div>
       <div v-if="connsError" class="error-banner">
@@ -335,7 +368,7 @@ onBeforeUnmount(() => {
             c.process ? `${c.process}${c.pid ? `(${c.pid})` : ''}` : '—'
           }}</span>
         </div>
-        <div v-if="!filteredConns.length" class="hint">{{ connsFilter ? '没有匹配的连接' : '没有连接' }}</div>
+        <div v-if="!filteredConns.length" class="hint">{{ connsFilter || connsPid !== null ? '没有匹配的连接' : '没有连接' }}</div>
       </div>
     </div>
 
@@ -621,6 +654,25 @@ onBeforeUnmount(() => {
   background: var(--warning-soft);
   border-radius: var(--r-pill);
   padding: 0 8px;
+}
+.pid-chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-radius: var(--r-pill);
+  padding: 0 4px 0 8px;
+}
+.pid-chip .chip-x {
+  display: inline-flex;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 1px;
 }
 .error-banner {
   padding: 6px 10px;

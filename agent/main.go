@@ -5,8 +5,9 @@
 // SSH 会话就是全部权限边界。
 //
 // 子命令：
-//   version  打印一行 JSON 版本信息（安装校验用）
-//   serve    进入请求/事件循环（hello / watch_ports / stop）
+//
+//	version  打印一行 JSON 版本信息（安装校验用）
+//	serve    进入请求/事件循环（hello / watch_ports / stop）
 package main
 
 import (
@@ -17,7 +18,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.6.0"
+var version = "0.6.1"
 
 type request struct {
 	ID     int             `json:"id"`

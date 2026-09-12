@@ -1,6 +1,6 @@
 /**
  * 性能监控面板端到端（全程本机容器）：
- *  本机 alpine 容器 → 装助手 0.6.0 → 右键「性能监控」→
+ *  本机 alpine 容器 → 装助手 0.6.1 → 右键「性能监控」→
  *  概览：每核格子数 > 0 + 内存条 →
  *  网络：nc 起一个监听，连接表出现 LISTEN:8321（带进程名）→
  *  进程：列出 sleep 3600 → 点 PID 跳网络页且过滤预设 →
@@ -61,7 +61,7 @@ try {
   await win.locator('.sidebar .agent-ok', { hasText: '已安装' }).waitFor({ timeout: 30000 })
   installOk = true
 } catch { /* 超时 */ }
-check('助手 0.6.0 安装成功', installOk)
+check('助手 0.6.1 安装成功', installOk)
 
 // nc 监听一个端口，让连接表有东西可看
 await win.evaluate(async (name) => {
@@ -115,12 +115,29 @@ const pidText = (await pidCell.textContent())?.trim() ?? ''
 await pidCell.click()
 await win.waitForTimeout(600)
 const tabNow = await win.locator('.mon-panel .tab-bar button.active').textContent()
+// PID 过滤走独立的精确匹配 chip（全文框会被 :443 这类端口子串污染），搜索框保持为空
+const chipText = (await win.locator('.mon-panel .pid-chip').textContent().catch(() => '')) ?? ''
 const connFilterVal = await win.locator('.mon-panel .page:visible .filter-row input').first().inputValue()
 check(
-  '点 PID 跳网络页且过滤预设为 PID',
-  (tabNow ?? '').includes('网络') && connFilterVal === pidText,
-  `tab=${tabNow} filter=${connFilterVal} pid=${pidText}`
+  '点 PID 跳网络页且出精确过滤 chip',
+  (tabNow ?? '').includes('网络') && chipText.includes(pidText) && connFilterVal === '',
+  `tab=${tabNow} chip=${chipText} filter=${connFilterVal} pid=${pidText}`
 )
+
+// ---- 关掉发起标签 → 面板必须一起收（否则概览定格假数据、本机容器轮询泄漏 agent 通道）----
+// 走真实 UI：标签条上的关闭按钮
+const activeTabClose = win.locator('.tab.active .tab-close, .tab.active button[title="关闭"]').first()
+if ((await activeTabClose.count()) > 0) {
+  await activeTabClose.click()
+} else {
+  // 退路：直接调 store 关活跃标签
+  await win.evaluate(() => {
+    const tabs = document.querySelectorAll('.tab')
+    tabs[tabs.length - 1]?.querySelector('.tab-close')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+}
+await win.waitForTimeout(800)
+check('关闭发起标签后面板一起收', (await win.locator('.mon-panel').count()) === 0)
 
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 await app.close()

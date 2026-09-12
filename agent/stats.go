@@ -266,6 +266,12 @@ func watchStats(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 	}
 	prevProcs := sampleProcTimes()
 
+	// nvidia-smi 每次 spawn 都要加载 NVML（几十~几百 ms、几十 MB 瞬时内存），
+	// 跟着 3s 帧率每帧起一个是 watch_stats 最大的资源浪费 —— GPU 利用率
+	// 不需要秒级分辨率，每 5 帧（~15s）刷一次，帧间沿用上帧结果
+	var lastGpus []gpuStat
+	frame := 0
+
 	push := func() bool {
 		f, err := os.Open("/proc/stat")
 		if err != nil {
@@ -287,11 +293,15 @@ func watchStats(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 			return true
 		}
 		curProcs := sampleProcTimes()
+		if nvidiaSmi != "" && frame%5 == 0 {
+			lastGpus = queryGPUs(nvidiaSmi)
+		}
+		frame++
 		_ = enc.Encode(event{Event: "stats", Data: statsPayload{
 			CPUPercent: cpuPercent(prev, cur),
 			MemTotalMB: totalMB,
 			MemUsedMB:  usedMB,
-			Gpus:       queryGPUs(nvidiaSmi),
+			Gpus:       lastGpus,
 			TopProcs:   topProcs(prevProcs, curProcs, float64(cur.total-prev.total), float64(totalMB)*1024*1024, 3),
 			Cpus:       corePercents(prevCores, curCores),
 		}})
