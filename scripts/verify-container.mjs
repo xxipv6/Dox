@@ -464,11 +464,27 @@ if (!hasRuntime) {
     }
     check('窗口变化传到了容器里（stty size 变了）', !!after && after !== before, `${before} → ${after}`)
 
-    // SFTP 面板只属于宿主机会话：切到容器标签应当收起来，切回来还在
+    // SFTP 面板跟随活动标签换绑（容器文件管理上线后的现行行为）：
+    // 切到容器标签 → 面板换绑到该容器（没装 agent 时给安装引导，不是宿主文件列表）；
+    // 切回宿主机标签 → 面板换回宿主文件列表。
     await focusTab(CONTAINER_TAB_PREFIX)
-    check('容器标签下不显示 SFTP 面板', (await win.locator('.explorer').count()) === 0)
+    await win.waitForTimeout(800)
+    check('容器标签下面板换绑到容器（徽章或安装引导）', await win.evaluate(() => {
+      const el = document.querySelector('.explorer')
+      if (!el || el.offsetParent === null) return false
+      // 装了 agent：容器名徽章 + 容器内文件列表；没装：安装引导。两者都证明换绑成功。
+      return el.querySelector('.ctr-badge') !== null || el.textContent.includes('安装到容器')
+    }), await win.evaluate(() => {
+      const el = document.querySelector('.explorer')
+      return el ? `[visible=${el.offsetParent !== null}] ` + el.textContent.trim().slice(0, 120) : '(无 .explorer)'
+    }))
     await focusTab(hostTabTitle)
-    check('切回宿主机标签后 SFTP 面板还在', (await win.locator('.explorer').count()) === 1)
+    await win.waitForTimeout(800)
+    check('切回宿主机标签后面板换回宿主文件列表', await win.evaluate(() => {
+      const el = document.querySelector('.explorer')
+      if (!el || el.offsetParent === null) return false
+      return !el.textContent.includes('安装到容器') && el.querySelector('.file-list') !== null
+    }))
 
     // ---------- 阶段 4：父会话断开 ----------
     console.log('\n阶段 4：父会话断开时的行为')

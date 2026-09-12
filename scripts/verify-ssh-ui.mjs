@@ -39,8 +39,8 @@ await win.waitForFunction(
   undefined, { timeout: 15000 }
 )
 
-// 打开添加设备弹窗
-await win.locator('.add-btn').click()
+// 打开添加设备弹窗（侧栏改版后是 title 按钮，旧的 .add-btn 已不存在）
+await win.locator('button[title="添加设备"]').click()
 await win.waitForTimeout(500)
 
 // 填表：密码故意填错，验证失败路径是否有可见反馈

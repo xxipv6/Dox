@@ -46,7 +46,7 @@ console.log('终端尺寸信息:', JSON.stringify(termInfo))
 await win.screenshot({ path: join(outDir, '01-main.png') })
 
 // 打开「添加设备」弹窗
-const addBtn = win.locator('.add-btn')
+const addBtn = win.locator('button[title="添加设备"]')
 if (await addBtn.count()) {
   await addBtn.click()
   await win.waitForTimeout(600)

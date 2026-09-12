@@ -271,7 +271,7 @@ check(
 // 反复用错误的密码重试会触发服务器 fail2ban / 账户锁定，
 // 把「重连」变成「封号」。这是整条重连逻辑里最不能出错的一条。
 const logBeforeAuth = (await statusLog()).length
-await win.locator('.add-btn').click()
+await win.locator('button[title="添加设备"]').click()
 await win.waitForTimeout(500)
 await win.locator('input[placeholder^="192.168"]').fill(target.host)
 await win.locator('input[placeholder="root"]').fill(target.username)

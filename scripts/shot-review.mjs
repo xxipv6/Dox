@@ -54,7 +54,7 @@ for (const [label, name] of [
 
 // 3. 添加设备弹窗
 console.log('弹窗')
-const addBtn = win.locator('.add-btn')
+const addBtn = win.locator('button[title="添加设备"]')
 if (await addBtn.count()) {
   await addBtn.click()
   await win.waitForTimeout(600)

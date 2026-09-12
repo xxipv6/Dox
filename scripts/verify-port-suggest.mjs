@@ -13,10 +13,20 @@
  */
 import { _electron as electron } from 'playwright'
 import { Client } from 'ssh2'
-import { execFileSync } from 'node:child_process'
+import net from 'node:net'
 import { mkdirSync } from 'node:fs'
 import { detectListenPorts, extractPorts, hasListenHint } from '../src/renderer/src/utils/portSuggest.ts'
 import { parseInspectIp } from '../src/main/container/runtime.ts'
+
+/** 本机 TCP 连通性检查（跨平台：Windows 没有 nc -z，用 net.connect 等价实现） */
+function tcpReachable(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port, timeout: 3000 })
+    socket.once('connect', () => { socket.destroy(); resolve(true) })
+    socket.once('error', () => { socket.destroy(); resolve(false) })
+    socket.once('timeout', () => { socket.destroy(); resolve(false) })
+  })
+}
 
 let failed = false
 const check = (name, cond, extra = '') => {
@@ -164,13 +174,11 @@ await win.screenshot({ path: 'shots/61-port-suggest-done.png' })
 let reachable = false
 if (rule?.status === 'active') {
   for (let i = 0; i < 5; i++) {
-    try {
-      execFileSync('nc', ['-z', '127.0.0.1', String(rule.listenPort)], { timeout: 3000 })
+    if (await tcpReachable(rule.listenPort)) {
       reachable = true
       break
-    } catch {
-      await new Promise((r) => setTimeout(r, 500))
     }
+    await new Promise((r) => setTimeout(r, 500))
   }
 }
 check('本机经转发连通远端监听', reachable)

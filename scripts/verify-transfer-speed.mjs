@@ -152,9 +152,20 @@ await win.locator(`.explorer .file-list .row`).filter({ hasText: basename(localF
 await win.waitForTimeout(400)
 await win.locator('.context-menu .menu-item', { hasText: /^下载$/ }).click()
 const t1 = Date.now()
-const dlTasks = await waitTransfersSettled()
+/*
+ * 先等下载任务真的入队再判定 settled —— 已完成的上传任务要在列表里躺几秒才
+ * 自动消失，直接调 waitTransfersSettled 会在下载任务出现前就撞上「全部 done」
+ * 而秒回（Windows 上稳定复现：报「下载完成」但本地根本没有文件）。
+ */
+{
+  const deadline = Date.now() + 15000
+  while (!(await tasks()).some((t) => t.direction === 'download') && Date.now() < deadline)
+    await win.waitForTimeout(300)
+}
+const dlTasks = (await waitTransfersSettled()).filter((t) => t.direction === 'download')
 const dlSec = (Date.now() - t1) / 1000
-check('下载完成', dlTasks.every((t) => t.status === 'done'), JSON.stringify(dlTasks.map((t) => t.status + ':' + (t.error ?? ''))))
+check('下载任务入队', dlTasks.length > 0)
+check('下载完成', dlTasks.length > 0 && dlTasks.every((t) => t.status === 'done'), JSON.stringify(dlTasks.map((t) => t.status + ':' + (t.error ?? ''))))
 console.log(`  下载 ${(SIZE / 1024 / 1024 / dlSec).toFixed(1)} MB/s（${dlSec.toFixed(1)}s）`)
 const dlHash = sha256(readFileSync(downloadTo))
 check('下载 sha256 一致', dlHash === localHash, `${dlHash} != ${localHash}`)

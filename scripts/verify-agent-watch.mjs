@@ -10,9 +10,19 @@
  */
 import { _electron as electron } from 'playwright'
 import { Client } from 'ssh2'
-import { execFileSync } from 'node:child_process'
+import net from 'node:net'
 import { createReadStream } from 'node:fs'
 import { mkdirSync } from 'node:fs'
+
+/** 本机 TCP 连通性检查（跨平台：Windows 没有 nc -z，用 net.connect 等价实现） */
+function tcpReachable(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port, timeout: 3000 })
+    socket.once('connect', () => { socket.destroy(); resolve(true) })
+    socket.once('error', () => { socket.destroy(); resolve(false) })
+    socket.once('timeout', () => { socket.destroy(); resolve(false) })
+  })
+}
 
 const host = process.argv[2]
 if (!host) {
@@ -157,13 +167,11 @@ check('转发规则 active', !!rule, JSON.stringify(rules))
 let reachable = false
 if (rule) {
   for (let i = 0; i < 5; i++) {
-    try {
-      execFileSync('nc', ['-z', '127.0.0.1', String(rule.listenPort)], { timeout: 3000 })
+    if (await tcpReachable(rule.listenPort)) {
       reachable = true
       break
-    } catch {
-      await new Promise((r) => setTimeout(r, 500))
     }
+    await new Promise((r) => setTimeout(r, 500))
   }
 }
 check('本机经转发连通', reachable)

@@ -145,13 +145,13 @@ check('UI 新建文件夹在容器里真实出现', mkdirCheck.trim() === 'YES',
 // ---- 上传（enqueueDropped：文件 + 目录）----
 // 面板只是参数转发，传输走 IPC 级验证；新开一条会话当父会话（语义与面板相同）。
 // connect 可能弹指纹确认（容器重建过），并行盯掉对话框，否则 evaluate 会吊死
-const upSessionP = win.evaluate(async () => {
+const upSessionP = win.evaluate(async (target) => {
   const id = await window.api.connect(
-    { host: 'localhost', port: 2222, username: 'doxtest', auth: { type: 'password', password: 'doxtest123' } },
+    { host: target.host, port: target.port, username: target.user, auth: { type: 'password', password: target.password } },
     { cols: 80, rows: 24 }
   )
   return id
-})
+}, { host, port, user, password })
 let upSession = null
 for (let i = 0; i < 15 && upSession === null; i++) {
   await win.waitForTimeout(800)
@@ -188,7 +188,8 @@ await win.locator('.explorer .row', { hasText: 'hello.txt' }).first().dblclick()
 await win.waitForTimeout(2500)
 // CodeMirror 改内容：全选替换
 await win.locator('.editor-panel .cm-content').click()
-await win.keyboard.press('Meta+a')
+// CodeMirror 的 Mod 在 macOS 是 ⌘、其他平台是 Ctrl（与 verify-editor 的 SAVE_KEY 同一口径）
+await win.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a')
 await win.keyboard.type('编辑后的内容 from-dox\n')
 await win.locator('.editor-panel button:has-text("保存")').click()
 await win.waitForTimeout(2500)
