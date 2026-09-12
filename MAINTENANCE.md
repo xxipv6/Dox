@@ -326,6 +326,11 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
 - **验证夹具要清上次的靶子进程。** 「过滤后只剩 sleep 300」这种计数断言，
   上一次跑挂留下的同名进程会让计数 +1 —— 夹具开头先 `pkill -f` 清场，
   只清文件不清进程是不够的。
+- **/proc/[pid]/fd 的 readlink 可以阻塞到秒级。** 卡死的 NFS/FUSE 挂载点
+  会让单个 readlink 挂住，全机 fd 扫描在真实机器上实测吃过 11.6s
+  （sys 10s+）——「就几千个文件很快」的假设不成立。凡是全量扫 /proc
+  的代码必须：先确定要找什么（inode 集合）、找到即早退、再设总时间
+  预算（net.go 的 socketScanBudget = 800ms），超预算返回部分结果。
 
 ---
 

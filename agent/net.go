@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type netConn struct {
@@ -118,8 +119,14 @@ func parseProcNetFile(path, proto string, v6, isUDP bool) []netConn {
 }
 
 // socketOwners：扫 /proc/[pid]/fd，建 socket inode → (pid, comm) 映射。
-// fd 数量远比连接多，但都是 readlink 一次，千级以内毫秒完成。
-func socketOwners() map[uint64]struct {
+//
+// 两个硬约束，都是在真实机器上踩出来的：
+//  1. 只找 needed 里的 inode，找齐立刻早退 —— 连接表里的 socket 通常只有
+//     几个~几百个，而 fd 总数可能上万；全量扫是纯粹的浪费
+//  2. 总时间预算兜底 —— 有的机器个别 fd（卡死的 NFS/FUSE 挂载点）会让
+//     readlink 阻塞到秒级，全机扫一遍能吃掉 10s+ CPU；超预算就返回
+//     部分结果（那几条连接没有进程名，表照样能看）
+func socketOwners(needed map[uint64]bool, deadline time.Time) map[uint64]struct {
 	pid  int
 	comm string
 } {
@@ -127,11 +134,17 @@ func socketOwners() map[uint64]struct {
 		pid  int
 		comm string
 	})
+	if len(needed) == 0 {
+		return owners
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return owners
 	}
 	for _, e := range entries {
+		if len(owners) == len(needed) || time.Now().After(deadline) {
+			break
+		}
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
 			continue
@@ -146,7 +159,7 @@ func socketOwners() map[uint64]struct {
 				continue
 			}
 			inode, err := strconv.ParseUint(link[8:len(link)-1], 10, 64)
-			if err != nil {
+			if err != nil || !needed[inode] {
 				continue
 			}
 			if _, seen := owners[inode]; seen {
@@ -162,6 +175,10 @@ func socketOwners() map[uint64]struct {
 	return owners
 }
 
+// socketOwners 的扫描预算：超过就放弃剩余映射（连接行没有进程名而已），
+// 绝不让一次 net_conns 吃掉秒级 CPU
+const socketScanBudget = 800 * time.Millisecond
+
 func netConns(params json.RawMessage) (interface{}, error) {
 	_ = params
 	var conns []netConn
@@ -173,7 +190,11 @@ func netConns(params json.RawMessage) (interface{}, error) {
 		return nil, errors.New("读不到 /proc/net/*（非 Linux？）")
 	}
 
-	owners := socketOwners()
+	needed := make(map[uint64]bool, len(conns))
+	for _, c := range conns {
+		needed[uint64(c.Pid)] = true // 此阶段 Pid 暂存 inode
+	}
+	owners := socketOwners(needed, time.Now().Add(socketScanBudget))
 	for i := range conns {
 		inode := uint64(conns[i].Pid)
 		conns[i].Pid = 0

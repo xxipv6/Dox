@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeHexAddr(t *testing.T) {
@@ -64,5 +65,21 @@ func TestParseProcNetUDP(t *testing.T) {
 func TestParseProcNetMissing(t *testing.T) {
 	if conns := parseProcNetFile("/nonexistent/tcp6", "tcp6", true, false); conns != nil {
 		t.Fatalf("文件不存在应返回 nil（容器可能没有 ipv6），实得 %v", conns)
+	}
+}
+
+func TestSocketOwnersEmptyNeeded(t *testing.T) {
+	// 连接表为空时一个 fd 都不该扫
+	owners := socketOwners(map[uint64]bool{}, time.Now().Add(time.Minute))
+	if len(owners) != 0 {
+		t.Fatalf("空 needed 必须秒回空表，拿到 %d 项", len(owners))
+	}
+}
+
+func TestSocketOwnersRespectsDeadline(t *testing.T) {
+	// 预算已过期：即使有需要映射的 inode 也必须立刻停（卡死 fd 的兜底）
+	owners := socketOwners(map[uint64]bool{1: true}, time.Now().Add(-time.Second))
+	if len(owners) != 0 {
+		t.Fatalf("过期预算必须返回空表，拿到 %d 项", len(owners))
 	}
 }

@@ -18,7 +18,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.6.1"
+var version = "0.6.2"
 
 type request struct {
 	ID     int             `json:"id"`
