@@ -374,6 +374,14 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
   transition: width var(--dur-slow) var(--ease-out);
+  /*
+   * 它是网格项：默认 min-height: auto 会让长内容（几十台容器/设备）把
+   * 1fr 行轨顶出视口 —— 表现为「滚轮滚不动、下面的分区看不见」，其实是
+   * 整条侧栏长到了窗口外，sidebar-body 的 overflow 根本没机会生效。
+   */
+  min-height: 0;
+  /* 同理：宽度也被网格管着，别让自己的内容顶破 */
+  min-width: 0;
 }
 .sidebar.collapsed {
   width: 44px;
