@@ -197,6 +197,14 @@ func psList(params json.RawMessage) (interface{}, error) {
 		p.SampleMs = 5000
 	}
 
+	// 总 jiffies 基准必须把两轮全量采样**包在里面**，而不是只包中间的 sleep：
+	// 逐进程差分窗口是「第一轮读到它 → 第二轮读到它」（含两轮循环本身的耗时），
+	// 基准若只盖 sleep，慢机器上所有进程的 CPU% 会被成比例放大
+	//（实测 1822 进程的机器上 agent 自己被报成 63%，真实值 21%）
+	totalBefore, err := readTotalCPUTimes()
+	if err != nil {
+		return nil, err
+	}
 	pids, err := listPids()
 	if err != nil {
 		return nil, err
@@ -207,13 +215,18 @@ func psList(params json.RawMessage) (interface{}, error) {
 			first[pid] = s
 		}
 	}
-	totalBefore, err := readTotalCPUTimes()
-	if err != nil {
-		return nil, err
-	}
 
 	time.Sleep(time.Duration(p.SampleMs) * time.Millisecond)
 
+	second := map[int]procSample{}
+	for _, pid := range pids {
+		if _, seen := first[pid]; !seen {
+			continue // 第一轮之后才出生的进程没有差分基准，下轮再见
+		}
+		if s, ok := readProcSampleLight(pid); ok { // 第二轮只要差分字段（utime/stime/rss），status/cmdline 白读两次是浪费
+			second[pid] = s
+		}
+	}
 	totalAfter, err := readTotalCPUTimes()
 	if err != nil {
 		return nil, err
@@ -231,9 +244,9 @@ func psList(params json.RawMessage) (interface{}, error) {
 	for _, pid := range pids {
 		before, seen := first[pid]
 		if !seen {
-			continue // 第一轮之后才出生的进程没有差分基准，下轮再见
+			continue
 		}
-		after, ok := readProcSampleLight(pid) // 第二轮只要差分字段（utime/stime/rss），status/cmdline 白读两次是浪费
+		after, ok := second[pid]
 		if !ok {
 			continue // 采样间隙退出了
 		}
