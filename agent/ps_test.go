@@ -2,10 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"runtime"
 	"testing"
 )
+
+// cpuPercent 断言用近似相等：delta/totalDelta 是浮点除法，0.1×12 这类
+// 结果随机器核数不同可能差一个 ULP（12 核机器上 120.00000000000001 ≠ 120）。
+func approxEq(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 func TestParseProcStat(t *testing.T) {
 	// 真实现：/proc/1/stat 形状
@@ -75,10 +80,10 @@ func TestTopProcs(t *testing.T) {
 	if len(top) != 2 {
 		t.Fatalf("新进程无基准不该出现: %+v", top)
 	}
-	if top[0].Pid != 100 || top[0].CPUPercent != 50*ncpu {
+	if top[0].Pid != 100 || !approxEq(top[0].CPUPercent, 50*ncpu) {
 		t.Fatalf("top1 应为 ffmpeg 50%%×核数: %+v", top[0])
 	}
-	if top[1].Pid != 200 || top[1].CPUPercent != 10*ncpu {
+	if top[1].Pid != 200 || !approxEq(top[1].CPUPercent, 10*ncpu) {
 		t.Fatalf("top2 应为 sshd 10%%×核数: %+v", top[1])
 	}
 	if top[0].MemPercent != 50 {

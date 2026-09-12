@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -368,9 +367,7 @@ func topProcs(prev, cur map[int]procSample, totalDelta float64, memTotalBytes fl
 	return all
 }
 
-// ps_kill 的信号白名单：TERM 先礼后兵，KILL 兜底。其余信号（STOP/CONT…）
-// 对「结束任务」这个场景没有正当用途，不开口子。
-var allowedSignals = map[int]bool{int(syscall.SIGTERM): true, int(syscall.SIGKILL): true}
+// ps_kill 的信号白名单（allowedSignals）与各平台 kill 实现见 sys_unix.go / sys_windows.go
 
 func psKill(params json.RawMessage) (interface{}, error) {
 	var p struct {
@@ -389,7 +386,7 @@ func psKill(params json.RawMessage) (interface{}, error) {
 	if p.Pid == os.Getpid() {
 		return nil, errors.New("不允许结束 dox-agent 自己")
 	}
-	if err := syscall.Kill(p.Pid, syscall.Signal(p.Signal)); err != nil {
+	if err := killProcess(p.Pid, p.Signal); err != nil {
 		return nil, err
 	}
 	return map[string]bool{"ok": true}, nil

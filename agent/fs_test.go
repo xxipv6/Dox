@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -246,6 +247,9 @@ func TestFsChunkedCommitConflict(t *testing.T) {
 }
 
 func TestFsUsage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("statfs 仅 Unix 可用；Windows 上只保证编译（sys_windows.go 桩）")
+	}
 	dir := t.TempDir()
 	r := call(t, fsUsage, `{"path":`+strconv.Quote(dir)+`}`).(map[string]interface{})
 	if r["total"].(uint64) == 0 || r["avail"].(uint64) == 0 {

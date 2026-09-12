@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -220,9 +219,13 @@ func fsDelete(params json.RawMessage) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 递归删除的防线：/ 与近根目录永远拒绝，写死的清单不猜
+	// 递归删除的防线：/ 与近根目录永远拒绝，写死的清单不猜。
+	// 深度按 / 计段；Windows 开发机上路径分隔符是 \（agent 只部署 Linux，
+	// 那边 ToSlash 是恒等变换，行为零变化），不统一的话单测在 Windows 上
+	// 会把任何临时目录误判成「过浅」。
 	if p.Recursive {
-		if clean == "/" || len(strings.Split(strings.Trim(clean, "/"), "/")) < 2 {
+		depthPath := filepath.ToSlash(clean)
+		if clean == "/" || len(strings.Split(strings.Trim(depthPath, "/"), "/")) < 2 {
 			return nil, errors.New("拒绝递归删除过浅的路径: " + clean)
 		}
 		if err := os.RemoveAll(clean); err != nil {
@@ -297,17 +300,16 @@ func fsUsage(params json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(params, &p); err != nil || p.Path == "" {
 		return nil, errors.New("fs_usage 需要 path")
 	}
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(p.Path, &st); err != nil {
+	bsize, blocks, bfree, bavail, err := statfsOf(p.Path)
+	if err != nil {
 		return nil, err
 	}
-	bsize := uint64(st.Bsize)
-	total := st.Blocks * bsize
-	free := st.Bfree * bsize
+	total := blocks * bsize
+	free := bfree * bsize
 	return map[string]interface{}{
 		"total": total,
 		"used":  total - free,
-		"avail": st.Bavail * bsize, // 非 root 可用（root 保留块之后）
+		"avail": bavail * bsize, // 非 root 可用（root 保留块之后）
 		"mount": mountPointOf(p.Path),
 	}, nil
 }
@@ -374,8 +376,8 @@ func fsDu(params json.RawMessage) (interface{}, error) {
 		return nil, errors.New("fs_du 的目标是目录")
 	}
 	rootDev := uint64(0)
-	if st, ok := root.Sys().(*syscall.Stat_t); ok {
-		rootDev = uint64(st.Dev)
+	if dev, ok := devOf(root); ok {
+		rootDev = dev
 	}
 
 	children, err := os.ReadDir(p.Path)
@@ -416,7 +418,7 @@ func fsDu(params json.RawMessage) (interface{}, error) {
 				sum += info.Size()
 				continue
 			}
-			if st, ok := info.Sys().(*syscall.Stat_t); ok && uint64(st.Dev) != rootDev {
+			if dev, ok := devOf(info); ok && dev != rootDev {
 				sum += info.Size() // 挂载点目录本身算一个条目大小，子树不进
 				continue
 			}
@@ -435,7 +437,7 @@ func fsDu(params json.RawMessage) (interface{}, error) {
 		}
 		size := info.Size()
 		if info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
-			if st, ok := info.Sys().(*syscall.Stat_t); !ok || uint64(st.Dev) == rootDev {
+			if dev, ok := devOf(info); !ok || dev == rootDev {
 				size += walk(filepath.Join(p.Path, c.Name()))
 			}
 		}
