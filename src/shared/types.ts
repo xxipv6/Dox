@@ -151,6 +151,8 @@ export interface AppSettings {
   localShellId: string
   /** 终端输出里检测到服务监听横幅时，弹出「转发到本机」建议 */
   suggestPortForward: boolean
+  /** 端口哨兵：agent 差分发现**新出现**的监听端口时弹警告（谁开的、什么进程） */
+  portSentinel: boolean
 }
 
 /**

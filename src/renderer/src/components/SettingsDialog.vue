@@ -153,6 +153,13 @@ onMounted(async () => {
         <p class="sub-note">
           终端输出里出现 localhost:端口号 这类服务横幅时，右下角弹出「转发到本机」一键建议。
         </p>
+        <label class="checkbox">
+          <input v-model="settings.portSentinel" type="checkbox" />
+          端口哨兵：新出现的监听端口弹警告
+        </label>
+        <p class="sub-note">
+          需要安装远程助手。连接建立后**新出现**的监听端口会弹警告并反查进程名，点击直达性能监控的连接表；已有服务不打扰。
+        </p>
       </div>
 
       <div class="field">

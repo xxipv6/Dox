@@ -22,14 +22,17 @@ const props = defineProps<{
   containerName?: string
   /** 标题里显示的目标名（主机名 / 容器名） */
   label: string
-  /** 打开时落在哪页（状态条 top 进程点进来 → processes） */
+  /** 打开时落在哪页（端口哨兵点进来 → network 并按端口过滤） */
   initialTab?: 'overview' | 'network' | 'processes'
-  /** 进程页预填过滤词（top 进程点进来 → 定位到那个 PID） */
+  /** 预填过滤词（按 initialTab 路由到连接过滤框或进程过滤框） */
   initialFilter?: string
 }>()
 
 const store = useSessionStore()
 const tab = ref(props.initialTab ?? 'overview')
+// initialFilter 按目标页签路由：网络页 → 连接过滤框；进程页 → 进程过滤框
+const initConnsFilter = props.initialTab === 'network' ? (props.initialFilter ?? '') : ''
+const initProcFilter = props.initialTab === 'network' ? '' : (props.initialFilter ?? '')
 
 // App.vue 的 :key 只含 sessionId:containerName —— 面板已开时再点状态条的
 // top 进程 chip（openMonitor 带新 tab/filter），组件不重挂载，props 的
@@ -38,11 +41,13 @@ watch(
   () => [props.initialTab, props.initialFilter] as const,
   ([t, f]) => {
     if (t) tab.value = t
-    if (f !== undefined) filter.value = f
+    if (f === undefined) return
+    if (t === 'network') connsFilter.value = f
+    else filter.value = f
   }
 )
 
-// ================= 概览：watch_stats 被动监听 =================
+// ================= 概览：watch_stats（本面板自己持有订阅） =================
 
 const stats = ref<AgentStatsPayload | null>(null)
 const statsLive = ref(false)
@@ -75,7 +80,7 @@ const conns = ref<NetConn[]>([])
 const connsTruncated = ref(false)
 const connsError = ref('')
 const connsLoading = ref(false)
-const connsFilter = ref('')
+const connsFilter = ref(initConnsFilter)
 /** 进程页「看它的连接」带过来的精确 PID 过滤（全文搜索框会被端口子串污染：
  *  PID 443 会把所有 :443 端口的连接都捞进来，所以走独立字段精确匹配） */
 const connsPid = ref<number | null>(null)
@@ -128,7 +133,10 @@ const processes = ref<ProcInfo[]>([])
 const via = ref<'agent' | 'fallback-ps' | null>(null)
 const procLoading = ref(true)
 const procError = ref('')
-const filter = ref(props.initialFilter ?? '')
+const filter = ref(initProcFilter)
+/** 网络页「定位进程」带过来的精确 PID（进程过滤框是子串匹配，PID 443 会
+ *  连 1443 一起捞出来，跳转必须走精确字段） */
+const procPid = ref<number | null>(null)
 
 type SortKey = 'pid' | 'user' | 'cpu' | 'mem' | 'command'
 const sortKey = ref<SortKey>('cpu')
@@ -140,6 +148,7 @@ const termSentAt = reactive<Record<number, number>>({})
 const filteredProcs = computed(() => {
   const q = filter.value.trim().toLowerCase()
   let list = processes.value
+  if (procPid.value !== null) list = list.filter((p) => p.pid === procPid.value)
   if (q) {
     list = list.filter(
       (p) =>
@@ -235,6 +244,14 @@ function jumpToConns(p: ProcInfo): void {
   connsPid.value = p.pid
   connsFilter.value = ''
   tab.value = 'network'
+}
+
+/** 网络页连接行的进程名点击 → 进程页精确定位（从「连接」跳回「谁」，方便结束任务） */
+function jumpToProc(c: NetConn): void {
+  if (!c.pid) return
+  procPid.value = c.pid
+  filter.value = ''
+  tab.value = 'processes'
 }
 
 // ================= 轮询编排：激活页签 2s 一轮，后台/不可见暂停 =================
@@ -392,9 +409,13 @@ onBeforeUnmount(() => {
             c.remote_port ? `${c.remote_addr}:${c.remote_port}` : '*'
           }}</span>
           <span class="n-state" :class="c.state.toLowerCase()">{{ c.state }}</span>
-          <span class="n-proc" :title="c.pid ? `${c.process}（PID ${c.pid}）` : ''">{{
-            c.process ? `${c.process}${c.pid ? `(${c.pid})` : ''}` : '—'
-          }}</span>
+          <span
+            class="n-proc"
+            :class="{ jump: !!c.pid }"
+            :title="c.pid ? `${c.process}（PID ${c.pid}）— 点击在进程页定位` : ''"
+            @click="jumpToProc(c)"
+            >{{ c.process ? `${c.process}${c.pid ? `(${c.pid})` : ''}` : '—' }}</span
+          >
         </div>
         <div v-if="!filteredConns.length" class="hint">{{ connsFilter || connsPid !== null ? '没有匹配的连接' : '没有连接' }}</div>
         <div v-else-if="filteredConns.length > shownConns.length" class="hint">
@@ -408,6 +429,10 @@ onBeforeUnmount(() => {
       <div class="filter-row">
         <Icon name="search" :size="13" />
         <input v-model="filter" placeholder="过滤：命令 / 用户 / PID" spellcheck="false" />
+        <span v-if="procPid !== null" class="pid-chip" title="只看这个进程">
+          PID {{ procPid }}
+          <button class="chip-x" title="清除 PID 过滤" @click="procPid = null"><Icon name="x" :size="11" /></button>
+        </span>
         <span v-if="via === 'fallback-ps'" class="via-note" title="未安装远程助手，用 ps 命令退化：CPU% 是进程存活期的均值，不是瞬时值">
           退化模式
         </span>
@@ -452,7 +477,7 @@ onBeforeUnmount(() => {
             >结束</button>
           </span>
         </div>
-        <div v-if="!filteredProcs.length" class="hint">{{ filter ? '没有匹配的进程' : '没有进程' }}</div>
+        <div v-if="!filteredProcs.length" class="hint">{{ filter || procPid !== null ? '没有匹配的进程' : '没有进程' }}</div>
         <div v-else-if="filteredProcs.length > shownProcs.length" class="hint">
           共 {{ filteredProcs.length }} 个进程，只渲染前 {{ shownProcs.length }} 个（用过滤缩小范围）
         </div>
@@ -688,6 +713,13 @@ onBeforeUnmount(() => {
   background: var(--warning-soft);
   border-radius: var(--r-pill);
   padding: 0 8px;
+}
+.n-proc.jump {
+  cursor: pointer;
+  color: var(--accent-text);
+}
+.n-proc.jump:hover {
+  text-decoration: underline;
 }
 .pid-chip {
   flex-shrink: 0;

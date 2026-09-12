@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, computed, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref, computed, watch } from 'vue'
 import { Terminal, type ILink } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
@@ -193,11 +193,10 @@ let subscribedTarget: { sessionId: string; containerName?: string } | null = nul
  * 就是冲着它来的，「已经在跑」不该等于「不提醒」（上限 3 条兜底）。
  */
 function handleAgentPorts(data: { listening?: number[]; added?: number[] }): void {
-  if (!settings.suggestPortForward) return
   const target = forwardTarget()
   if (listenerBaseline === null) {
     listenerBaseline = new Set(data.listening ?? data.added ?? [])
-    if (!target?.containerName) return
+    if (!settings.suggestPortForward || !target?.containerName) return
     for (const port of listenerBaseline) {
       if (port < MIN_SUGGEST_PORT) continue
       suggestedPorts.add(port)
@@ -205,13 +204,74 @@ function handleAgentPorts(data: { listening?: number[]; added?: number[] }): voi
     }
     return
   }
-  if (!target) return
+  // 端口哨兵：基线建立后**新出现**的监听端口（独立开关，与转发建议解耦）。
+  // 安全语义：服务不会无缘无故多一个监听 —— 要么是自己起的，要么值得看一眼
+  if (settings.portSentinel && target) {
+    for (const port of data.added ?? []) {
+      if (listenerBaseline.has(port) || sentinelFired.has(port)) continue
+      sentinelFired.add(port)
+      void fireSentinel(port, target)
+    }
+  }
+  if (!settings.suggestPortForward || !target) return
   for (const port of data.added ?? []) {
     if (listenerBaseline.has(port) || port < MIN_SUGGEST_PORT || suggestedPorts.has(port)) continue
     suggestedPorts.add(port)
     listenerBaseline.add(port)
     void pushSuggestion(port, target)
   }
+}
+
+// ---- 端口哨兵：新监听端口 → 警告 toast，反查进程名，点击直达连接表 ----
+interface SentinelToast {
+  port: number
+  process?: string
+  pid?: number
+  /** 开火时的目标（点击跳转时标签可能已切走，必须存下来） */
+  sessionId: string
+  containerName?: string
+}
+const sentinelToasts = ref<SentinelToast[]>([])
+const sentinelFired = new Set<number>()
+const sentinelTimers = new Map<number, number>()
+
+async function fireSentinel(port: number, target: { sessionId: string; containerName?: string }): Promise<void> {
+  const toast = reactive<SentinelToast>({ port, sessionId: target.sessionId, containerName: target.containerName })
+  sentinelToasts.value.push(toast)
+  sentinelTimers.set(
+    port,
+    window.setTimeout(() => dismissSentinel(port), 20_000)
+  )
+  // 反查进程名：net_conns（0.6.2+ 早退后很快）；老助手没有这个方法就只显示端口
+  try {
+    const r = (await window.api.agentCall(target.sessionId, target.containerName, 'net_conns', {})) as {
+      conns: { local_port: number; state: string; pid: number; process?: string }[]
+    }
+    const hit = r.conns.find((c) => c.local_port === port && c.state === 'LISTEN')
+    if (hit?.process) {
+      toast.process = hit.process
+      toast.pid = hit.pid
+    }
+  } catch { /* 老助手/通道异常：只显示端口号 */ }
+}
+
+function dismissSentinel(port: number): void {
+  const t = sentinelTimers.get(port)
+  if (t !== undefined) clearTimeout(t)
+  sentinelTimers.delete(port)
+  sentinelToasts.value = sentinelToasts.value.filter((s) => s.port !== port)
+}
+
+/** 点击哨兵 toast → 性能监控网络页，按端口过滤（它在和谁说话一眼看到） */
+function openSentinel(s: SentinelToast): void {
+  dismissSentinel(s.port)
+  store.openMonitor({
+    sessionId: s.sessionId,
+    containerName: s.containerName,
+    label: s.containerName ? `容器 ${s.containerName}` : '主机',
+    tab: 'network',
+    filter: String(s.port)
+  })
 }
 
 /**
@@ -947,6 +1007,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   disposed = true
+  for (const t of sentinelTimers.values()) clearTimeout(t)
+  sentinelTimers.clear()
   zmodem?.abort() // 清掉看门狗定时器，避免卸载后触发
   stopProcPoll()
   if (agentRetryTimer !== null) {
@@ -1037,8 +1099,19 @@ defineExpose({ refitAndFocus })
       <button title="关闭 (Esc)" @click="toggleSearch"><Icon name="x" /></button>
     </div>
 
-    <!-- 端口转发建议：检测到服务横幅时浮在终端右下角，不挡输出 -->
+    <!-- 端口浮层：哨兵警告（新监听）+ 转发建议同一个栈，哨兵在前 -->
     <div class="port-suggestions">
+      <div
+        v-for="s in sentinelToasts"
+        :key="'sentinel-' + s.port"
+        class="port-toast sentinel"
+        title="点击查看这个端口的连接（性能监控 · 网络）"
+        @click="openSentinel(s)"
+      >
+        <Icon name="alert" :size="13" />
+        <span>新监听端口 :{{ s.port }}<template v-if="s.process"> · {{ s.process }}{{ s.pid ? `(${s.pid})` : '' }}</template></span>
+        <button class="x" title="忽略" @click.stop="dismissSentinel(s.port)"><Icon name="x" :size="12" /></button>
+      </div>
       <div v-for="s in suggestions" :key="s.port" class="port-toast" :class="s.state">
         <template v-if="s.state === 'pending'">
           <Icon name="zap" :size="13" />
@@ -1264,6 +1337,12 @@ defineExpose({ refitAndFocus })
 }
 .port-toast.error {
   color: var(--danger-text);
+}
+/* 端口哨兵：黄色警告调，整条可点（点击直达连接表） */
+.port-toast.sentinel {
+  color: var(--warning-text);
+  border-color: var(--warning-text);
+  cursor: pointer;
 }
 .port-toast .act {
   padding: 2px 10px;
