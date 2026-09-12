@@ -367,6 +367,8 @@ export interface LocalShellInfo {
   name: string
   /** 是否支持 shell integration（cwd / 退出码上报） */
   integrated: boolean
+  /** shell 种类（渲染层据此选引号策略等：cmd 不认 POSIX 单引号） */
+  integration?: 'powershell' | 'bash' | 'zsh' | 'fish' | 'cmd' | 'none'
 }
 
 /** 创建本地终端的参数（cols/rows 复用 TermSize） */

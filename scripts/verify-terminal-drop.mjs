@@ -76,8 +76,8 @@ check(
   )) === true
 )
 
-// ---- drop 一个合成 File：本地终端应粘贴 '' 引号路径（路径为空串则粘两个引号）----
-// getPathForFile 对合成 File 返回空串 —— 正好可以断言「粘贴动作发生了」（引号进终端）
+// ---- drop 一个合成 File：getPathForFile 对虚拟文件返回空串，必须被过滤掉 ----
+//（空路径不过滤的话会往终端粘一对空引号，或把空路径送进 fs.stat 炸出看不懂的错）
 await win.evaluate(() => {
   const dt = new DataTransfer()
   dt.items.add(new File(['x'], 'fake.txt', { type: 'text/plain' }))
@@ -88,7 +88,7 @@ await win.waitForTimeout(600)
 const termText = await win.evaluate(
   () => document.querySelector('.tab-content:not([style*="display: none"]) .xterm-rows')?.textContent ?? ''
 )
-check('本地终端 drop 触发粘贴（引号落进终端）', termText.includes("''"), termText.slice(-60))
+check('虚拟文件（空路径）不粘进终端', !termText.includes("''"), termText.slice(-60))
 
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 await app.close()

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron'
+import { sanitizeWinName } from '../fsSafe'
 import { existsSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
@@ -355,7 +356,7 @@ export function registerIpc(
       const win = BrowserWindow.fromWebContents(event.sender)
       const result = await dialog.showSaveDialog(win!, {
         title: '下载到',
-        defaultPath: join(app.getPath('downloads'), fileName)
+        defaultPath: join(app.getPath('downloads'), sanitizeWinName(fileName))
       })
       if (result.canceled || !result.filePath) return null
       return containerName
@@ -408,7 +409,7 @@ export function registerIpc(
               : transferManager.enqueueDownloadContainer(sessionId, containerName!, item.remotePath, join(dir, item.name), io)
             : item.isDir
               ? transferManager.enqueueDownloadDir(sessionId, item.remotePath, dir)
-              : transferManager.enqueueDownload(sessionId, item.remotePath, join(dir, item.name))
+              : transferManager.enqueueDownload(sessionId, item.remotePath, join(dir, sanitizeWinName(item.name)))
         )
       )
       return nested.flat()

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { sanitizeWinName } from '../fsSafe'
 import fs from 'node:fs'
 import { basename, join } from 'node:path'
 import type { SFTPWrapper } from 'ssh2'
@@ -188,7 +189,7 @@ export class TransferManager {
   async enqueueDownloadDir(sessionId: string, remotePath: string, localDir: string): Promise<TransferTask[]> {
     const gen = this.expansionGen
     const sftp = await this.getSftp(sessionId)
-    const rootName = posix.basename(remotePath)
+    const rootName = sanitizeWinName(posix.basename(remotePath))
     const rootLocal = join(localDir, rootName)
     await fs.promises.mkdir(rootLocal, { recursive: true })
 
@@ -203,14 +204,14 @@ export class TransferManager {
         const rel = relDir ? `${relDir}/${item.filename}` : item.filename
         if (item.attrs.isSymbolicLink()) continue
         if (item.attrs.isDirectory()) {
-          const lChild = join(lDir, item.filename)
+          const lChild = join(lDir, sanitizeWinName(item.filename))
           await fs.promises.mkdir(lChild, { recursive: true })
           await walk(rChild, lChild, rel)
         } else {
           const task = this.createTask(
             sessionId,
             'download',
-            join(lDir, item.filename),
+            join(lDir, sanitizeWinName(item.filename)),
             rChild,
             item.attrs.size,
             `${rootName}/${rel}`
@@ -368,7 +369,7 @@ export class TransferManager {
     io: ContainerIO
   ): Promise<TransferTask[]> {
     const gen = this.expansionGen
-    const rootName = posix.basename(remotePath)
+    const rootName = sanitizeWinName(posix.basename(remotePath))
     const rootLocal = join(localDir, rootName)
     await fs.promises.mkdir(rootLocal, { recursive: true })
 
@@ -381,11 +382,11 @@ export class TransferManager {
         const rChild = posix.join(rDir, item.name)
         const rel = relDir ? `${relDir}/${item.name}` : item.name
         if (item.isDir) {
-          const lChild = join(lDir, item.name)
+          const lChild = join(lDir, sanitizeWinName(item.name))
           await fs.promises.mkdir(lChild, { recursive: true })
           await walk(rChild, lChild, rel)
         } else {
-          const lChild = join(lDir, item.name)
+          const lChild = join(lDir, sanitizeWinName(item.name))
           const stream = io.stream
           if (stream) {
             // 直传：不经过宿主中转，落盘就是最终位置
@@ -417,7 +418,7 @@ export class TransferManager {
           const task = this.createTask(
             sessionId,
             'download',
-            join(lDir, item.name),
+            join(lDir, sanitizeWinName(item.name)),
             stagePath,
             item.size,
             `${rootName}/${rel}`,

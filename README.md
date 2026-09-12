@@ -28,6 +28,12 @@ npm run preview      # 以生产产物启动
 npm run pack:win     # electron-builder 打包（M5 配置）
 ```
 
+> **Windows 版注意**：node-pty 是原生模块，`pack:win` 必须在 Windows 机器或 CI
+> （windows runner）上构建，Mac 上出不了 win 包。Windows 客户端的两个平台
+> 差异点已处理：拖文件进本地终端按 shell 种类选引号（cmd 双引号 / PowerShell
+> 与 POSIX 单引号）；SFTP 下载落盘文件名过 sanitizeWinName（Linux 远端合法的
+> `: * ? " < > |`、保留名 CON/AUX 等在 Windows 是非法文件名）。
+
 ## 验证工具（scripts/）
 
 终端类项目光靠类型检查远远不够——下面这些是踩坑后补的**可自动复现**的验证手段，
@@ -77,7 +83,7 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-agent-v050.mjs` | agent v0.5.0（全程本机容器）：fs_du 子项降序返回、续传协议位（重入 begin 报 existing_size、偏移补齐 commit 内容正确）、watch_stats top_procs 点名 CPU 燃烧器、本机容器性能监控概览（每核格子 + 谁在吃 CPU）、用量条点开 du 分解。跑前需 `node scripts/build-agent.mjs` |
 | `verify-nested-container.mjs` | 嵌套容器（任意深度 docker exec 链）：进 dind → 侧栏列出内层 inner → 进入（标题带 `▸` 链、echo 真执行）→ 内层 daemon 未运行的友好归类 + 原始报错折叠「详细信息」→ 嵌套标签无 SFTP/进程管理入口。前置：dox-sshd-test 里有 inner |
 | `verify-ai-usage.mjs` | AI 容量状态栏（真实接口）：UI 添加 Kimi 账号 → 标题栏挂件「Kimi xx%」→ 浮层 5h 窗/每周两行 → IPC 快照字段齐备。需要 `KIMI_TEST_KEY` 环境变量 |
-| `verify-terminal-drop.mjs` | 拖文件进终端：本地终端提示「粘贴路径」+ drop 后引号路径落进终端；拖出浮层消失 |
+| `verify-terminal-drop.mjs` | 拖文件进终端：本地终端提示「粘贴路径」；拖出浮层消失；虚拟文件（getPathForFile 空路径）被过滤不粘进终端 |
 | `verify-compose.mjs` | compose 右键（dind 端到端）：SFTP 面板右键 docker-compose.yml 出三项 → **输出抽屉流式滚动**（结局前先滚字）→ up -d 服务真起 → restart → **取消挂起的 pull（状态「已取消」且零残留）** → down 容器真没了。前置：dox-sshd-test 装 docker-cli-compose |
 | `verify-direct-container.mjs` | 直连容器（免宿主机标签）+ 容器标签独立存活：保存设备（不连接）→ 设备行展开箭头列出容器（后台传输会话，全程无宿主机终端标签）→ 点容器名直接进 → echo 可交互 → 服务器侧 TCP 连接数证明只有一条传输连接；再验孤儿保活：宿主标签里进的容器，关宿主标签后 echo 仍可交互、连接数不变，最后的容器标签关掉后连接才被回收 |
 | `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |

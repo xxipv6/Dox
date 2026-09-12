@@ -8,7 +8,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { useSessionStore } from '../stores/sessions'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
-import { isPlainSshId, LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
+import { isPlainSshId, LOCAL_CONTAINER_TARGET, LOCAL_ID_PREFIX } from '@shared/sessionId'
 import { useSettingsStore } from '../stores/settings'
 import { useEditorStore } from '../stores/editor'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
@@ -509,6 +509,11 @@ function pathFromOsc7(uri: string): string | null {
   const raw = safeDecode(m[2])
   // Windows 下是 /C:/Users/... → C:\Users\...
   if (/^\/[A-Za-z]:/.test(raw)) return raw.slice(1).replace(/\//g, '\\')
+  // Git Bash（MSYS）报的是 /c/Users/... 形式
+  if (window.api.platform === 'win32') {
+    const msys = /^\/([a-z])(\/.*)?$/.exec(raw)
+    if (msys) return (msys[1].toUpperCase() + ':' + (msys[2] ?? '')).replace(/\//g, '\\')
+  }
   return raw
 }
 
@@ -793,8 +798,16 @@ function onDragLeave(): void {
   if (dragDepth === 0) dropActive.value = false
 }
 
-/** 引号包裹路径（粘进 shell 的口径：单引号 + 内部转义） */
+/**
+ * 引号包裹路径，按当前本地 shell 的种类选策略：
+ *  cmd 不认单引号（引号会变成路径的一部分），必须双引号
+ *  （Windows 路径本身不可能含双引号，无需内转义）；
+ *  PowerShell 单引号内单引号写两个；POSIX 单引号 + \\' 转义。
+ */
+let localShellKind: string | null = null
 function shellQuote(p: string): string {
+  if (localShellKind === 'cmd') return `"${p}"`
+  if (localShellKind === 'powershell') return `'${p.replace(/'/g, "''")}'`
   return `'${p.replace(/'/g, `'\\''`)}'`
 }
 
@@ -820,6 +833,13 @@ function onDropFiles(e: DragEvent): void {
 }
 
 onMounted(() => {
+  // 本地标签：解析这个标签跑的是哪种 shell（拖拽粘路径的引号策略靠它）
+  if (props.sessionId.startsWith(LOCAL_ID_PREFIX)) {
+    void window.api.listLocalShells().then((shells) => {
+      const cur = shells.find((sh) => sh.id === settings.localShellId) ?? shells[0]
+      localShellKind = cur?.integration ?? null
+    }).catch(() => undefined)
+  }
   term = new Terminal({
     cursorBlink: true,
     fontSize: settings.fontSize,
