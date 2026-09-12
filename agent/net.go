@@ -76,11 +76,13 @@ func decodeHexPort(p string) int {
 	return int(v)
 }
 
-// parseProcNetFile 解析一份 /proc/net/{tcp,tcp6,udp,udp6}
-func parseProcNetFile(path, proto string, v6, isUDP bool) []netConn {
+// parseProcNetFile 解析一份 /proc/net/{tcp,tcp6,udp,udp6}。
+// 返回 (行, 文件是否成功打开) —— 「打开了但零行」（空闲机器）与「打不开」
+// （没有该协议栈/没权限）必须区分，否则空闲机器被误报成「读不到」。
+func parseProcNetFile(path, proto string, v6, isUDP bool) ([]netConn, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil // 没有 ipv6 协议的机器上 tcp6 不存在，正常
+		return nil, false // 没有 ipv6 协议的机器上 tcp6 不存在，正常
 	}
 	defer f.Close()
 
@@ -115,7 +117,7 @@ func parseProcNetFile(path, proto string, v6, isUDP bool) []netConn {
 			Pid:        int(inode), // 暂存 inode，映射阶段换成 pid
 		})
 	}
-	return conns
+	return conns, true
 }
 
 // socketOwners：扫 /proc/[pid]/fd，建 socket inode → (pid, comm) 映射。
@@ -182,12 +184,27 @@ const socketScanBudget = 800 * time.Millisecond
 func netConns(params json.RawMessage) (interface{}, error) {
 	_ = params
 	var conns []netConn
-	conns = append(conns, parseProcNetFile("/proc/net/tcp", "tcp", false, false)...)
-	conns = append(conns, parseProcNetFile("/proc/net/tcp6", "tcp6", true, false)...)
-	conns = append(conns, parseProcNetFile("/proc/net/udp", "udp", false, true)...)
-	conns = append(conns, parseProcNetFile("/proc/net/udp6", "udp6", true, true)...)
+	opened := false
+	for _, f := range []struct {
+		path, proto string
+		v6, isUDP   bool
+	}{
+		{"/proc/net/tcp", "tcp", false, false},
+		{"/proc/net/tcp6", "tcp6", true, false},
+		{"/proc/net/udp", "udp", false, true},
+		{"/proc/net/udp6", "udp6", true, true},
+	} {
+		rows, ok := parseProcNetFile(f.path, f.proto, f.v6, f.isUDP)
+		if ok {
+			opened = true
+			conns = append(conns, rows...)
+		}
+	}
+	if !opened {
+		return nil, errors.New("读不到 /proc/net/*（非 Linux 或没权限？）")
+	}
 	if conns == nil {
-		return nil, errors.New("读不到 /proc/net/*（非 Linux？）")
+		conns = []netConn{} // 全部文件能读但零连接：空表，不是错误
 	}
 
 	needed := make(map[uint64]bool, len(conns))

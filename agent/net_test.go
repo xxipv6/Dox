@@ -35,7 +35,7 @@ func TestParseProcNetFile(t *testing.T) {
 	if err := os.WriteFile(p, []byte(tcpFixture), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	conns := parseProcNetFile(p, "tcp", false, false)
+	conns, _ := parseProcNetFile(p, "tcp", false, false)
 	if len(conns) != 3 {
 		t.Fatalf("应有 3 行（坏行跳过），实得 %d", len(conns))
 	}
@@ -56,14 +56,14 @@ func TestParseProcNetUDP(t *testing.T) {
 	_ = os.WriteFile(p, []byte(`  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 99999 1 ffff 100 0 0 10 0
 `), 0o644)
-	conns := parseProcNetFile(p, "udp", false, true)
+	conns, _ := parseProcNetFile(p, "udp", false, true)
 	if len(conns) != 1 || conns[0].State != "UNCONN" || conns[0].LocalPort != 53 {
 		t.Fatalf("udp 解析错误: %+v", conns)
 	}
 }
 
 func TestParseProcNetMissing(t *testing.T) {
-	if conns := parseProcNetFile("/nonexistent/tcp6", "tcp6", true, false); conns != nil {
+	if conns, ok := parseProcNetFile("/nonexistent/tcp6", "tcp6", true, false); ok || conns != nil {
 		t.Fatalf("文件不存在应返回 nil（容器可能没有 ipv6），实得 %v", conns)
 	}
 }
