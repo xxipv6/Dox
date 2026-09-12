@@ -62,6 +62,6 @@ publish:
   provider: github
   owner: xxipv6
   repo: Dox
-  # electron-builder 默认建 draft（electron-publish: options.draft === false 才发正式）；
-  # 自动更新只看得见已发布的 Release，CI 里 --publish always 依赖这个值
-  draft: false
+  # electron-builder 默认建 draft，而 electron-updater 只看得见已发布的 Release
+  # （latest.yml 在 draft 里等于没发）。合法键是 releaseType，没有 draft 键
+  releaseType: release
