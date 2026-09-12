@@ -30,66 +30,87 @@ type procInfo struct {
 
 // procSample：一次采样里一个进程需要的全部字段（uid 与命令在第二轮假定不变）
 type procSample struct {
-	pid     int
-	ppid    int
-	utime   uint64
-	stime   uint64
-	rss     int64
-	uid     string
-	command string
+	pid       int
+	ppid      int
+	utime     uint64
+	stime     uint64
+	starttime uint64
+	rss       int64
+	uid       string
+	command   string
 }
+
+// ps_list 元数据缓存：uid/cmdline 对同一个进程不变，重复调用（监控面板
+// 2s 轮询）没必要每轮都读 status+cmdline —— 慢 /proc 的机器上这是
+// 单次调用成本的大头。key 含 starttime：PID 复用（同 pid 不同次生命）
+// 自动失效。agent 的调用分发是单循环串行，cache 不需要锁。
+type procMeta struct {
+	starttime uint64
+	uid       string
+	command   string
+}
+
+var psMetaCache = map[int]procMeta{}
 
 // parseProcStat 解析 /proc/<pid>/stat。
 // comm 在括号里且可以含空格甚至括号本身（线程名 "（lunarlens）" 这类），
 // 所以不能用 Fields 直接切：先找最后一个 ')'，后面的字段从 state(3) 开始数。
-func parseProcStat(content string) (pid, ppid int, utime, stime uint64, rssPages int64, comm string, ok bool) {
+func parseProcStat(content string) (pid, ppid int, utime, stime, starttime uint64, rssPages int64, comm string, ok bool) {
 	open := strings.IndexByte(content, '(')
 	closeIdx := strings.LastIndexByte(content, ')')
 	if open < 0 || closeIdx < open {
-		return 0, 0, 0, 0, 0, "", false
+		return 0, 0, 0, 0, 0, 0, "", false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(content[:open]))
 	if err != nil {
-		return 0, 0, 0, 0, 0, "", false
+		return 0, 0, 0, 0, 0, 0, "", false
 	}
 	comm = content[open+1 : closeIdx]
 	rest := strings.Fields(content[closeIdx+1:])
-	// rest[0]=state(3) rest[1]=ppid(4) … rest[11]=utime(14) rest[12]=stime(15) … rest[21]=rss(24，页)
+	// rest[0]=state(3) rest[1]=ppid(4) … rest[11]=utime(14) rest[12]=stime(15)
+	// … rest[19]=starttime(22) … rest[21]=rss(24，页)
 	if len(rest) < 22 {
-		return 0, 0, 0, 0, 0, "", false
+		return 0, 0, 0, 0, 0, 0, "", false
 	}
 	ppid, _ = strconv.Atoi(rest[1])
 	utime, _ = strconv.ParseUint(rest[11], 10, 64)
 	stime, _ = strconv.ParseUint(rest[12], 10, 64)
+	starttime, _ = strconv.ParseUint(rest[19], 10, 64)
 	rssPages, _ = strconv.ParseInt(rest[21], 10, 64)
-	return pid, ppid, utime, stime, rssPages, comm, true
+	return pid, ppid, utime, stime, starttime, rssPages, comm, true
 }
 
-// readProcSample 读一个 pid 的 stat/status/cmdline；进程已走返回 ok=false
+// readProcSample 读一个 pid 的 stat +（未命中缓存时）status/cmdline；
+// 进程已走返回 ok=false。命中元数据缓存时每进程只有一次文件读。
 func readProcSample(pid int) (procSample, bool) {
 	var s procSample
 	statRaw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return s, false
 	}
-	spid, ppid, utime, stime, _, comm, ok := parseProcStat(string(statRaw))
+	spid, ppid, utime, stime, starttime, rssPages, comm, ok := parseProcStat(string(statRaw))
 	if !ok || spid != pid {
 		return s, false
 	}
-	s.pid, s.ppid, s.utime, s.stime = pid, ppid, utime, stime
+	s.pid, s.ppid, s.utime, s.stime, s.starttime = pid, ppid, utime, stime, starttime
+	// rss 取 stat 的页数字段（比 status 的 VmRSS 少一次文件读，口径一致）
+	if rssPages > 0 {
+		s.rss = rssPages * int64(os.Getpagesize())
+	}
 
-	// status：Uid（第一列 real uid）与 VmRSS（kB）
+	if meta, hit := psMetaCache[pid]; hit && meta.starttime == starttime {
+		s.uid, s.command = meta.uid, meta.command
+		return s, true
+	}
+
+	// status：Uid（第一列 real uid）
 	if statusRaw, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)); err == nil {
 		for _, line := range strings.Split(string(statusRaw), "\n") {
 			if strings.HasPrefix(line, "Uid:") {
 				if f := strings.Fields(line); len(f) >= 2 {
 					s.uid = f[1]
 				}
-			} else if strings.HasPrefix(line, "VmRSS:") {
-				if f := strings.Fields(line); len(f) >= 2 {
-					kb, _ := strconv.ParseInt(f[1], 10, 64)
-					s.rss = kb * 1024
-				}
+				break
 			}
 		}
 	}
@@ -101,6 +122,7 @@ func readProcSample(pid int) (procSample, bool) {
 	if s.command == "" {
 		s.command = "[" + comm + "]"
 	}
+	psMetaCache[pid] = procMeta{starttime: starttime, uid: s.uid, command: s.command}
 	return s, true
 }
 
@@ -123,11 +145,11 @@ func readProcSampleLight(pid int) (procSample, bool) {
 	if err != nil {
 		return s, false
 	}
-	spid, ppid, utime, stime, rssPages, comm, ok := parseProcStat(string(statRaw))
+	spid, ppid, utime, stime, starttime, rssPages, comm, ok := parseProcStat(string(statRaw))
 	if !ok || spid != pid {
 		return s, false
 	}
-	s.pid, s.ppid, s.utime, s.stime = pid, ppid, utime, stime
+	s.pid, s.ppid, s.utime, s.stime, s.starttime = pid, ppid, utime, stime, starttime
 	if rssPages > 0 {
 		s.rss = rssPages * int64(os.Getpagesize())
 	}
@@ -271,6 +293,16 @@ func psList(params json.RawMessage) (interface{}, error) {
 	}
 	if out == nil {
 		out = []procInfo{}
+	}
+	// 清掉已退出进程的缓存条目，长跑不增长
+	live := make(map[int]bool, len(pids))
+	for _, pid := range pids {
+		live[pid] = true
+	}
+	for pid := range psMetaCache {
+		if !live[pid] {
+			delete(psMetaCache, pid)
+		}
 	}
 	return map[string]interface{}{"processes": out}, nil
 }
