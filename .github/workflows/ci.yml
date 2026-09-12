@@ -74,20 +74,21 @@ jobs:
         working-directory: .
         run: node scripts/build-agent.mjs
 
-  # ---------- 打包：仅 tag（v*）或手动触发，产物传 artifacts ----------
-  # mac 未配证书（electron-builder.yml identity: null），出未签名 dmg/zip；
-  # 发布到 GitHub Releases 需要另配 --publish 与 token，这里只验证能出包
+  # ---------- 打包：tag（v*）发布到 Releases；手动触发只传 artifacts ----------
+  # mac 未配证书（electron-builder.yml identity: null），出未签名 dmg/zip
   package:
     name: pack (${{ matrix.name }})
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [app, agent]
+    permissions:
+      contents: write # 建 Release / 传资产
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: windows, os: windows-latest, script: pack:win }
-          - { name: macos, os: macos-latest, script: pack:mac }
-          - { name: linux, os: ubuntu-latest, script: pack:linux }
+          - { name: windows, os: windows-latest, flag: --win }
+          - { name: macos, os: macos-latest, flag: --mac }
+          - { name: linux, os: ubuntu-latest, flag: --linux }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -111,8 +112,20 @@ jobs:
       - name: 交叉编译 dox-agent
         run: node scripts/build-agent.mjs
 
-      - name: ${{ matrix.script }}
-        run: npm run ${{ matrix.script }}
+      - name: typecheck + build
+        run: |
+          npm run typecheck
+          npm run build
+
+      - name: electron-builder ${{ matrix.flag }} → 发布到 Releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: npx electron-builder ${{ matrix.flag }} --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: electron-builder ${{ matrix.flag }}（手动触发不发布）
+        if: github.event_name == 'workflow_dispatch'
+        run: npx electron-builder ${{ matrix.flag }}
 
       - uses: actions/upload-artifact@v4
         with:
