@@ -18,6 +18,11 @@ extraResources:
 
 asar: true
 
+# node-pty 自带全平台预编译（prebuilds/ 里有 darwin/win32 的 .node，且是
+# ABI 稳定接口——dev 里 Electron 直接加载它们就是证明），任何平台都不要
+# 重编译：跨平台打包（Mac 上出 win 包）就靠这个开关成立
+npmRebuild: false
+
 # ---------- Windows ----------
 win:
   icon: build/icon.png
