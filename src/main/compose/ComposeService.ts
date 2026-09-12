@@ -1,30 +1,32 @@
+import { randomUUID } from 'node:crypto'
 import type { Client } from 'ssh2'
-import type { ComposeRunResult, ComposeVerb } from '../../shared/types'
-import { execCapture } from '../ssh/remoteExec'
-import { CommandError, outputsOf } from '../execError'
-import { runLocal } from '../container/localRun'
+import type { ComposeRunEvent, ComposeVerb } from '../../shared/types'
+import { execCapture, execStream, type ExecStreamHandle } from '../ssh/remoteExec'
+import { runLocal, runLocalStream } from '../container/localRun'
+import { outputsOf } from '../execError'
 import { assertContainerTarget, shellJoinArgv } from '../container/runtime'
 import { isLocalContainerTarget } from '../../shared/sessionId'
 
 /**
  * Docker Compose 右键动作（SFTP 面板对 compose 文件直接 up/restart/down）。
  *
- * 两个目标形态：
- *  - 宿主机：在既有 SSH 连接上跑一条自检测脚本（v2 插件优先，老式
- *    docker-compose 自动降级），/bin/sh 包裹 + 补 PATH 与容器探测同口径；
- *  - 容器（dind 场景）：宿主 runtime exec 进容器跑 compose，内层同样
- *    先 v2 后 legacy。嵌套容器不支持（文件面板就不对嵌套开放）。
+ * **流式 + 可取消**：compose 是最容易炸的命令（拉镜像超时、端口占用、yaml
+ * 语法错），闷跑十分钟再给结果是反人类的 —— 输出边跑边经 composeEvent
+ * 推进渲染层的底部抽屉，用户看着不对随时取消（关 SSH 通道 ≈ 远端收 HUP；
+ * 本机 SIGTERM），改完 Dockerfile 再来一遍。
  *
- * 输出合流返回（compose 的进度本来就走 stderr，分开渲染反而别扭）。
- * 这些动作与容器生命周期操作同口径：用户显式触发的 docker 子命令，
- * 不装东西、不留文件 —— down 的确认在渲染层。
+ * 两个目标形态：
+ *  - 宿主机：/bin/sh 自检测脚本（v2 插件优先，legacy docker-compose 降级），
+ *    探测与执行在同一条命令里，流式一路到底；
+ *  - 容器（dind）：先一次快速探测内层有没有 v2，再流式跑选中的形态
+ *    （流式没法像脚本那样 if-else 降级，探测这步省不掉）。
  */
 
-/** compose up 可能拉镜像，给足 10 分钟；输出截 1MB 保尾部 */
 const RUN_TIMEOUT_MS = 10 * 60_000
-const RUN_MAX_BYTES = 1024 * 1024
+const DETECT_TIMEOUT_MS = 10_000
 
 const VERB_ARGS: Record<ComposeVerb, string[]> = {
+  // up 固定带 -d：不分离的话 exec 通道会挂在服务日志上，这个动作就该是后台语义
   up: ['up', '-d'],
   restart: ['restart'],
   down: ['down']
@@ -35,121 +37,141 @@ function q(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
+interface RunningCompose {
+  handle: { cancel: () => void }
+}
+
 export class ComposeService {
+  /** 事件出口（main/index.ts 接线成广播） */
+  onEvent: (ev: ComposeRunEvent) => void = () => {}
+  private running = new Map<string, RunningCompose>()
+
   constructor(
     private getClient: (id: string) => Client | undefined,
     /** 宿主/本机 runtime 二进制解析（容器目标用；来自 ContainerManager 的探测缓存） */
     private runtimeBinary: (parentSessionId: string) => Promise<string | null>
   ) {}
 
-  async run(
+  /** 启动一次 compose 动作，立即返回 runId；输出与结局走 onEvent */
+  start(
     sessionId: string,
     containerName: string | undefined,
     filePath: string,
     verb: ComposeVerb
-  ): Promise<ComposeRunResult> {
+  ): string {
     if (!/^\/\S+$/.test(filePath)) throw new Error(`compose 文件路径不合法：${JSON.stringify(filePath)}`)
-    return containerName
-      ? this.runInContainer(sessionId, containerName, filePath, verb)
-      : this.runOnHost(sessionId, filePath, verb)
+    const id = randomUUID()
+    void this.drive(id, sessionId, containerName, filePath, verb)
+    return id
   }
 
-  // ---- 宿主机 ----
+  /** 取消：关通道/杀进程，远端 compose 收 HUP 退出（≈ 终端里 Ctrl+C） */
+  cancel(id: string): void {
+    this.running.get(id)?.handle.cancel()
+  }
 
-  private async runOnHost(
+  private emit(ev: ComposeRunEvent): void {
+    this.onEvent(ev)
+  }
+
+  private async drive(
+    id: string,
     sessionId: string,
+    containerName: string | undefined,
     filePath: string,
     verb: ComposeVerb
-  ): Promise<ComposeRunResult> {
+  ): Promise<void> {
+    const verbArgs = VERB_ARGS[verb]
+    try {
+      const handle = containerName
+        ? await this.startInContainer(id, sessionId, containerName, filePath, verbArgs)
+        : this.startOnHost(id, sessionId, filePath, verbArgs)
+      this.running.set(id, { handle })
+      const { code, canceled } = await handle.done
+      this.emit({ id, type: 'exit', code, canceled })
+    } catch (err) {
+      const { stdout, stderr } = outputsOf(err)
+      const text = [stdout, stderr].filter(Boolean).join('\n')
+      if (text) this.emit({ id, type: 'data', text: `\n${text}\n` })
+      this.emit({ id, type: 'exit', code: 1, canceled: false })
+    } finally {
+      this.running.delete(id)
+    }
+  }
+
+  // ---- 宿主机：自检测脚本，探测+执行一条命令流式到底 ----
+
+  private startOnHost(
+    id: string,
+    sessionId: string,
+    filePath: string,
+    verbArgs: string[]
+  ): ExecStreamHandle {
     const client = this.getClient(sessionId)
     if (!client) throw new Error('会话已断开，请先恢复连接')
-    const args = VERB_ARGS[verb].join(' ')
+    const args = verbArgs.join(' ')
     const script =
       `PATH="$PATH:/usr/local/sbin:/usr/local/bin:/snap/bin"; ` +
       `if docker compose version >/dev/null 2>&1; then docker compose -f ${q(filePath)} ${args}; ` +
       `elif command -v docker-compose >/dev/null 2>&1; then docker-compose -f ${q(filePath)} ${args}; ` +
       `else echo "这台机器上没有 docker compose（v2 插件与 docker-compose 都没有）" >&2; exit 127; fi`
-    try {
-      const res = await execCapture(client, `/bin/sh -c ${q(script)}`, {
-        timeoutMs: RUN_TIMEOUT_MS,
-        maxBytes: RUN_MAX_BYTES
-      })
-      return toResult(res.code, res.stdout, res.stderr, res.truncated)
-    } catch (err) {
-      return errorResult(err)
-    }
+    return execStream(client, `/bin/sh -c ${q(script)}`, {
+      timeoutMs: RUN_TIMEOUT_MS,
+      onData: (text) => this.emit({ id, type: 'data', text })
+    })
   }
 
-  // ---- 容器（dind；只支持顶层容器）----
+  // ---- 容器（dind；只支持顶层容器）：先探测内层形态，再流式跑 ----
 
-  private async runInContainer(
+  private async startInContainer(
+    id: string,
     parentSessionId: string,
     containerName: string,
     filePath: string,
-    verb: ComposeVerb
-  ): Promise<ComposeRunResult> {
+    verbArgs: string[]
+  ): Promise<ExecStreamHandle> {
     assertContainerTarget(containerName)
-    const verbArgs = VERB_ARGS[verb]
-
-    // 内层 compose 的两种形态都试：v2 子命令 → legacy 二进制
-    const variants: string[][] = [
-      ['docker', 'compose', '-f', filePath, ...verbArgs],
-      ['docker-compose', '-f', filePath, ...verbArgs]
-    ]
-
-    if (isLocalContainerTarget(parentSessionId)) {
-      const bin = (await this.runtimeBinary(parentSessionId)) ?? 'docker'
-      let lastErr: unknown = null
-      for (const inner of variants) {
-        try {
-          const res = await runLocal(bin, ['exec', containerName, ...inner], {
-            timeoutMs: RUN_TIMEOUT_MS
-          })
-          return toResult(res.code, res.stdout, res.stderr, false)
-        } catch (err) {
-          lastErr = err
-          if (!isMissingInner(err)) break
-        }
-      }
-      return errorResult(lastErr)
-    }
-
-    const client = this.getClient(parentSessionId)
-    if (!client) throw new Error('父会话已断开，请先恢复 SSH 连接')
-    const outer = await this.runtimeBinary(parentSessionId)
+    const local = isLocalContainerTarget(parentSessionId)
+    const outer = local
+      ? ((await this.runtimeBinary(parentSessionId)) ?? 'docker')
+      : await this.runtimeBinary(parentSessionId)
     if (!outer) throw new Error('宿主侧还没探测到容器运行时，先在侧栏容器面板刷新一次')
+    const client = local ? null : this.getClient(parentSessionId)
+    if (!local && !client) throw new Error('父会话已断开，请先恢复 SSH 连接')
 
-    for (const inner of variants) {
-      const argv = [outer, 'exec', containerName, ...inner]
-      try {
-        const res = await execCapture(client, shellJoinArgv(argv), {
-          timeoutMs: RUN_TIMEOUT_MS,
-          maxBytes: RUN_MAX_BYTES
+    // 内层 compose 形态探测：v2 子命令在不在（distroless 没有 sh，探测也走 argv 不经 shell）
+    const detectArgv = [outer, 'exec', containerName, 'docker', 'compose', 'version']
+    let hasV2 = false
+    try {
+      if (local) {
+        await runLocal(detectArgv[0], detectArgv.slice(1), { timeoutMs: DETECT_TIMEOUT_MS })
+        hasV2 = true
+      } else {
+        const res = await execCapture(client!, shellJoinArgv(detectArgv), {
+          timeoutMs: DETECT_TIMEOUT_MS
         })
-        return toResult(res.code, res.stdout, res.stderr, res.truncated)
-      } catch (err) {
-        if (!isMissingInner(err)) return errorResult(err)
+        hasV2 = res.code === 0
       }
+    } catch {
+      hasV2 = false
     }
-    return { ok: false, code: 127, output: '容器里没有 docker compose', truncated: false }
+    const inner = hasV2 ? ['docker', 'compose'] : ['docker-compose']
+    this.emit({
+      id,
+      type: 'data',
+      text: `（容器 ${containerName} 内执行：${inner.join(' ')} ${['-f', filePath, ...verbArgs].join(' ')}）\n`
+    })
+
+    const argv = [outer, 'exec', containerName, ...inner, '-f', filePath, ...verbArgs]
+    if (local) {
+      return runLocalStream(argv[0], argv.slice(1), {
+        timeoutMs: RUN_TIMEOUT_MS,
+        onData: (text) => this.emit({ id, type: 'data', text })
+      })
+    }
+    return execStream(client!, shellJoinArgv(argv), {
+      timeoutMs: RUN_TIMEOUT_MS,
+      onData: (text) => this.emit({ id, type: 'data', text })
+    })
   }
-}
-
-/** 内层没有 compose 的两种报错形态（v2 子命令缺失 / legacy 二进制缺失） */
-function isMissingInner(err: unknown): boolean {
-  const { stdout, stderr } = outputsOf(err)
-  return /executable file not found|not found in \$PATH|unknown command/i.test(`${stdout}\n${stderr}`)
-}
-
-function toResult(code: number, stdout: string, stderr: string, truncated: boolean): ComposeRunResult {
-  // 进度在 stderr、结果在 stdout：先 stdout 后 stderr 合流，读感最接近终端直出
-  const output = [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n')
-  return { ok: code === 0, code, output, truncated }
-}
-
-function errorResult(err: unknown): ComposeRunResult {
-  if (err instanceof CommandError) {
-    return toResult(err.code ?? 1, err.stdout ?? '', err.stderr ?? '', false)
-  }
-  throw err
 }

@@ -134,6 +134,10 @@ export const IpcChannels = {
   aiUsageRefresh: 'ai:usageRefresh',
   /** 主进程 → 渲染进程：一轮查询完成（含失败结果），快照整体替换 */
   aiUsageUpdate: 'ai:usageUpdate',
-  /** SFTP 面板对 compose 文件直接 up/restart/down（输出合流回填） */
-  composeRun: 'compose:run'
+  /** SFTP 面板对 compose 文件直接 up/restart/down（流式输出走 compose:output 事件） */
+  composeRun: 'compose:run',
+  /** 取消正在运行的 compose 动作（关通道/杀进程 ≈ Ctrl+C） */
+  composeCancel: 'compose:cancel',
+  /** 主进程 → 渲染进程：compose 输出增量与结局 */
+  composeEvent: 'compose:event'
 } as const

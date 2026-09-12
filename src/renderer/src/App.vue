@@ -9,6 +9,7 @@ import TerminalPanel from './components/TerminalPanel.vue'
 import FileExplorer from './components/FileExplorer.vue'
 import ProcessPanel from './components/ProcessPanel.vue'
 import TransferQueue from './components/TransferQueue.vue'
+import ComposeDrawer from './components/ComposeDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
 import Icon from './components/Icon.vue'
@@ -328,6 +329,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
           />
         </div>
 
+        <ComposeDrawer />
         <TransferQueue />
       </div>
     </div>

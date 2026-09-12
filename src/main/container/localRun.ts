@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import { CommandError, firstLine } from '../execError'
 
 /**
@@ -77,4 +78,50 @@ export function runLocal(
 /** 可执行文件不存在（本机没装 / 不在 PATH 上） */
 export function isNotFound(err: unknown): boolean {
   return err instanceof CommandError && err.failure === 'spawn'
+}
+
+/**
+ * runLocal 的流式版（spawn 边跑边吐输出），带取消（SIGTERM 杀子进程）。
+ * 用途同远端 execStream：compose 这类长时间命令的本机侧承载。
+ */
+export function runLocalStream(
+  binary: string,
+  args: string[],
+  opts: { timeoutMs?: number; onData: (text: string) => void }
+): { done: Promise<{ code: number; canceled: boolean }>; cancel: () => void } {
+  const timeoutMs = opts.timeoutMs ?? 10 * 60_000
+  const child = spawn(binary, args, { windowsHide: true })
+  let canceled = false
+  const decOut = new StringDecoder('utf8')
+  const decErr = new StringDecoder('utf8')
+
+  const done = new Promise<{ code: number; canceled: boolean }>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      reject(new Error(`本机命令超时（${timeoutMs}ms）`))
+    }, timeoutMs)
+    timer.unref()
+
+    child.stdout?.on('data', (chunk: Buffer) => opts.onData(decOut.write(chunk)))
+    child.stderr?.on('data', (chunk: Buffer) => opts.onData(decErr.write(chunk)))
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      const tail = decOut.end() + decErr.end()
+      if (tail) opts.onData(tail)
+      resolve({ code: code ?? 1, canceled })
+    })
+  })
+
+  return {
+    done,
+    cancel: () => {
+      if (canceled) return
+      canceled = true
+      child.kill('SIGTERM')
+    }
+  }
 }

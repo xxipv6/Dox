@@ -5,6 +5,7 @@ import type {
   AgentStatsPayload,
   AiAccountInput,
   AiUsageSnapshot,
+  ComposeRunEvent,
   DownloadRequest,
   DroppedFile,
   ForwardRule,
@@ -212,7 +213,13 @@ const api: DoxApi = {
 
   // ---- Docker Compose ----
   composeRun: (sessionId, filePath, verb, containerName) =>
-    ipcRenderer.invoke(IpcChannels.composeRun, sessionId, filePath, verb, containerName)
+    ipcRenderer.invoke(IpcChannels.composeRun, sessionId, filePath, verb, containerName),
+  composeCancel: (runId) => ipcRenderer.send(IpcChannels.composeCancel, runId),
+  onComposeEvent: (cb) => {
+    const listener = (_e: IpcRendererEvent, ev: ComposeRunEvent): void => cb(ev)
+    ipcRenderer.on(IpcChannels.composeEvent, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.composeEvent, listener)
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)

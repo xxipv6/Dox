@@ -525,10 +525,11 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.aiUsageGet, () => aiUsageService.get())
   ipcMain.handle(IpcChannels.aiUsageRefresh, () => aiUsageService.refresh())
 
-  // ---- Docker Compose 右键动作 ----
+  // ---- Docker Compose 右键动作（流式：start 返回 runId，输出走 composeEvent 广播）----
   ipcMain.handle(
     IpcChannels.composeRun,
     (_event, sessionId: string, filePath: string, verb: ComposeVerb, containerName?: string) =>
-      composeService.run(sessionId, containerName, filePath, verb)
+      composeService.start(sessionId, containerName, filePath, verb)
   )
+  ipcMain.on(IpcChannels.composeCancel, (_event, runId: string) => composeService.cancel(runId))
 }

@@ -71,11 +71,16 @@ agentFsHolder.bridge = agentManager
 const processService = new ProcessService((id) => sessionManager.getClient(id), agentManager)
 // AI 容量速览：主进程常驻轮询（5 分钟一轮），结果缓存 + 广播
 const aiUsageService = new AiUsageService(configStore)
-// compose 右键动作：复用会话连接与容器 runtime 探测缓存
+// compose 右键动作：复用会话连接与容器 runtime 探测缓存；输出流式广播给所有窗口
 const composeService = new ComposeService(
   (id) => sessionManager.getClient(id),
   (id) => containerManager.runtimeBinary(id)
 )
+composeService.onEvent = (ev) => {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(IpcChannels.composeEvent, ev)
+  }
+}
 
 // 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped），
 // 并把它承载的容器终端通道一并收掉

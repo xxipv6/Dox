@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder'
 import type { Client, ClientChannel } from 'ssh2'
 import { CommandError, ExecFailure, firstLine } from '../execError'
 
@@ -10,7 +11,8 @@ import { CommandError, ExecFailure, firstLine } from '../execError'
  * 三条刻意的设计：
  *
  * 1. **不开 pty。** 加了 pty，远端会把 stderr 并进 stdout、把 `
-` 改写成 `
+` 改写成 `
+
 `、
  *    还会把命令回显混进来 —— 而 docker 的错误分类全靠 stderr 的原文。
  * 2. **非零退出码也把输出带回来。** 直接 reject 成一句话会把「docker 不存在」
@@ -146,4 +148,86 @@ export function execCapture(
       done(() => reject(syncErr))
     }
   })
+}
+
+/** 流式执行的句柄：done 拿结果，cancel 中断远端命令（关通道 ≈ 远端收到 HUP） */
+export interface ExecStreamHandle {
+  done: Promise<{ code: number; canceled: boolean }>
+  cancel: () => void
+}
+
+/**
+ * execCapture 的流式版：边跑边把输出吐给 onData（StringDecoder 处理跨块
+ * 的 UTF-8 多字节序列），结束时给退出码。compose 这类「可能跑几分钟、
+ * 用户要盯着进度、随时想掐掉改 Dockerfile 再来」的命令用它；
+ * 一次性探测仍走 execCapture。
+ */
+export function execStream(
+  client: Client,
+  command: string,
+  opts: { timeoutMs?: number; onData: (text: string) => void }
+): ExecStreamHandle {
+  const timeoutMs = opts.timeoutMs ?? 10 * 60_000
+  let channel: ClientChannel | null = null
+  let canceled = false
+
+  const done = new Promise<{ code: number; canceled: boolean }>((resolve, reject) => {
+    let settled = false
+    let exitCode: number | null = null
+    let sawExit = false
+    const decOut = new StringDecoder('utf8')
+    const decErr = new StringDecoder('utf8')
+
+    const finish = (fn: () => void): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn()
+    }
+
+    const timer = setTimeout(() => {
+      finish(() => {
+        channel?.close()
+        reject(new Error(`远端命令超时（${timeoutMs}ms）`))
+      })
+      timer.unref?.()
+    }, timeoutMs)
+
+    try {
+      // socket 已死时 ssh2 会**同步**抛 'Not connected'，必须包住
+      client.exec(command, { pty: false }, (error, stream) => {
+        if (error) {
+          finish(() => reject(error))
+          return
+        }
+        channel = stream
+        stream.on('data', (chunk: Buffer) => opts.onData(decOut.write(chunk)))
+        stream.stderr?.on('data', (chunk: Buffer) => opts.onData(decErr.write(chunk)))
+        stream.on('exit', (code: number | null) => {
+          sawExit = true
+          exitCode = code
+        })
+        stream.on('error', (streamErr: Error) => finish(() => reject(streamErr)))
+        stream.on('close', () => {
+          // 冲刷解码器尾部，别丢最后一个多字节字符
+          const tail = decOut.end() + decErr.end()
+          if (tail) opts.onData(tail)
+          // OpenSSH 对 exec 一定会发 exit-status；收不到按 0
+          finish(() => resolve({ code: sawExit ? (exitCode ?? 0) : 0, canceled }))
+        })
+      })
+    } catch (syncErr) {
+      finish(() => reject(syncErr))
+    }
+  })
+
+  return {
+    done,
+    cancel: () => {
+      // 幂等：连点取消不会重复关通道
+      if (canceled) return
+      canceled = true
+      channel?.close()
+    }
+  }
 }

@@ -53,7 +53,13 @@ EOF`)
 console.log('  夹具就绪')
 
 const cleanup = async () => {
-  try { await remoteExec(`cd ${DIR} && docker compose down >/dev/null 2>&1; rm -rf ${DIR}`) } catch {}
+  try {
+    await remoteExec(
+      `cd ${DIR} 2>/dev/null && docker compose down >/dev/null 2>&1; ` +
+        `cd ${DIR}-hang 2>/dev/null && docker compose down >/dev/null 2>&1; ` +
+        `rm -rf ${DIR} ${DIR}-hang`
+    )
+  } catch {}
   ssh.end()
 }
 
@@ -103,18 +109,22 @@ await win.waitForTimeout(1200)
 const composeRow = win.locator('.explorer .row', { hasText: 'docker-compose.yml' }).first()
 await composeRow.waitFor({ timeout: 8000 })
 
-/** 右键 compose 文件 → 点指定动作 → 等结果卡落定 */
-async function runCompose(verbLabel) {
-  await composeRow.click({ button: 'right' })
+/** 右键 compose 文件 → 点指定动作 → 抽屉出现 → 等结局（完成/失败/已取消） */
+async function runCompose(verbLabel, rowSel) {
+  const row = rowSel ?? composeRow
+  await row.click({ button: 'right' })
   await win.waitForTimeout(400)
   const item = win.locator('.context-menu .menu-item, .context-menu button').filter({ hasText: verbLabel }).first()
   await item.click()
-  // 卡片先转 running，落定成 ok/err（up 拉镜像可能慢，宽限给足）
-  const card = win.locator('.compose-card')
-  await card.waitFor({ timeout: 5000 })
-  for (let i = 0; i < 60; i++) {
-    const cls = (await card.getAttribute('class')) ?? ''
-    if (cls.includes(' ok') || cls.includes(' err')) return cls.includes(' ok') ? 'ok' : 'err'
+  const drawer = win.locator('.compose-drawer')
+  await drawer.waitFor({ timeout: 5000 })
+  for (let i = 0; i < 90; i++) {
+    const foot = await drawer.locator('.cd-foot').textContent().catch(() => null)
+    if (foot) {
+      if (foot.includes('完成')) return 'ok'
+      if (foot.includes('已取消')) return 'canceled'
+      if (foot.includes('失败')) return 'err'
+    }
     await win.waitForTimeout(1000)
   }
   return 'timeout'
@@ -132,14 +142,71 @@ check(
 )
 await win.keyboard.press('Escape')
 
-check('compose up -d 成功', (await runCompose('Compose: up -d')) === 'ok')
+// 先验证流式：点击 up 后，输出抽屉应该**在结局之前**就开始滚字
+await composeRow.click({ button: 'right' })
+await win.waitForTimeout(400)
+await win.locator('.context-menu .menu-item, .context-menu button').filter({ hasText: 'Compose: up -d' }).first().click()
+const drawer = win.locator('.compose-drawer')
+await drawer.waitFor({ timeout: 5000 })
+let streamedEarly = false
+for (let i = 0; i < 10; i++) {
+  const text = await drawer.locator('.cd-out').textContent()
+  const foot = await drawer.locator('.cd-foot').count()
+  if ((text ?? '').length > 0 && foot === 0) { streamedEarly = true; break }
+  if (foot > 0) break
+  await win.waitForTimeout(400)
+}
+check('输出在结局之前流式滚动（不是闷跑）', streamedEarly)
+for (let i = 0; i < 90; i++) {
+  const foot = await drawer.locator('.cd-foot').textContent().catch(() => null)
+  if (foot) break
+  await win.waitForTimeout(1000)
+}
+const upFoot = await drawer.locator('.cd-foot').textContent()
+check('compose up -d 成功', (upFoot ?? '').includes('完成'), (upFoot ?? '').slice(0, 80))
 const psUp = await remoteExec('docker ps --format {{.Names}}')
 check('服务容器真起来了', psUp.includes(SVC), psUp.trim())
+await win.screenshot({ path: 'shots/93-compose-drawer.png' })
 
 // ---- restart ----
 check('compose restart 成功', (await runCompose('Compose: restart')) === 'ok')
 
+// ---- 取消：不可达镜像的 pull 会挂着，用户取消后状态要是「已取消」----
+await remoteExec(`mkdir -p ${DIR}-hang && cat > ${DIR}-hang/docker-compose.yml <<'EOF'
+services:
+  app:
+    image: 10.255.255.1/dox-never:latest
+    container_name: compose-hang-svc
+    command: sleep 600
+EOF`)
+await win.locator('.breadcrumb .crumb', { hasText: 'tmp' }).click()
+await win.waitForTimeout(1200)
+await win.locator('.explorer .row', { hasText: 'compose-test-hang' }).first().dblclick()
+await win.waitForTimeout(1200)
+const hangRow = win.locator('.explorer .row', { hasText: 'docker-compose.yml' }).first()
+await hangRow.click({ button: 'right' })
+await win.waitForTimeout(400)
+await win.locator('.context-menu .menu-item, .context-menu button').filter({ hasText: 'Compose: up -d' }).first().click()
+await win.waitForTimeout(3000) // 让 pull 挂起来
+const hangPill = drawer.locator('.cd-pill', { hasText: 'up -d' }).last()
+await hangPill.click()
+await drawer.locator('.cd-btn.danger', { hasText: '取消' }).click()
+let canceled = false
+for (let i = 0; i < 30; i++) {
+  const foot = await drawer.locator('.cd-foot').textContent().catch(() => null)
+  if (foot?.includes('已取消')) { canceled = true; break }
+  if (foot) break
+  await win.waitForTimeout(1000)
+}
+check('取消中断了挂起的 up（状态「已取消」）', canceled)
+const psHang = await remoteExec('docker ps -a --format {{.Names}}')
+check('被取消的项目没有留下容器', !psHang.includes('compose-hang-svc'), psHang.trim())
+
 // ---- down（确认弹窗由全局 dialog 处理器接受）----
+await win.locator('.breadcrumb .crumb', { hasText: 'tmp' }).click()
+await win.waitForTimeout(1200)
+await win.locator('.explorer .row', { hasText: 'compose-test' }).first().dblclick()
+await win.waitForTimeout(1200)
 check('compose down 成功', (await runCompose('Compose: down')) === 'ok')
 const psDown = await remoteExec('docker ps -a --format {{.Names}}')
 check('容器被 down 掉', !psDown.includes(SVC), psDown.trim())

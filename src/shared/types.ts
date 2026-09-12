@@ -454,11 +454,10 @@ export interface AiUsageSnapshot {
 
 export type ComposeVerb = 'up' | 'restart' | 'down'
 
-/** 一次 compose 动作的结果（输出已合流：compose 的进度本来就走 stderr） */
-export interface ComposeRunResult {
-  ok: boolean
-  code: number
-  output: string
-  /** 输出太长被截断（只保留尾部，进度行的头部没有信息量） */
-  truncated: boolean
-}
+/**
+ * 一次 compose 动作的流式事件（主进程 → 渲染层底部输出抽屉）。
+ * data 是输出增量；exit 是结局（canceled = 用户主动取消，不是失败）。
+ */
+export type ComposeRunEvent =
+  | { id: string; type: 'data'; text: string }
+  | { id: string; type: 'exit'; code: number; canceled: boolean }

@@ -5,7 +5,7 @@ import type {
   AiUsageSnapshot,
   AppSettings,
   CommandSnippet,
-  ComposeRunResult,
+  ComposeRunEvent,
   ComposeVerb,
   ContainerControlAction,
   ContainerProbeResult,
@@ -309,11 +309,13 @@ export interface DoxApi {
   onAiUsageUpdate(cb: (snapshot: AiUsageSnapshot) => void): () => void
 
   // ---- Docker Compose ----
-  /** 对 compose 文件执行 up/restart/down（宿主机或容器内；down 的确认在渲染层） */
-  composeRun(
-    sessionId: string,
-    filePath: string,
-    verb: ComposeVerb,
-    containerName?: string
-  ): Promise<ComposeRunResult>
+  /**
+   * 对 compose 文件执行 up/restart/down（宿主机或容器内；down 的确认在渲染层）。
+   * 立即返回 runId；输出与结局经 onComposeEvent 流式推进。
+   */
+  composeRun(sessionId: string, filePath: string, verb: ComposeVerb, containerName?: string): Promise<string>
+  /** 取消正在运行的 compose 动作（≈ 终端里 Ctrl+C） */
+  composeCancel(runId: string): void
+  /** 订阅 compose 流式输出与结局事件 */
+  onComposeEvent(cb: (ev: ComposeRunEvent) => void): () => void
 }

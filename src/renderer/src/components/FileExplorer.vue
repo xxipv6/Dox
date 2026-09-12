@@ -5,6 +5,7 @@ import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
+import { useComposeStore } from '../stores/compose'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
@@ -18,6 +19,7 @@ const props = defineProps<{
 }>()
 const store = useSessionStore()
 const editor = useEditorStore()
+const composeStore = useComposeStore()
 
 /** 实际的文件操作会话（容器 = 父 SSH 会话；宿主机 = 自己） */
 const fsSessionId = computed(() => props.container?.parentSessionId ?? props.sessionId)
@@ -357,34 +359,26 @@ function isComposeTarget(targets: FileEntry[]): boolean {
 }
 
 /**
- * compose 动作的状态卡（面板右下角浮层）。
- * up 可能拉镜像跑几分钟：running 期间明示「在跑」，结果输出折叠备查。
+ * compose 右键动作：交给全局 compose store —— 输出进底部抽屉实时滚动。
+ * 放 store 的理由：用户跑完 up 多半顺手关掉文件面板去看终端，
+ * 结果卡挂在这个组件上就会跟着面板一起消失。
  */
-const composeState = ref<{
-  file: string
-  verb: ComposeVerb
-  status: 'running' | 'ok' | 'err'
-  output: string
-} | null>(null)
-
 async function runCompose(verb: ComposeVerb, file: FileEntry): Promise<void> {
   if (verb === 'down') {
     if (!confirm(`compose down 会停止并删除 ${file.name} 定义的全部容器与网络（数据卷保留）。确认？`)) {
       return
     }
   }
-  composeState.value = { file: file.name, verb, status: 'running', output: '' }
   try {
-    const res = await window.api.composeRun(fsSessionId.value, file.path, verb, ctrName.value)
-    composeState.value = { file: file.name, verb, status: res.ok ? 'ok' : 'err', output: res.output }
-    if (res.ok) {
-      // 成功不挡视线：6s 后自己收掉（失败留着给人看）
-      setTimeout(() => {
-        if (composeState.value?.status === 'ok') composeState.value = null
-      }, 6000)
-    }
+    await composeStore.start({
+      sessionId: fsSessionId.value,
+      filePath: file.path,
+      fileName: file.name,
+      verb,
+      containerName: ctrName.value
+    })
   } catch (err) {
-    composeState.value = { file: file.name, verb, status: 'err', output: errorText(err) }
+    errorMsg.value = `compose 启动失败：${errorText(err)}`
   }
 }
 
@@ -731,25 +725,6 @@ onBeforeUnmount(() => {
       <span class="usage-text">{{ formatSize(usage.used) }} / {{ formatSize(usage.total) }}（{{ usagePercent }}%）</span>
     </div>
 
-    <!-- compose 动作结果卡：运行中常驻，成功 6s 自收，失败留着 -->
-  <div v-if="composeState" class="compose-card" :class="composeState.status">
-    <div class="compose-head">
-      <Spinner v-if="composeState.status === 'running'" />
-      <Icon v-else :name="composeState.status === 'ok' ? 'check' : 'alert'" :size="14" />
-      <span class="compose-title">
-        compose {{ composeState.verb === 'up' ? 'up -d' : composeState.verb }} · {{ composeState.file }}
-      </span>
-      <button class="compose-x" title="关闭" @click="composeState = null">×</button>
-    </div>
-    <div v-if="composeState.status === 'running'" class="compose-hint">
-      运行中…（首次拉镜像可能要几分钟）
-    </div>
-    <details v-else-if="composeState.output" class="compose-out" :open="composeState.status === 'err'">
-      <summary>输出</summary>
-      <pre>{{ composeState.output }}</pre>
-    </details>
-  </div>
-
   <ContextMenu
       v-if="menu"
       :x="menu.x"
@@ -935,76 +910,6 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 /* 磁盘用量条：贴面板底部，>85% 整条转警示色；可点击展开分解 */
-/* compose 动作结果卡：浮在面板右下角，不挤列表 */
-.compose-card {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  width: 260px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-lg);
-  padding: var(--sp-2) var(--sp-3);
-  z-index: 20;
-}
-.compose-card.ok {
-  border-color: var(--success-text);
-}
-.compose-card.err {
-  border-color: var(--danger-text);
-}
-.compose-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-sm);
-  color: var(--fg);
-}
-.compose-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.compose-x {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  font-size: var(--fs-md);
-  padding: 0 2px;
-}
-.compose-x:hover {
-  color: var(--fg);
-}
-.compose-hint {
-  font-size: var(--fs-xs);
-  color: var(--fg-muted);
-  margin-top: 4px;
-}
-.compose-out {
-  margin-top: 6px;
-  font-size: var(--fs-xs);
-}
-.compose-out summary {
-  cursor: pointer;
-  color: var(--fg-muted);
-  user-select: none;
-}
-.compose-out pre {
-  margin: 4px 0 0;
-  max-height: 180px;
-  overflow: auto;
-  background: var(--bg-sunken);
-  border-radius: var(--r-xs);
-  padding: 6px 8px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  user-select: text;
-  color: var(--fg-secondary);
-}
 .usage-bar {
   display: flex;
   align-items: center;

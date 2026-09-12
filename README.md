@@ -76,7 +76,7 @@ npm run pack:win     # electron-builder 打包（M5 配置）
 | `verify-nested-container.mjs` | 嵌套容器（任意深度 docker exec 链）：进 dind → 侧栏列出内层 inner → 进入（标题带 `▸` 链、echo 真执行）→ 内层 daemon 未运行的友好归类 + 原始报错折叠「详细信息」→ 嵌套标签无 SFTP/进程管理入口。前置：dox-sshd-test 里有 inner |
 | `verify-ai-usage.mjs` | AI 容量状态栏（真实接口）：UI 添加 Kimi 账号 → 标题栏挂件「Kimi xx%」→ 浮层 5h 窗/每周两行 → IPC 快照字段齐备。需要 `KIMI_TEST_KEY` 环境变量 |
 | `verify-terminal-drop.mjs` | 拖文件进终端：本地终端提示「粘贴路径」+ drop 后引号路径落进终端；拖出浮层消失 |
-| `verify-compose.mjs` | compose 右键（dind 端到端）：SFTP 面板右键 docker-compose.yml 出三项 → up -d 服务真起 → restart → down 容器真没了。前置：dox-sshd-test 装 docker-cli-compose |
+| `verify-compose.mjs` | compose 右键（dind 端到端）：SFTP 面板右键 docker-compose.yml 出三项 → **输出抽屉流式滚动**（结局前先滚字）→ up -d 服务真起 → restart → **取消挂起的 pull（状态「已取消」且零残留）** → down 容器真没了。前置：dox-sshd-test 装 docker-cli-compose |
 | `verify-direct-container.mjs` | 直连容器（免宿主机标签）+ 容器标签独立存活：保存设备（不连接）→ 设备行展开箭头列出容器（后台传输会话，全程无宿主机终端标签）→ 点容器名直接进 → echo 可交互 → 服务器侧 TCP 连接数证明只有一条传输连接；再验孤儿保活：宿主标签里进的容器，关宿主标签后 echo 仍可交互、连接数不变，最后的容器标签关掉后连接才被回收 |
 | `verify-pwsh-integration.mjs` | 校验 PowerShell 的 OSC 7（cwd）/ OSC 133（退出码）/ git 分支上报 |
 | `verify-posix-integration.mjs` | 校验 POSIX 侧的同一契约：zsh（ZDOTDIR 注入）/ bash（--rcfile）/ fish（-C），装了哪个测哪个 |
@@ -160,7 +160,7 @@ src/
   - **版本兼容 UX**：面板/文件面板发现容器里是老 agent（缺 fs 方法）时给「升级到 vX」按钮与指路文案，而不是把 `unknown method` 原文糊给用户；升级 = 覆盖安装 + 旧 serve 通道自动重启（老二进制还跑在内存里，不换通道等于没升），终端侧 agent_closed 后立即重试一次新通道
 - **进程管理 ✅**（agent v0.4.0）：终端右键「聚焦终端」下面多一个「进程管理」（SSH 标签管宿主机、容器标签管容器——本机容器也支持，通道走本机 docker CLI；本地终端没有这项）—— 右侧开面板：过滤框 + PID/用户/CPU%/MEM%/命令可排序表格，2s 自动刷新（页面不可见时暂停）；结束进程两级走：确认 → SIGTERM，5 秒还没退出行内亮「强制结束」(SIGKILL)。数据通路三级：目标装了 agent ≥0.4.0 → `ps_list/ps_kill`（直读 /proc，distroless 容器也能列，CPU 为两次采样瞬时差分）；宿主机没装 agent → 退化一次性 `ps -eo` 命令（面板标「退化模式」，CPU 是存活期均值）；容器没装 → 指路去装。`ps_kill` 信号白名单 TERM/KILL + 拒 pid<2 + 拒自杀
 - **容器传输直传 ✅**（agent v0.4.0）：容器上传/下载从「SFTP → 宿主机 /tmp 中转 → docker cp」两段接力换成 `fs_write_begin/chunk/commit`（上传）与 `fs_read_chunk`（下载）1MB 分块流式 —— 少一次宿主落盘、进度是真进度（逐块更新）、distroless 容器也能传；写端 tmp 文件带 `.dox-tmp-` 标记防误删真文件，commit 带 mtime 乐观锁，冲突/取消清 tmp。老 agent 自动落回接力路径
-- **Compose 右键 ✅**：SFTP 面板里右键 `docker-compose.yml` / `compose.yaml` 直接 **up -d / restart / down**（down 前确认）—— 宿主机走 `/bin/sh` 自检测脚本（v2 插件优先、老式 docker-compose 自动降级），dind 容器里经宿主 runtime exec 进去跑；结果卡浮在面板右下角（运行中常驻、成功 6s 自收、失败带完整输出），up 拉镜像给足 10 分钟超时
+- **Compose 右键 ✅**：SFTP 面板里右键 `docker-compose.yml` / `compose.yaml` 直接 **up -d / restart / down**（down 前确认）—— 宿主机走 `/bin/sh` 自检测脚本（v2 插件优先、老式 docker-compose 自动降级），dind 容器里经宿主 runtime exec 进去跑；输出进**底部抽屉实时流式滚动**（拉镜像/建网络全程可见，多条运行 pill 切换），**随时可取消**（关通道/杀进程 ≈ Ctrl+C —— 看着不对就掐掉改 Dockerfile 再来），up 拉镜像给足 10 分钟超时
 - **磁盘用量条 ✅**：文件面板底部显示当前目录所在文件系统的用量（已用/总共 + 百分比，>85% 转警示色）；宿主机走 OpenSSH 的 `statvfs@openssh.com` SFTP 扩展（不装任何东西），容器走 agent `fs_usage`（容器有自己的 mount namespace，宿主的 statvfs 看不到里面），都不支持就不显示
 - **静默执行 ✅**（agent v0.4.0 `exec`）：快捷命令片段第三个动作 ⚡—— 不开终端，经 agent 跑完拿回退出码 + stdout/stderr（面板内结果块，可复制）；argv 按空白拆分**不经 shell**（没有注入面，distroless 没有 sh 也能跑；管道/重定向用不了，需要它们就用「发送到终端」），输出截断 64KB、超时默认 30s 上限 120s。目标是装了 v0.4.0 助手的机器/容器才可用
 - **磁盘用量分解 ✅**（agent v0.5.0 `fs_du`）：点文件面板底部用量条展开「谁占的」—— 当前目录直接子项按子树大小降序的条形列表（遍历上限 50 万项 / 15s，超了如实标「结果不完整」；不跨设备、不跟符号链接）；老 agent 给升级指路而不是糊 `unknown method` 原文
