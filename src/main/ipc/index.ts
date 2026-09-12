@@ -7,6 +7,7 @@ import type {
   AiAccountInput,
   AppSettings,
   CommandSnippet,
+  ComposeVerb,
   ContainerControlAction,
   DownloadRequest,
   DroppedFile,
@@ -35,6 +36,7 @@ import { agentVersionOlder } from '../../shared/agentVersion'
 import { createAgentStreamIO } from '../agent/agentStream'
 import type { ProcessService } from '../proc/ProcessService'
 import type { AiUsageService } from '../aiusage/AiUsageService'
+import type { ComposeService } from '../compose/ComposeService'
 
 /** agentCall 白名单泛通道允许的方法（0.4.0 起；fs_* 是既有方法，走这里也行） */
 const AGENT_CALL_ALLOW = new Set([
@@ -71,7 +73,8 @@ export function registerIpc(
   settingsStore: SettingsStore,
   agentManager: AgentManager,
   processService: ProcessService,
-  aiUsageService: AiUsageService
+  aiUsageService: AiUsageService,
+  composeService: ComposeService
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle(
@@ -521,4 +524,11 @@ export function registerIpc(
   })
   ipcMain.handle(IpcChannels.aiUsageGet, () => aiUsageService.get())
   ipcMain.handle(IpcChannels.aiUsageRefresh, () => aiUsageService.refresh())
+
+  // ---- Docker Compose 右键动作 ----
+  ipcMain.handle(
+    IpcChannels.composeRun,
+    (_event, sessionId: string, filePath: string, verb: ComposeVerb, containerName?: string) =>
+      composeService.run(sessionId, containerName, filePath, verb)
+  )
 }

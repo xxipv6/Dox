@@ -5,6 +5,8 @@ import type {
   AiUsageSnapshot,
   AppSettings,
   CommandSnippet,
+  ComposeRunResult,
+  ComposeVerb,
   ContainerControlAction,
   ContainerProbeResult,
   DiskUsage,
@@ -305,4 +307,13 @@ export interface DoxApi {
   aiUsageRefresh(): Promise<AiUsageSnapshot>
   /** 订阅查询结果广播（定时轮询与手动刷新都从这里推） */
   onAiUsageUpdate(cb: (snapshot: AiUsageSnapshot) => void): () => void
+
+  // ---- Docker Compose ----
+  /** 对 compose 文件执行 up/restart/down（宿主机或容器内；down 的确认在渲染层） */
+  composeRun(
+    sessionId: string,
+    filePath: string,
+    verb: ComposeVerb,
+    containerName?: string
+  ): Promise<ComposeRunResult>
 }

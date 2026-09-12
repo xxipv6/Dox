@@ -16,6 +16,7 @@ import { LocalPtyManager } from './local/LocalPtyManager'
 import { AgentManager } from './agent/AgentManager'
 import { ProcessService } from './proc/ProcessService'
 import { AiUsageService } from './aiusage/AiUsageService'
+import { ComposeService } from './compose/ComposeService'
 import { prewarmShells } from './local/shells'
 import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
@@ -70,6 +71,11 @@ agentFsHolder.bridge = agentManager
 const processService = new ProcessService((id) => sessionManager.getClient(id), agentManager)
 // AI 容量速览：主进程常驻轮询（5 分钟一轮），结果缓存 + 广播
 const aiUsageService = new AiUsageService(configStore)
+// compose 右键动作：复用会话连接与容器 runtime 探测缓存
+const composeService = new ComposeService(
+  (id) => sessionManager.getClient(id),
+  (id) => containerManager.runtimeBinary(id)
+)
 
 // 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped），
 // 并把它承载的容器终端通道一并收掉
@@ -188,7 +194,8 @@ app.whenReady().then(() => {
     settingsStore,
     agentManager,
     processService,
-    aiUsageService
+    aiUsageService,
+    composeService
   )
   aiUsageService.start()
   createWindow()

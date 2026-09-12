@@ -208,7 +208,11 @@ const api: DoxApi = {
     const listener = (_e: IpcRendererEvent, snapshot: AiUsageSnapshot): void => cb(snapshot)
     ipcRenderer.on(IpcChannels.aiUsageUpdate, listener)
     return () => ipcRenderer.removeListener(IpcChannels.aiUsageUpdate, listener)
-  }
+  },
+
+  // ---- Docker Compose ----
+  composeRun: (sessionId, filePath, verb, containerName) =>
+    ipcRenderer.invoke(IpcChannels.composeRun, sessionId, filePath, verb, containerName)
 }
 
 contextBridge.exposeInMainWorld('api', api)

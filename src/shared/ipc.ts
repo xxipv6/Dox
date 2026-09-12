@@ -133,5 +133,7 @@ export const IpcChannels = {
   aiUsageGet: 'ai:usageGet',
   aiUsageRefresh: 'ai:usageRefresh',
   /** 主进程 → 渲染进程：一轮查询完成（含失败结果），快照整体替换 */
-  aiUsageUpdate: 'ai:usageUpdate'
+  aiUsageUpdate: 'ai:usageUpdate',
+  /** SFTP 面板对 compose 文件直接 up/restart/down（输出合流回填） */
+  composeRun: 'compose:run'
 } as const
