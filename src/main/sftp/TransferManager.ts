@@ -124,7 +124,11 @@ export class TransferManager {
    * 这期间新任务持续冒出来。只把当前这批取消掉没有意义 —— 遍历还在跑，
    * 下一秒又是几十条新的，用户看到的就是「怎么取消都取消不掉」。
    */
-  private stopExpansion = false
+  /*
+   * 世代计数而不是布尔：并发展开多个目录时，cancelAll 只作废「此刻在跑的」
+   * （gen 变化 → 旧展开自动停），后到的 enqueue 不再误复位别人的中断标记。
+   */
+  private expansionGen = 0
 
   constructor(
     private readonly getSftp: (sessionId: string) => Promise<SFTPWrapper>,
@@ -137,8 +141,7 @@ export class TransferManager {
 
   /** 上传本地文件或文件夹（文件夹递归展开），返回创建的任务列表 */
   async enqueueUpload(sessionId: string, localPath: string, remoteDir: string): Promise<TransferTask[]> {
-    // 新一轮开始：清掉上一次「全部取消」留下的中断标记，否则这次一进去就停
-    this.stopExpansion = false
+    const gen = this.expansionGen
     const stat = await fs.promises.stat(localPath)
 
     if (stat.isFile()) {
@@ -157,7 +160,7 @@ export class TransferManager {
       const sftp = await this.getSftp(sessionId)
       const rootRemote = posix.join(remoteDir, basename(localPath))
       await mkdirRemoteRecursive(sftp, rootRemote)
-      const files = await walkLocal(localPath, () => this.stopExpansion)
+      const files = await walkLocal(localPath, () => this.expansionGen !== gen)
       const created: TransferTask[] = []
       for (const f of files) {
         const remotePath = posix.join(rootRemote, toPosixRel(f.rel))
@@ -183,8 +186,7 @@ export class TransferManager {
 
   /** 下载远端文件夹（递归展开）到本地目录，返回创建的任务列表 */
   async enqueueDownloadDir(sessionId: string, remotePath: string, localDir: string): Promise<TransferTask[]> {
-    // 同 enqueueUpload：新任务必须能重新开始
-    this.stopExpansion = false
+    const gen = this.expansionGen
     const sftp = await this.getSftp(sessionId)
     const rootName = posix.basename(remotePath)
     const rootLocal = join(localDir, rootName)
@@ -195,7 +197,7 @@ export class TransferManager {
       const items = await readdirP(sftp, rDir)
       for (const item of items) {
         // 用户点了「全部取消」：停在这，已建的任务由 cancelAll 负责收
-        if (this.stopExpansion) return
+        if (this.expansionGen !== gen) return
         if (item.filename === '.' || item.filename === '..') continue
         const rChild = posix.join(rDir, item.filename)
         const rel = relDir ? `${relDir}/${item.filename}` : item.filename
@@ -258,7 +260,7 @@ export class TransferManager {
     remoteDir: string,
     io: ContainerIO
   ): Promise<TransferTask[]> {
-    this.stopExpansion = false
+    const gen = this.expansionGen
     const stat = await fs.promises.stat(localPath)
 
     const makeTask = (lPath: string, rel: string, size: number, displayName?: string): InternalTask => {
@@ -305,7 +307,7 @@ export class TransferManager {
     }
     if (stat.isDirectory()) {
       const rootName = basename(localPath)
-      const files = await walkLocal(localPath, () => this.stopExpansion)
+      const files = await walkLocal(localPath, () => this.expansionGen !== gen)
       const created: TransferTask[] = []
       for (const f of files) {
         const rel = `${rootName}/${toPosixRel(f.rel)}`
@@ -365,7 +367,7 @@ export class TransferManager {
     localDir: string,
     io: ContainerIO
   ): Promise<TransferTask[]> {
-    this.stopExpansion = false
+    const gen = this.expansionGen
     const rootName = posix.basename(remotePath)
     const rootLocal = join(localDir, rootName)
     await fs.promises.mkdir(rootLocal, { recursive: true })
@@ -374,7 +376,7 @@ export class TransferManager {
     const walk = async (rDir: string, lDir: string, relDir: string): Promise<void> => {
       const items = await io.listContainer(rDir)
       for (const item of items) {
-        if (this.stopExpansion) return
+        if (this.expansionGen !== gen) return
         if (item.isSymlink) continue // 与宿主机的下载目录一致：符号链接不跟随
         const rChild = posix.join(rDir, item.name)
         const rel = relDir ? `${relDir}/${item.name}` : item.name
@@ -451,7 +453,7 @@ export class TransferManager {
    * 而且只要遍历没停，取消掉的总会被新冒出来的补上。
    */
   cancelAll(): void {
-    this.stopExpansion = true
+    this.expansionGen++
     for (const task of this.tasks.values()) {
       if (task.status === 'pending') {
         this.settle(task, 'canceled')

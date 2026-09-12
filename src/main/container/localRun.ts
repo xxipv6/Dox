@@ -95,9 +95,20 @@ export function runLocalStream(
   const decOut = new StringDecoder('utf8')
   const decErr = new StringDecoder('utf8')
 
+  /*
+   * SIGTERM 后给 3s 宽限，不退出升级 SIGKILL —— 子进程忽略 TERM 时
+   * 不能让它没了句柄还继续跑（孤儿 compose pull 就是这么来的）。
+   */
+  let killTimer: NodeJS.Timeout | null = null
+  const terminate = (): void => {
+    child.kill('SIGTERM')
+    killTimer = setTimeout(() => child.kill('SIGKILL'), 3000)
+    killTimer.unref?.()
+  }
+
   const done = new Promise<{ code: number; canceled: boolean }>((resolve, reject) => {
     const timer = setTimeout(() => {
-      child.kill('SIGTERM')
+      terminate()
       reject(new Error(`本机命令超时（${timeoutMs}ms）`))
     }, timeoutMs)
     timer.unref()
@@ -106,10 +117,17 @@ export function runLocalStream(
     child.stderr?.on('data', (chunk: Buffer) => opts.onData(decErr.write(chunk)))
     child.on('error', (err) => {
       clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
+      // ENOENT 归成「没装」的友好文案，与 runLocal 同口径（裸抛出去只剩一句「失败了」）
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        reject(new CommandError(`找不到可执行文件 ${binary}`, 'spawn', null, '', ''))
+        return
+      }
       reject(err)
     })
     child.on('close', (code) => {
       clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
       const tail = decOut.end() + decErr.end()
       if (tail) opts.onData(tail)
       resolve({ code: code ?? 1, canceled })
@@ -121,7 +139,7 @@ export function runLocalStream(
     cancel: () => {
       if (canceled) return
       canceled = true
-      child.kill('SIGTERM')
+      terminate()
     }
   }
 }

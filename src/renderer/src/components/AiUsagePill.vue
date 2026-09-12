@@ -18,6 +18,8 @@ const settings = useSettingsStore()
 const snapshot = ref<AiUsageSnapshot | null>(null)
 const open = ref(false)
 const refreshing = ref(false)
+/** 手动刷新失败的一句话（显示在浮层底部；下次成功自动清掉） */
+const refreshError = ref('')
 
 let off: (() => void) | null = null
 
@@ -72,6 +74,10 @@ async function refresh(): Promise<void> {
   refreshing.value = true
   try {
     snapshot.value = await api.aiUsageRefresh()
+    refreshError.value = ''
+  } catch (err) {
+    // 主进程 handler 异常：不能静默吞成「转了一圈什么都没发生」
+    refreshError.value = err instanceof Error ? err.message : String(err)
   } finally {
     refreshing.value = false
   }
@@ -156,7 +162,8 @@ function openSettings(): void {
         </template>
       </div>
 
-      <div v-if="snapshot" class="ai-foot">
+      <div v-if="refreshError" class="ai-foot" style="color: var(--danger-text)">{{ refreshError }}</div>
+      <div v-else-if="snapshot" class="ai-foot">
         更新于 {{ fmtTime(snapshot.fetchedAt) }} · 每 5 分钟自动刷新
       </div>
     </div>

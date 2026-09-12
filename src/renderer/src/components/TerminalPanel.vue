@@ -835,11 +835,11 @@ function onDropFiles(e: DragEvent): void {
   e.preventDefault()
   dropActive.value = false
   dragDepth = 0
-  const files = [...(e.dataTransfer?.files ?? [])].map((f) => ({
-    path: window.api.getPathForFile(f),
-    name: f.name,
-    size: f.size
-  }))
+  // 从本应用 SFTP 面板拖出的虚拟文件/网页拖拽，getPathForFile 拿不到真实路径
+  // （返回空串）—— 不过滤会把空路径送进 fs.stat 炸出一句看不懂的错
+  const files = [...(e.dataTransfer?.files ?? [])]
+    .map((f) => ({ path: window.api.getPathForFile(f), name: f.name, size: f.size }))
+    .filter((f) => f.path)
   const t = dropTarget.value
   if (!files.length || !t || t.kind === 'unsupported') return
   if (t.kind === 'local') {
@@ -847,7 +847,9 @@ function onDropFiles(e: DragEvent): void {
     window.api.input(props.sessionId, files.map((f) => shellQuote(f.path)).join(' '))
     return
   }
-  void window.api.enqueueDropped(t.sessionId, t.dir, files, t.containerName)
+  window.api.enqueueDropped(t.sessionId, t.dir, files, t.containerName).catch((err) => {
+    alert(`上传启动失败：${err instanceof Error ? err.message : String(err)}`)
+  })
 }
 
 onMounted(() => {

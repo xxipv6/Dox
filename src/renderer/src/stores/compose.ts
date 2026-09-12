@@ -22,6 +22,15 @@ export const useComposeStore = defineStore('compose', () => {
   const visible = ref(false)
   let subscribed = false
 
+  /*
+   * 两条有界纪律（长时间运行的内存护栏）：
+   *  - 单条运行的输出只保留尾部 TEXT_CAP 字符（build 全量日志可以上百 MB，
+   *    头部进度行没有回看价值）；截断时留一行说明
+   *  - 运行记录总数封顶：超出时先丢最老的**已结束**记录
+   */
+  const TEXT_CAP = 256 * 1024
+  const RUN_CAP = 20
+
   function init(): void {
     if (subscribed) return
     subscribed = true
@@ -33,6 +42,9 @@ export const useComposeStore = defineStore('compose', () => {
     if (!run) return
     if (ev.type === 'data') {
       run.text += ev.text
+      if (run.text.length > TEXT_CAP) {
+        run.text = `……（前部输出已截断，共收到超过 ${Math.round(TEXT_CAP / 1024)}KB）……\n` + run.text.slice(-TEXT_CAP)
+      }
       return
     }
     run.status = ev.canceled ? 'canceled' : ev.code === 0 ? 'ok' : 'err'
@@ -48,6 +60,11 @@ export const useComposeStore = defineStore('compose', () => {
     init()
     const id = await window.api.composeRun(opts.sessionId, opts.filePath, opts.verb, opts.containerName)
     runs.value.push({ id, file: opts.fileName, verb: opts.verb, status: 'running', text: '' })
+    while (runs.value.length > RUN_CAP) {
+      const idx = runs.value.findIndex((r) => r.status !== 'running')
+      if (idx < 0) break
+      runs.value.splice(idx, 1)
+    }
     visible.value = true
   }
 

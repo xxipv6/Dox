@@ -90,8 +90,9 @@ export function execCapture(
         channel?.close()
         finish('timeout', `远端命令超时（${timeoutMs}ms）`)
       })
-      timer.unref?.()
     }, timeoutMs)
+    // 不拖住进程退出；要在创建时 unref（触发后再调是死代码）
+    timer.unref?.()
 
     try {
       // socket 已死时 ssh2 会**同步**抛 'Not connected'，必须包住
@@ -190,8 +191,9 @@ export function execStream(
         channel?.close()
         reject(new Error(`远端命令超时（${timeoutMs}ms）`))
       })
-      timer.unref?.()
     }, timeoutMs)
+    // 不拖住进程退出；要在创建时 unref（触发后再调是死代码）
+    timer.unref?.()
 
     try {
       // socket 已死时 ssh2 会**同步**抛 'Not connected'，必须包住
@@ -201,6 +203,8 @@ export function execStream(
           return
         }
         channel = stream
+        // 取消打在通道建立之前：流一就位立即关，别让远端把命令跑完
+        if (canceled) stream.close()
         stream.on('data', (chunk: Buffer) => opts.onData(decOut.write(chunk)))
         stream.stderr?.on('data', (chunk: Buffer) => opts.onData(decErr.write(chunk)))
         stream.on('exit', (code: number | null) => {
@@ -212,8 +216,21 @@ export function execStream(
           // 冲刷解码器尾部，别丢最后一个多字节字符
           const tail = decOut.end() + decErr.end()
           if (tail) opts.onData(tail)
-          // OpenSSH 对 exec 一定会发 exit-status；收不到按 0
-          finish(() => resolve({ code: sawExit ? (exitCode ?? 0) : 0, canceled }))
+          finish(() => {
+            if (canceled) {
+              resolve({ code: exitCode ?? -1, canceled: true })
+              return
+            }
+            /*
+             * close 而无 exit = 连接中途死了（OpenSSH 正常必发 exit-status）。
+             * 这是失败不是「退出码 0」—— compose 跑到一半掉线绝不能显示「完成」。
+             */
+            if (!sawExit) {
+              reject(new Error('连接中断，命令未跑完'))
+              return
+            }
+            resolve({ code: exitCode ?? 0, canceled: false })
+          })
         })
       })
     } catch (syncErr) {

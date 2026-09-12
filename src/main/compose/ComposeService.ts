@@ -6,6 +6,7 @@ import { runLocal, runLocalStream } from '../container/localRun'
 import { outputsOf } from '../execError'
 import { assertContainerTarget, shellJoinArgv } from '../container/runtime'
 import { isLocalContainerTarget } from '../../shared/sessionId'
+import { createChunkBatcher } from '../chunkBatcher'
 
 /**
  * Docker Compose 右键动作（SFTP 面板对 compose 文件直接 up/restart/down）。
@@ -38,7 +39,9 @@ function q(s: string): string {
 }
 
 interface RunningCompose {
-  handle: { cancel: () => void }
+  handle: { cancel: () => void } | null
+  /** 取消打在句柄就位之前：置标志，句柄到了立即补刀 */
+  canceled: boolean
 }
 
 export class ComposeService {
@@ -59,15 +62,23 @@ export class ComposeService {
     filePath: string,
     verb: ComposeVerb
   ): string {
-    if (!/^\/\S+$/.test(filePath)) throw new Error(`compose 文件路径不合法：${JSON.stringify(filePath)}`)
+    // 只挡相对路径与控制字符；空格目录是合法的（下游 quoting/argv 都能正确处理）
+    if (!/^\/[^\0\n\r]+$/.test(filePath)) throw new Error(`compose 文件路径不合法：${JSON.stringify(filePath)}`)
     const id = randomUUID()
-    void this.drive(id, sessionId, containerName, filePath, verb)
+    // 先占位再开跑：取消打在探测期/通道建立前也要生效（标志位模式，
+    // 句柄晚到时检查标志立即 cancel），也挡住「结局事件先于渲染层注册」的竞态
+    const slot: RunningCompose = { handle: null, canceled: false }
+    this.running.set(id, slot)
+    queueMicrotask(() => void this.drive(id, slot, sessionId, containerName, filePath, verb))
     return id
   }
 
   /** 取消：关通道/杀进程，远端 compose 收 HUP 退出（≈ 终端里 Ctrl+C） */
   cancel(id: string): void {
-    this.running.get(id)?.handle.cancel()
+    const slot = this.running.get(id)
+    if (!slot) return
+    slot.canceled = true
+    slot.handle?.cancel()
   }
 
   private emit(ev: ComposeRunEvent): void {
@@ -76,25 +87,40 @@ export class ComposeService {
 
   private async drive(
     id: string,
+    slot: RunningCompose,
     sessionId: string,
     containerName: string | undefined,
     filePath: string,
     verb: ComposeVerb
   ): Promise<void> {
     const verbArgs = VERB_ARGS[verb]
+    /*
+     * 拉镜像的进度条每秒成百上千个小 chunk（\r 重写同一行），逐条发 IPC
+     * 会烧结构化克隆 —— 与终端输出同款的 4ms/64KB 批处理先合流再发。
+     * 出口只有 emitData 一个，结局前 flush 一次不丢尾。
+     */
+    const batcher = createChunkBatcher((buf) =>
+      this.emit({ id, type: 'data', text: buf.toString('utf8') })
+    )
+    const emitData = (text: string): void => batcher.push(Buffer.from(text, 'utf8'))
     try {
       const handle = containerName
-        ? await this.startInContainer(id, sessionId, containerName, filePath, verbArgs)
-        : this.startOnHost(id, sessionId, filePath, verbArgs)
-      this.running.set(id, { handle })
+        ? await this.startInContainer(id, emitData, sessionId, containerName, filePath, verbArgs)
+        : this.startOnHost(id, emitData, sessionId, filePath, verbArgs)
+      // 取消打在探测期（startInContainer 最长 10s）：句柄刚到手就补 cancel
+      if (slot.canceled) handle.cancel()
+      slot.handle = handle
       const { code, canceled } = await handle.done
-      this.emit({ id, type: 'exit', code, canceled })
+      batcher.flush()
+      this.emit({ id, type: 'exit', code, canceled: canceled || slot.canceled })
     } catch (err) {
       const { stdout, stderr } = outputsOf(err)
       const text = [stdout, stderr].filter(Boolean).join('\n')
-      if (text) this.emit({ id, type: 'data', text: `\n${text}\n` })
-      this.emit({ id, type: 'exit', code: 1, canceled: false })
+      if (text) emitData(`\n${text}\n`)
+      batcher.flush()
+      this.emit({ id, type: 'exit', code: 1, canceled: slot.canceled })
     } finally {
+      batcher.dispose()
       this.running.delete(id)
     }
   }
@@ -103,6 +129,7 @@ export class ComposeService {
 
   private startOnHost(
     id: string,
+    emitData: (text: string) => void,
     sessionId: string,
     filePath: string,
     verbArgs: string[]
@@ -115,9 +142,10 @@ export class ComposeService {
       `if docker compose version >/dev/null 2>&1; then docker compose -f ${q(filePath)} ${args}; ` +
       `elif command -v docker-compose >/dev/null 2>&1; then docker-compose -f ${q(filePath)} ${args}; ` +
       `else echo "这台机器上没有 docker compose（v2 插件与 docker-compose 都没有）" >&2; exit 127; fi`
+    void id
     return execStream(client, `/bin/sh -c ${q(script)}`, {
       timeoutMs: RUN_TIMEOUT_MS,
-      onData: (text) => this.emit({ id, type: 'data', text })
+      onData: emitData
     })
   }
 
@@ -125,6 +153,7 @@ export class ComposeService {
 
   private async startInContainer(
     id: string,
+    emitData: (text: string) => void,
     parentSessionId: string,
     containerName: string,
     filePath: string,
@@ -156,22 +185,19 @@ export class ComposeService {
       hasV2 = false
     }
     const inner = hasV2 ? ['docker', 'compose'] : ['docker-compose']
-    this.emit({
-      id,
-      type: 'data',
-      text: `（容器 ${containerName} 内执行：${inner.join(' ')} ${['-f', filePath, ...verbArgs].join(' ')}）\n`
-    })
+    void id
+    emitData(`（容器 ${containerName} 内执行：${inner.join(' ')} ${['-f', filePath, ...verbArgs].join(' ')}）\n`)
 
     const argv = [outer, 'exec', containerName, ...inner, '-f', filePath, ...verbArgs]
     if (local) {
       return runLocalStream(argv[0], argv.slice(1), {
         timeoutMs: RUN_TIMEOUT_MS,
-        onData: (text) => this.emit({ id, type: 'data', text })
+        onData: emitData
       })
     }
     return execStream(client!, shellJoinArgv(argv), {
       timeoutMs: RUN_TIMEOUT_MS,
-      onData: (text) => this.emit({ id, type: 'data', text })
+      onData: emitData
     })
   }
 }
