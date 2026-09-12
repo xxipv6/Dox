@@ -389,6 +389,15 @@ chmod +x node_modules/node-pty/prebuilds/*/spawn-helper
 另外 `electron install.js` 没跑（安装脚本被禁）时 electron-vite 会报 `Electron uninstall`，
 需要 `node node_modules/electron/install.js` 手动补二进制（国内设 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`）。
 
+`pack:win` 同理：electron-builder 会自己去 GitHub 下 electron zip / nsis / winCodeSign，
+国内直连会 600s 超时或 ETIMEDOUT，要两个镜像一起给：
+
+```bash
+ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
+ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ \
+npm run pack:win
+```
+
 ### POSIX shell 没有通用的 integration 入口
 
 bash 的 `--rcfile` 是 bash 专属：zsh 报 `no such option`、fish 不认。**别以为
