@@ -52,6 +52,18 @@ type procMeta struct {
 
 var psMetaCache = map[int]procMeta{}
 
+// ps_list 跨调用基线：监控面板 2s 轮询时，上一次调用的采样就是这一次
+// 的差分基准 —— 省掉一次全量 pass 和 300ms 采样 sleep（慢 /proc 的机器
+// 上这是单次调用成本的一半还多）。超 30s 没调用（面板关了）基线作废，
+// 回到内部两次采样。
+type psBaseline struct {
+	wall    time.Time
+	total   cpuTimes
+	samples map[int]procSample
+}
+
+var psLast *psBaseline
+
 // parseProcStat 解析 /proc/<pid>/stat。
 // comm 在括号里且可以含空格甚至括号本身（线程名 "（lunarlens）" 这类），
 // 所以不能用 Fields 直接切：先找最后一个 ')'，后面的字段从 state(3) 开始数。
@@ -219,11 +231,8 @@ func psList(params json.RawMessage) (interface{}, error) {
 		p.SampleMs = 5000
 	}
 
-	// 总 jiffies 基准必须把两轮全量采样**包在里面**，而不是只包中间的 sleep：
-	// 逐进程差分窗口是「第一轮读到它 → 第二轮读到它」（含两轮循环本身的耗时），
-	// 基准若只盖 sleep，慢机器上所有进程的 CPU% 会被成比例放大
-	//（实测 1822 进程的机器上 agent 自己被报成 63%，真实值 21%）
-	totalBefore, err := readTotalCPUTimes()
+	// 本轮采样：全量一次（stat 为主，元数据走缓存）
+	totalCur, err := readTotalCPUTimes()
 	if err != nil {
 		return nil, err
 	}
@@ -231,60 +240,59 @@ func psList(params json.RawMessage) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	first := map[int]procSample{}
+	cur := map[int]procSample{}
 	for _, pid := range pids {
 		if s, ok := readProcSample(pid); ok {
-			first[pid] = s
+			cur[pid] = s
 		}
 	}
 
-	time.Sleep(time.Duration(p.SampleMs) * time.Millisecond)
-
-	second := map[int]procSample{}
-	for _, pid := range pids {
-		if _, seen := first[pid]; !seen {
-			continue // 第一轮之后才出生的进程没有差分基准，下轮再见
+	// 差分基准：优先上次调用（跨调用差分，窗口=轮询间隔，对齐天然成立——
+	// 两侧都是各自调用里同一轮循环读的）；没有/过期则内部睡 sample_ms
+	// 再采一轮（首轮或冷启动）
+	base := psLast
+	if base == nil || time.Since(base.wall) > 30*time.Second {
+		time.Sleep(time.Duration(p.SampleMs) * time.Millisecond)
+		base = &psBaseline{wall: time.Now(), total: totalCur, samples: cur}
+		totalCur, err = readTotalCPUTimes()
+		if err != nil {
+			return nil, err
 		}
-		if s, ok := readProcSampleLight(pid); ok { // 第二轮只要差分字段（utime/stime/rss），status/cmdline 白读两次是浪费
-			second[pid] = s
+		cur = map[int]procSample{}
+		for _, pid := range pids {
+			if s, ok := readProcSample(pid); ok {
+				cur[pid] = s
+			}
 		}
 	}
-	totalAfter, err := readTotalCPUTimes()
-	if err != nil {
-		return nil, err
-	}
-	totalDelta := float64(totalAfter.total - totalBefore.total)
+	totalDelta := float64(totalCur.total - base.total.total)
 	if totalDelta <= 0 {
 		totalDelta = 1
 	}
 	ncpu := float64(runtime.NumCPU())
+	psLast = &psBaseline{wall: time.Now(), total: totalCur, samples: cur}
 
 	memTotalBytes, memErr := readMemTotalBytes()
 	passwd := passwdMap()
 
 	var out []procInfo
-	for _, pid := range pids {
-		before, seen := first[pid]
-		if !seen {
-			continue
-		}
-		after, ok := second[pid]
-		if !ok {
-			continue // 采样间隙退出了
-		}
-		// 轻量采样不带 uid/command：沿用第一轮的（采样窗内不会变）
-		after.uid, after.command = before.uid, before.command
+	for pid, after := range cur {
+		before, seen := base.samples[pid]
+		// 基准里没有 = 新生进程：必须在列表里（列表完整性比瞬时 CPU% 重要），
+		// CPU 给 0，下一轮轮询自然有真值
 		user := passwd[after.uid]
 		if user == "" {
 			user = after.uid
 		}
 		info := procInfo{
-			Pid:        pid,
-			Ppid:       after.ppid,
-			User:       user,
-			RssBytes:   after.rss,
-			CPUPercent: float64(after.utime+after.stime-before.utime-before.stime) / totalDelta * ncpu * 100,
-			Command:    after.command,
+			Pid:      pid,
+			Ppid:     after.ppid,
+			User:     user,
+			RssBytes: after.rss,
+			Command:  after.command,
+		}
+		if seen {
+			info.CPUPercent = float64(after.utime+after.stime-before.utime-before.stime) / totalDelta * ncpu * 100
 		}
 		if memErr == nil && memTotalBytes > 0 {
 			info.MemPercent = float64(after.rss) / memTotalBytes * 100
@@ -295,12 +303,8 @@ func psList(params json.RawMessage) (interface{}, error) {
 		out = []procInfo{}
 	}
 	// 清掉已退出进程的缓存条目，长跑不增长
-	live := make(map[int]bool, len(pids))
-	for _, pid := range pids {
-		live[pid] = true
-	}
 	for pid := range psMetaCache {
-		if !live[pid] {
+		if _, alive := cur[pid]; !alive {
 			delete(psMetaCache, pid)
 		}
 	}
