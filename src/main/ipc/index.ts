@@ -45,6 +45,7 @@ const AGENT_CALL_ALLOW = new Set([
   'exec',
   'fs_usage',
   'fs_du',
+  'net_conns',
   'fs_read_chunk',
   'fs_write_begin',
   'fs_write_chunk',

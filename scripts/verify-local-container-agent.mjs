@@ -86,15 +86,17 @@ check(
 // 右键 → 进程管理 面板
 await win.locator('.terminal-container:visible').first().click({ button: 'right' })
 await win.waitForTimeout(400)
-await win.locator('.context-menu button', { hasText: '进程管理' }).click()
-await win.locator('.proc-panel').waitFor({ timeout: 5000 })
+await win.locator('.context-menu button', { hasText: '性能监控' }).click()
+await win.locator('.mon-panel').waitFor({ timeout: 5000 })
+await win.locator('.mon-panel .tab-bar button', { hasText: '进程' }).click()
+await win.waitForTimeout(1500)
 await win.waitForTimeout(2000)
 check(
   '进程面板列出本机容器进程',
-  (await win.locator('.proc-panel .row', { hasText: 'sleep 3600' }).count()) >= 1
+  (await win.locator('.mon-panel .page:visible .row', { hasText: 'sleep 3600' }).count()) >= 1
 )
 await win.screenshot({ path: 'shots/84-local-container-proc.png' })
-await win.locator('.proc-panel button[title="关闭"]').click()
+await win.locator('.mon-panel button[title="关闭"]').click()
 
 // SFTP 面板（本机容器文件，经容器助手）
 await win.locator('button.bar-btn:has-text("SFTP")').click()

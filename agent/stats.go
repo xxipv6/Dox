@@ -46,6 +46,8 @@ type statsPayload struct {
 	Gpus       []gpuStat `json:"gpus,omitempty"`
 	// 帧间 CPU 差分 top3（「谁在吃 CPU」）；首轮无基准为空
 	TopProcs []topProc `json:"top_procs,omitempty"`
+	// 每核使用率（/proc/stat 的 cpu0..N 各自差分，0.6.0 起；性能监控的格子图）
+	Cpus []float64 `json:"cpus,omitempty"`
 }
 
 // cpuTimes：/proc/stat 第一行（聚合行）的 idle 与 total jiffies
@@ -54,7 +56,7 @@ type cpuTimes struct {
 	total uint64
 }
 
-// parseCPULine 解析 "cpu  user nice system idle iowait irq softirq steal …"
+// parseCPULine 解析聚合行 "cpu  user nice system idle iowait irq softirq steal …"
 func parseCPULine(line string) (cpuTimes, bool) {
 	fields := strings.Fields(line)
 	if len(fields) < 5 || fields[0] != "cpu" {
@@ -74,6 +76,30 @@ func parseCPULine(line string) (cpuTimes, bool) {
 	return t, true
 }
 
+// parseCPUCoreLine 解析每核行 "cpu0 …" / "cpu15 …"，返回核序号与时间
+func parseCPUCoreLine(line string) (int, cpuTimes, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 5 || !strings.HasPrefix(fields[0], "cpu") || fields[0] == "cpu" {
+		return 0, cpuTimes{}, false
+	}
+	core, err := strconv.Atoi(fields[0][3:])
+	if err != nil {
+		return 0, cpuTimes{}, false
+	}
+	var t cpuTimes
+	for i, f := range fields[1:] {
+		v, err := strconv.ParseUint(f, 10, 64)
+		if err != nil {
+			return 0, cpuTimes{}, false
+		}
+		t.total += v
+		if i == 3 {
+			t.idle = v
+		}
+	}
+	return core, t, true
+}
+
 func readCPUTimes(r io.Reader) (cpuTimes, error) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -82,6 +108,41 @@ func readCPUTimes(r io.Reader) (cpuTimes, error) {
 		}
 	}
 	return cpuTimes{}, io.ErrUnexpectedEOF
+}
+
+// readCPUAll：一次扫描同时取聚合行与 cpu0..N 每核行（/proc/stat 开一次读一遍）
+func readCPUAll(r io.Reader) (cpuTimes, []cpuTimes, error) {
+	cores := map[int]cpuTimes{}
+	maxCore := -1
+	var agg cpuTimes
+	sawAgg := false
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !sawAgg {
+			if t, ok := parseCPULine(line); ok {
+				agg, sawAgg = t, true
+				continue
+			}
+		}
+		if core, t, ok := parseCPUCoreLine(line); ok {
+			cores[core] = t
+			if core > maxCore {
+				maxCore = core
+			}
+		}
+	}
+	if !sawAgg {
+		return cpuTimes{}, nil, io.ErrUnexpectedEOF
+	}
+	var out []cpuTimes
+	if maxCore >= 0 {
+		out = make([]cpuTimes, maxCore+1)
+		for i := 0; i <= maxCore; i++ {
+			out[i] = cores[i]
+		}
+	}
+	return agg, out, nil
 }
 
 // cpuPercent：两次采样间的使用率；total 不增长（时钟回拨/计数复位）返回 0
@@ -100,6 +161,18 @@ func cpuPercent(prev, cur cpuTimes) float64 {
 		return 100
 	}
 	return p
+}
+
+// corePercents：逐核差分；两帧核数不一致（热插拔/容器配额变化）给不出就省略
+func corePercents(prev, cur []cpuTimes) []float64 {
+	if len(prev) == 0 || len(prev) != len(cur) {
+		return nil
+	}
+	out := make([]float64, len(cur))
+	for i := range cur {
+		out[i] = cpuPercent(prev[i], cur[i])
+	}
+	return out
 }
 
 // parseMemInfo 从 /proc/meminfo 取 MemTotal 与 MemAvailable（kB → MB）
@@ -185,7 +258,7 @@ func watchStats(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 		_ = enc.Encode(event{Event: "stats_error", Data: map[string]string{"error": err.Error()}})
 		return
 	}
-	prev, err := readCPUTimes(f0)
+	prev, prevCores, err := readCPUAll(f0)
 	_ = f0.Close()
 	if err != nil {
 		_ = enc.Encode(event{Event: "stats_error", Data: map[string]string{"error": err.Error()}})
@@ -199,7 +272,7 @@ func watchStats(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 			_ = enc.Encode(event{Event: "stats_error", Data: map[string]string{"error": err.Error()}})
 			return false
 		}
-		cur, err := readCPUTimes(f)
+		cur, curCores, err := readCPUAll(f)
 		_ = f.Close()
 		if err != nil {
 			return true // 读坏了跳过这帧，不致命
@@ -220,8 +293,10 @@ func watchStats(intervalMs int, enc *safeEncoder, stop chan struct{}) {
 			MemUsedMB:  usedMB,
 			Gpus:       queryGPUs(nvidiaSmi),
 			TopProcs:   topProcs(prevProcs, curProcs, float64(cur.total-prev.total), float64(totalMB)*1024*1024, 3),
+			Cpus:       corePercents(prevCores, curCores),
 		}})
 		prev = cur
+		prevCores = curCores
 		prevProcs = curProcs
 		return true
 	}

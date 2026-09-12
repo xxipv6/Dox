@@ -17,7 +17,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.5.0"
+var version = "0.6.0"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -144,6 +144,9 @@ func serve() error {
 					writeCallResult(enc, req.ID, r, err)
 				case "exec":
 					r, err := execOnce(req.Params)
+					writeCallResult(enc, req.ID, r, err)
+				case "net_conns":
+					r, err := netConns(req.Params)
 					writeCallResult(enc, req.ID, r, err)
 				default:
 					_ = enc.Encode(response{ID: req.ID, Error: "unknown method: " + req.Method})

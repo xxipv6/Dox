@@ -7,7 +7,7 @@ import SessionSidebar from './components/SessionSidebar.vue'
 import TitleBar from './components/TitleBar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
 import FileExplorer from './components/FileExplorer.vue'
-import ProcessPanel from './components/ProcessPanel.vue'
+import MonitorPanel from './components/MonitorPanel.vue'
 import TransferQueue from './components/TransferQueue.vue'
 import ComposeDrawer from './components/ComposeDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
@@ -311,14 +311,15 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
             :container="sftpTarget.container"
           />
 
-          <!-- 进程管理面板（终端右键「进程管理」打开；目标随打开时的标签定） -->
-          <ProcessPanel
-            v-if="store.procTarget"
-            :key="store.procTarget.sessionId + ':' + (store.procTarget.containerName ?? '')"
-            :session-id="store.procTarget.sessionId"
-            :container-name="store.procTarget.containerName"
-            :label="store.procTarget.label"
-            :initial-filter="store.procTarget.filter"
+          <!-- 性能监控面板（终端右键「性能监控」打开；目标随打开时的标签定） -->
+          <MonitorPanel
+            v-if="store.monitorTarget"
+            :key="store.monitorTarget.sessionId + ':' + (store.monitorTarget.containerName ?? '')"
+            :session-id="store.monitorTarget.sessionId"
+            :container-name="store.monitorTarget.containerName"
+            :label="store.monitorTarget.label"
+            :initial-tab="store.monitorTarget.tab"
+            :initial-filter="store.monitorTarget.filter"
           />
 
           <!-- 双击文件后在此编辑；key 绑定会话，切会话不串内容 -->

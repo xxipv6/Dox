@@ -143,19 +143,19 @@ try {
   chipPid = /PID (\d+)/.exec((await chip.getAttribute('title')) ?? '')?.[1] ?? ''
   check('状态条点名 top 进程 chip', chipPid !== '', await chip.getAttribute('title'))
   await chip.click()
-  await win.locator('.proc-panel').waitFor({ timeout: 5000 })
+  await win.locator('.mon-panel').waitFor({ timeout: 5000 })
   // 读完 title 到点击之间可能来了新帧（top 换人）：以面板实际过滤值为准，
   // 验证它是纯数字且过滤后确实有那一行
-  const filterVal = await win.locator('.proc-panel .filter-row input').inputValue()
+  const filterVal = await win.locator('.mon-panel .page:visible .filter-row input').inputValue()
   await win.waitForTimeout(2000)
-  const rowHit = await win.locator('.proc-panel .row', { hasText: filterVal }).count()
+  const rowHit = await win.locator('.mon-panel .page:visible .row', { hasText: filterVal }).count()
   check(
     '点击 chip 打开进程面板且过滤预设为 PID',
     /^\d+$/.test(filterVal) && rowHit >= 1,
     `filter=${filterVal} rows=${rowHit}`
   )
   await win.screenshot({ path: 'shots/88-v050-topproc.png' })
-  await win.locator('.proc-panel button[title="关闭"]').click()
+  await win.locator('.mon-panel button[title="关闭"]').click()
 } catch {
   check('状态条点名 top 进程 chip', false, 'chip 未出现')
 }

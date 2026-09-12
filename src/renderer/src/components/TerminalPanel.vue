@@ -734,7 +734,7 @@ function openProcesses(): void {
   const t = procTarget.value
   if (!t) return
   const tab = store.tabs.find((tb) => tb.panes.some((p) => p.sessionId === props.sessionId))
-  store.openProcPanel({
+  store.openMonitor({
     ...t,
     label: t.containerName ? `容器 ${t.containerName}` : (tab?.title ?? '主机')
   })
@@ -756,9 +756,10 @@ function openTopProc(): void {
   const top = topProc.value
   if (!t || !top) return
   const tab = store.tabs.find((tb) => tb.panes.some((p) => p.sessionId === props.sessionId))
-  store.openProcPanel({
+  store.openMonitor({
     ...t,
     label: t.containerName ? `容器 ${t.containerName}` : (tab?.title ?? '主机'),
+    tab: 'processes',
     filter: String(top.pid)
   })
 }
@@ -1187,7 +1188,7 @@ defineExpose({ refitAndFocus })
       <button @click="pasteClipboard">粘贴<span class="hint">Ctrl+Shift+V</span></button>
       <button @click="clearTerminal">清屏<span class="hint">Ctrl+L</span></button>
       <button @click="focusTerminal">聚焦终端</button>
-      <button v-if="procTarget" @click="openProcesses">进程管理</button>
+      <button v-if="procTarget" @click="openProcesses">性能监控</button>
     </div>
   </div>
 </template>

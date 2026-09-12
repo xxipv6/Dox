@@ -53,6 +53,26 @@ export interface AgentStatsPayload {
   gpus?: AgentGpuStat[]
   /** 帧间 CPU 差分 top3（0.5.0 起；老 agent 没有这帧字段） */
   top_procs?: { pid: number; command: string; cpu_percent: number; mem_percent: number }[]
+  /** 每核使用率（0.6.0 起；性能监控的格子图，老 agent 没有则只显示总 CPU） */
+  cpus?: number[]
+}
+
+// ---- 性能监控：连接表（agent 0.6.0 net_conns）----
+
+export interface NetConn {
+  proto: string
+  local_addr: string
+  local_port: number
+  remote_addr: string
+  remote_port: number
+  state: string
+  pid?: number
+  process?: string
+}
+
+export interface NetConnsResult {
+  conns: NetConn[]
+  truncated: boolean
 }
 
 /** 持久化到本地的会话配置（敏感字段经 safeStorage 加密，base64 存储） */

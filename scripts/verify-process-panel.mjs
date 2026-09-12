@@ -1,7 +1,7 @@
 /**
- * 进程管理面板端到端（UI）：
- *  SSH 标签右键 → 进程管理（宿主无 agent → fallback-ps 退化模式，列表非空）→ 关闭 →
- *  进 inner 容器标签 → 装容器助手 → 容器标签右键 → 进程管理（agent 模式）→
+ * 性能监控面板·进程页端到端（UI）：
+ *  SSH 标签右键 → 性能监控 → 进程页（宿主无 agent → fallback-ps 退化模式，列表非空）→ 关闭 →
+ *  进 inner 容器标签 → 装容器助手 → 容器标签右键 → 性能监控 → 进程页（agent 模式）→
  *  过滤「sleep 300」→ 行内结束 → 确认条 TERM → 进程从容器里消失。
  *
  * 用法：node scripts/verify-process-panel.mjs [host] [port] [user] [password]
@@ -41,6 +41,8 @@ const ctrExec = (c) => remoteExec(`docker exec ${INNER} sh -c '${c.replace(/'/g,
 // 夹具：inner 干净（未装助手）；宿主也不装（验证退化路径）
 await remoteExec(`docker start ${INNER} 2>/dev/null || docker run -d --name ${INNER} alpine sleep 3600`)
 await remoteExec(`docker exec ${INNER} sh -c "rm -f /tmp/dox-agent; true"`)
+// 上次跑挂时留下的 sleep 300 靶子也要清掉，否则过滤断言数到两行
+await remoteExec(`docker exec ${INNER} sh -c "pkill -f 'sleep 300' 2>/dev/null; true"`).catch(() => {})
 await remoteExec('rm -rf ~/.dox; true').catch(() => {})
 console.log('  夹具就绪')
 
@@ -78,17 +80,20 @@ await win.keyboard.press('Escape')
 // ---- 宿主机进程面板（无 agent → fallback-ps 退化）----
 await win.locator('.terminal-container:visible').first().click({ button: 'right' })
 await win.waitForTimeout(400)
-const menuProc = win.locator('.context-menu button', { hasText: '进程管理' })
-check('右键菜单有「进程管理」', (await menuProc.count()) === 1)
+const menuProc = win.locator('.context-menu button', { hasText: '性能监控' })
+check('右键菜单有「性能监控」', (await menuProc.count()) === 1)
 await menuProc.click()
-await win.locator('.proc-panel').waitFor({ timeout: 5000 })
+await win.locator('.mon-panel').waitFor({ timeout: 5000 })
+// 面板默认落「概览」页，进程断言前先切到「进程」页签
+await win.locator('.mon-panel .tab-bar button', { hasText: '进程' }).click()
+await win.waitForTimeout(1500)
 // fallback-ps 等 ps 命令跑完
 await win.waitForTimeout(2500)
-const hostRows = await win.locator('.proc-panel .row').count()
+const hostRows = await win.locator('.mon-panel .page:visible .row').count()
 check('宿主进程列表非空（退化 ps）', hostRows > 3, `rows=${hostRows}`)
-check('显示退化模式标记', (await win.locator('.proc-panel .via-note').count()) === 1)
+check('显示退化模式标记', (await win.locator('.mon-panel .via-note').count()) === 1)
 await win.screenshot({ path: 'shots/80-proc-panel-host.png' })
-await win.locator('.proc-panel button[title="关闭"]').click()
+await win.locator('.mon-panel button[title="关闭"]').click()
 await win.waitForTimeout(400)
 
 // ---- 进容器 + 装容器助手 ----
@@ -123,31 +128,45 @@ await remoteExec(`docker exec -d ${INNER} sleep 300`)
 // ---- 容器标签右键 → 进程管理（agent 模式）----
 await win.locator('.terminal-container:visible').first().click({ button: 'right' })
 await win.waitForTimeout(400)
-await win.locator('.context-menu button', { hasText: '进程管理' }).click()
-await win.locator('.proc-panel').waitFor({ timeout: 5000 })
-// ps_list 两次采样（默认 300ms）+ 往返
-await win.waitForTimeout(2500)
-const ctrRows = await win.locator('.proc-panel .row').count()
-check('容器进程列表非空（agent ps_list）', ctrRows >= 2, `rows=${ctrRows}`)
-check('agent 模式无退化标记', (await win.locator('.proc-panel .via-note').count()) === 0)
-check('列表含容器主进程 sleep 3600', (await win.locator('.proc-panel .row', { hasText: 'sleep 3600' }).count()) >= 1)
+await win.locator('.context-menu button', { hasText: '性能监控' }).click()
+await win.locator('.mon-panel').waitFor({ timeout: 5000 })
+// 面板默认落「概览」页，进程断言前先切到「进程」页签
+await win.locator('.mon-panel .tab-bar button', { hasText: '进程' }).click()
+await win.waitForTimeout(1500)
+// ps_list 两次采样（默认 300ms）+ 往返；首帧渲染可能晚一拍，轮询等行出现
+let ctrRows = 0
+for (let i = 0; i < 8 && ctrRows < 2; i++) {
+  await win.waitForTimeout(1000)
+  ctrRows = await win.locator('.mon-panel .page:visible .row').count()
+}
+const banner = await win.locator('.mon-panel .error-banner').textContent().catch(() => '')
+check('容器进程列表非空（agent ps_list）', ctrRows >= 2, `rows=${ctrRows} banner=${banner}`)
+check('agent 模式无退化标记', (await win.locator('.mon-panel .via-note').count()) === 0)
+let rowTexts = []
+let hasInit = false
+for (let i = 0; i < 8 && !hasInit; i++) {
+  rowTexts = await win.locator('.mon-panel .page:visible .row').allTextContents()
+  hasInit = rowTexts.some((t) => t.includes('sleep 3600'))
+  if (!hasInit) await win.waitForTimeout(1000)
+}
+check('列表含容器主进程 sleep 3600', hasInit, rowTexts.join(' | ').slice(0, 300))
 
 // 过滤
-await win.locator('.proc-panel .filter-row input').fill('sleep 300')
+await win.locator('.mon-panel .page:visible .filter-row input').fill('sleep 300')
 await win.waitForTimeout(400)
-const filteredRows = await win.locator('.proc-panel .row').count()
+const filteredRows = await win.locator('.mon-panel .page:visible .row').count()
 check('过滤后只剩 sleep 300', filteredRows === 1, `rows=${filteredRows}`)
 await win.screenshot({ path: 'shots/81-proc-panel-container.png' })
 
 // 结束：行内「结束」→ 确认条 → TERM
-await win.locator('.proc-panel .row .kill-btn', { hasText: '结束' }).first().click()
-await win.locator('.proc-panel .confirm-bar').waitFor({ timeout: 3000 })
-await win.locator('.proc-panel .confirm-bar .kill-btn.danger', { hasText: '结束' }).click()
+await win.locator('.mon-panel .page:visible .row .kill-btn', { hasText: '结束' }).first().click()
+await win.locator('.mon-panel .confirm-bar').waitFor({ timeout: 3000 })
+await win.locator('.mon-panel .confirm-bar .kill-btn.danger', { hasText: '结束' }).click()
 await win.waitForTimeout(3000)
 // busybox ps 默认只显示 comm 不带参数，必须 -o args 才能匹配 'sleep 300'
 const gone = await ctrExec(`ps -o args | grep 'sleep 300' | grep -v grep || echo GONE`)
 check('TERM 后容器里进程消失', gone.includes('GONE'), gone)
-check('面板里该行也消失', (await win.locator('.proc-panel .row').count()) === 0)
+check('面板里该行也消失', (await win.locator('.mon-panel .page:visible .row').count()) === 0)
 
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 await app.close()

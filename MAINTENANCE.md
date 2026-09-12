@@ -318,6 +318,14 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
   「进程管理」菜单（更阴的是菜单项 v-if 用了另一个更宽的 computed，
   菜单显示了点下去没反应）。新能力开闸前先想清楚：本机容器/本地终端
   到底该不该有，再有意识地选判据。
+- **多页签面板的所有页都活在 DOM 里（v-show 不是 v-if）。** MonitorPanel
+  三个页签各有 `.filter-row input` 和 `.row`，验证脚本不写
+  `.page:visible` 收窄就会撞上 strict mode violation 或数错行。
+  同理，断言某行存在要轮询等首帧（ps_list 两次采样 + 往返，固定
+  sleep 是脆的）。
+- **验证夹具要清上次的靶子进程。** 「过滤后只剩 sleep 300」这种计数断言，
+  上一次跑挂留下的同名进程会让计数 +1 —— 夹具开头先 `pkill -f` 清场，
+  只清文件不清进程是不够的。
 
 ---
 

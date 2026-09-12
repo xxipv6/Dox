@@ -676,14 +676,29 @@ export const useSessionStore = defineStore('sessions', () => {
     sftpVisible.value = !sftpVisible.value
   }
 
-  // ---- 进程管理面板 ----
-  /** 进程面板目标：SSH 标签 → 宿主机；容器标签 → 容器。filter = 打开时预填的过滤词（状态条 top 进程点进来的场景） */
-  const procTarget = ref<{ sessionId: string; containerName?: string; label: string; filter?: string } | null>(null)
-  function openProcPanel(target: { sessionId: string; containerName?: string; label: string; filter?: string }): void {
-    procTarget.value = target
+  // ---- 性能监控面板 ----
+  /**
+   * 监控面板目标：SSH 标签 → 宿主机；容器标签 → 容器。
+   * tab = 打开时落在哪页（top 进程点进来 → processes 并带过滤词）。
+   */
+  const monitorTarget = ref<{
+    sessionId: string
+    containerName?: string
+    label: string
+    tab?: 'overview' | 'network' | 'processes'
+    filter?: string
+  } | null>(null)
+  function openMonitor(target: {
+    sessionId: string
+    containerName?: string
+    label: string
+    tab?: 'overview' | 'network' | 'processes'
+    filter?: string
+  }): void {
+    monitorTarget.value = target
   }
-  function closeProcPanel(): void {
-    procTarget.value = null
+  function closeMonitor(): void {
+    monitorTarget.value = null
   }
 
   function toggleFollowTerminal(): void {
@@ -719,9 +734,9 @@ export const useSessionStore = defineStore('sessions', () => {
     clearEditSessionRequest,
     sftpVisible,
     toggleSftp,
-    procTarget,
-    openProcPanel,
-    closeProcPanel,
+    monitorTarget,
+    openMonitor,
+    closeMonitor,
     followTerminal,
     toggleFollowTerminal,
     cwdBySession,
