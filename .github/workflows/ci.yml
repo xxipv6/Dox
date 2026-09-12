@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送取消在跑的旧 run，省 runner 时间
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------- Electron 应用：typecheck + build ----------
+  # verify-*.mjs 那套端到端依赖测试服务器/dind 夹具，不进 CI（见 MAINTENANCE.md）
+  app:
+    name: app typecheck+build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # npm 12 默认 allow-remote=none，lockfile 里 zmodem.js 解析到 npmmirror 会被拒
+      - name: 安装依赖
+        run: npm ci
+        env:
+          npm_config_allow_remote: all
+
+      - name: typecheck（tsc + vue-tsc）
+        run: npm run typecheck
+
+      - name: build（electron-vite → out/）
+        run: npm run build
+
+  # ---------- Go agent：三平台 build + vet + test ----------
+  # 平台垫片（sys_unix/sys_windows）的意义就是三平台都要能编译过测试
+  agent:
+    name: agent go test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false # 纯标准库，没有 go.sum 可缓存
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+      # 部署目标是 linux；scripts/build-agent.mjs 全量跑一遍验证脚本本身
+      - name: build-agent.mjs 交叉编译（linux/amd64 + arm64）
+        working-directory: .
+        run: node scripts/build-agent.mjs
+
+  # ---------- 打包：仅 tag（v*）或手动触发，产物传 artifacts ----------
+  # mac 未配证书（electron-builder.yml identity: null），出未签名 dmg/zip；
+  # 发布到 GitHub Releases 需要另配 --publish 与 token，这里只验证能出包
+  package:
+    name: pack (${{ matrix.name }})
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [app, agent]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows, os: windows-latest, script: pack:win }
+          - { name: macos, os: macos-latest, script: pack:mac }
+          - { name: linux, os: ubuntu-latest, script: pack:linux }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: 安装依赖
+        run: npm ci
+        env:
+          npm_config_allow_remote: all
+
+      # extraResources 要 build/agent/ 存在，缺了 electron-builder 直接报错
+      - name: 交叉编译 dox-agent
+        run: node scripts/build-agent.mjs
+
+      - name: ${{ matrix.script }}
+        run: npm run ${{ matrix.script }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dox-${{ matrix.name }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.deb
+            dist/latest*.yml
+            dist/*.blockmap
+          if-no-files-found: error
