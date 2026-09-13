@@ -11,7 +11,7 @@
 - 跳板机 ProxyJump（等效 `ssh -J`，最多 3 层）、known_hosts 指纹确认（首连信任 / 变更告警）
 - rz/sz（ZMODEM）、Ctrl+F 搜索、选中即复制、终端输出里的绝对路径 Ctrl/Cmd+点击直达面板或编辑器
 - 本地 shell 全平台集成：Windows 列 cmd / PowerShell / pwsh / Git Bash / WSL，POSIX 探测 bash / zsh / fish，cwd 跟踪（OSC 7 / OSC 133 注入）
-- 新开本地终端自动带上 login shell 环境（~/.zprofile / Homebrew shellenv 也进得来；Dox 开着时在别处改的变量，下个标签就生效）
+- 新开本地终端自动带上当前环境（POSIX 走 login shell，~/.zprofile / Homebrew shellenv 也进得来；Windows 读注册表 Machine+User 环境；Dox 开着时在别处改的变量，下个标签就生效）
 - 拖文件进终端：远端会话 = 上传到当前目录，本地终端 = 粘贴引号包裹的路径
 - 本地终端默认目录可设置（设置里目录框选择，不设则回家目录）；布局恢复记住每个标签当时的目录
 

@@ -197,7 +197,7 @@ node scripts/verify-ssh.mjs          # SSH 握手链路
 node scripts/verify-cwd-history.mjs  # SFTP 目录历史（前进/后退，浏览器式逐层回退）
 node scripts/verify-local-explorer.mjs # 本地终端文件面板：新建/重命名/编辑保存/删除/复制/打包全链路落盘
 node scripts/verify-cli.mjs         # CLI 伴侣：--cli 参数单实例转发、connect 预填、安装器
-node scripts/verify-shell-env.mjs   # login 环境解析：假 $SHELL 注入变量，终端里可见
+node scripts/verify-shell-env.mjs   # 新终端环境解析：POSIX 假 $SHELL / Windows 注册表注入变量，终端里可见
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
 
