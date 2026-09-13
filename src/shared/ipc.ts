@@ -128,8 +128,6 @@ export const IpcChannels = {
    * 账号 key 走 safeStorage 加密落盘；查询结果由主进程缓存 + 定时轮询 + 事件广播。
    */
   aiAccountList: 'ai:accountList',
-  dirStatsGet: 'dirStats:get',
-  dirStatsSet: 'dirStats:set',
   aiAccountSave: 'ai:accountSave',
   aiAccountDelete: 'ai:accountDelete',
   aiUsageGet: 'ai:usageGet',

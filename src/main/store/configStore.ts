@@ -16,8 +16,6 @@ interface StoreSchema {
   sessions: SavedSession[]
   snippets: CommandSnippet[]
   aiAccounts: AiAccount[]
-  /** cwd 学习层：bucket（'local' / 设备 id）→ 目录 → 访问次数（含祖先累计） */
-  dirStats: Record<string, Record<string, number>>
 }
 
 /**
@@ -28,19 +26,11 @@ interface StoreSchema {
 export class ConfigStore {
   private store = new Store<StoreSchema>({
     name: 'dox-config',
-    defaults: { sessions: [], snippets: [], aiAccounts: [], dirStats: {} }
+    defaults: { sessions: [], snippets: [], aiAccounts: [] }
   })
 
   list(): SavedSession[] {
     return this.store.get('sessions')
-  }
-
-  getDirStats(): StoreSchema['dirStats'] {
-    return this.store.get('dirStats')
-  }
-
-  setDirStats(stats: StoreSchema['dirStats']): void {
-    this.store.set('dirStats', stats)
   }
 
   save(input: SaveSessionInput): SavedSession {

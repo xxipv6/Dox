@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
-import os from 'node:os'
 import { IpcChannels } from '../shared/ipc'
 import type { DoxApi } from '../shared/api'
 import type {
@@ -190,7 +189,6 @@ const api: DoxApi = {
 
   // ---- 自绘标题栏 ----
   platform: process.platform,
-  homeDir: os.homedir(),
   windowMinimize: () => ipcRenderer.send(IpcChannels.windowMinimize),
   windowToggleMaximize: () => ipcRenderer.send(IpcChannels.windowToggleMaximize),
   windowClose: () => ipcRenderer.send(IpcChannels.windowClose),
@@ -202,9 +200,6 @@ const api: DoxApi = {
   },
 
   // ---- AI 容量 ----
-  dirStatsGet: () => ipcRenderer.invoke(IpcChannels.dirStatsGet),
-  dirStatsSet: (stats: Record<string, Record<string, number>>) =>
-    ipcRenderer.invoke(IpcChannels.dirStatsSet, stats),
   aiAccountList: () => ipcRenderer.invoke(IpcChannels.aiAccountList),
   aiAccountSave: (input) => ipcRenderer.invoke(IpcChannels.aiAccountSave, input),
   aiAccountDelete: (id) => ipcRenderer.invoke(IpcChannels.aiAccountDelete, id),

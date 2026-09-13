@@ -391,16 +391,6 @@ export const useSessionStore = defineStore('sessions', () => {
       pane.sessionId = sessionId
       pane.status = buffered?.status ?? 'connected'
       pane.error = buffered?.error
-
-      // SSH：学习层有把握时自动落到这台设备的常去目录（恢复布局的 cd 后到者为准）
-      if (tab.kind === 'ssh' && pane.status === 'connected') {
-        const bucket = tab.savedSessionId ?? tab.config?.host
-        const top = bucket ? topDirs(bucket, 1)[0] : undefined
-        if (top) {
-          const quoted = `'${top.path.replace(/'/g, `'\\''`)}'`
-          setTimeout(() => window.api.input(sessionId, `cd ${quoted}\r`), 600)
-        }
-      }
     } catch (err) {
       pane.status = 'error'
       pane.error = errorText(err)
@@ -452,16 +442,11 @@ export const useSessionStore = defineStore('sessions', () => {
     activeTabId.value = tab.tabId
   }
 
-  /** 打开本地终端标签页（Wave 形态：应用启动的默认视图）。cwd：布局恢复/学习层指定初始目录 */
+  /** 打开本地终端标签页（Wave 形态：应用启动的默认视图）。cwd：布局恢复指定初始目录 */
   async function connectLocal(cwd?: string): Promise<void> {
-    // 没指定目录时：继承当前活跃本地标签的 cwd（在旁边干活的高频场景）；
-    // 没有活跃本地标签就问学习层要「最常待的地方」；再不行回家目录（spawn 兜底）
+    // 没指定目录（布局恢复之外的普通新开）：设置里的「默认目录」，没设就回家目录（spawn 兜底）
     if (!cwd) {
-      const activeLocal = activeTab.value?.kind === 'local' ? activeTab.value : null
-      const activeCwd = activeLocal?.panes[0]?.sessionId
-        ? cwdBySession[activeLocal.panes[0].sessionId]
-        : undefined
-      cwd = activeCwd ?? topDirs('local', 1)[0]?.path
+      cwd = useSettingsStore().localDefaultDir || undefined
     }
     const pane = newPane()
     const tab = reactive<SessionTab>({
@@ -737,69 +722,6 @@ export const useSessionStore = defineStore('sessions', () => {
 
   function setCwd(sessionId: string, path: string): void {
     cwdBySession[sessionId] = path
-    learnCwd(sessionId, path)
-  }
-
-  // ---- cwd 学习层：新开终端落在「这个上下文你最常待的地方」，零配置 ----
-  /**
-   * 统计口径：bucket = 'local'（本机）或设备 id（savedSessionId，未保存会话用 host）。
-   * 每次 cwd 上报，把该目录及其**祖先目录**（到家目录/根为止，不含 home/根本身）
-   * 各记一次 —— 祖先累计让「项目根/工作区」自然浮到榜首，不需要用户配置基地目录。
-   */
-  const dirStats = ref<Record<string, Record<string, number>>>({})
-  let dirStatsTimer: ReturnType<typeof setTimeout> | null = null
-
-  void window.api.dirStatsGet().then((stats) => {
-    dirStats.value = stats
-  })
-
-  function bucketOfSession(sessionId: string): string | null {
-    if (sessionId.startsWith('local-')) return 'local'
-    const tab = tabs.value.find((t) => t.panes.some((p) => p.sessionId === sessionId))
-    if (!tab || tab.kind !== 'ssh') return null
-    return tab.savedSessionId ?? tab.config?.host ?? null
-  }
-
-  /** 目录的祖先链（两种分隔符都认），不含自身；到 home/根停止 */
-  function ancestorsOf(path: string, home?: string): string[] {
-    const win = /^[A-Za-z]:[\\]/.test(path)
-    const sep = win ? '\\' : '/'
-    const parts = path.split(/[\\/]+/).filter(Boolean)
-    const out: string[] = []
-    for (let i = parts.length - 1; i >= 1; i--) {
-      const head = win ? parts[0] + sep : sep
-      const p = head + parts.slice(1, i + 1).join(sep)
-      if (home && p.length <= home.length) break
-      if (!win && p === '/') break
-      out.push(p)
-    }
-    return out
-  }
-
-  function learnCwd(sessionId: string, path: string): void {
-    const bucket = bucketOfSession(sessionId)
-    if (!bucket || !path || path === '/') return
-    const home = sessionId.startsWith('local-') ? window.api.homeDir : homeBySession[sessionId]
-    if (path === home) return
-    const stats = (dirStats.value[bucket] ??= {})
-    const bump = (p: string): void => {
-      stats[p] = (stats[p] ?? 0) + 1
-    }
-    bump(path)
-    for (const p of ancestorsOf(path, home)) bump(p)
-    if (dirStatsTimer) clearTimeout(dirStatsTimer)
-    dirStatsTimer = setTimeout(() => void window.api.dirStatsSet(dirStats.value), 2000)
-  }
-
-  /** 学习层推荐的目录：访问 ≥3 次的榜首（home/根已在统计时排除） */
-  function topDirs(bucket: string, n = 5, minCount = 3): { path: string; count: number }[] {
-    const stats = dirStats.value[bucket]
-    if (!stats) return []
-    return Object.entries(stats)
-      .filter(([, c]) => c >= minCount)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, n)
-      .map(([path, count]) => ({ path, count }))
   }
 
   function setHome(sessionId: string, path: string): void {
@@ -832,7 +754,6 @@ export const useSessionStore = defineStore('sessions', () => {
     closeMonitor,
     followTerminal,
     toggleFollowTerminal,
-    topDirs,
     cwdBySession,
     homeBySession,
     exitCodeBySession,

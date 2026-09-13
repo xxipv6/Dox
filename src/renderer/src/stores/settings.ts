@@ -23,7 +23,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   portSentinel: true,
   // 536 是算出来的：网络页极限 `192.168.233.233:23244`（21 等宽字符 ≈139px）
   // 在默认宽度下不省略号（列账见 MonitorPanel 的 .conn-grid 注释）
-  monitorWidth: 536
+  monitorWidth: 536,
+  localDefaultDir: ''
 }
 
 /** 界面主题三选。'system' 那一项的解释文案见设置弹窗 */
@@ -72,6 +73,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const suggestPortForward = ref(DEFAULT_SETTINGS.suggestPortForward)
   const portSentinel = ref(DEFAULT_SETTINGS.portSentinel)
   const monitorWidth = ref(DEFAULT_SETTINGS.monitorWidth)
+  const localDefaultDir = ref(DEFAULT_SETTINGS.localDefaultDir)
   const dialogVisible = ref(false)
   /** load() 完成前不写盘，否则会用默认值覆盖掉用户已保存的设置 */
   let loaded = false
@@ -143,6 +145,7 @@ export const useSettingsStore = defineStore('settings', () => {
      * 自己拖过宽度（非 440）的人不动 —— 那是明确的选择（同 uiTheme 迁移的口径）。
      */
     if (persisted?.monitorWidth === 440) monitorWidth.value = DEFAULT_SETTINGS.monitorWidth
+    localDefaultDir.value = persisted?.localDefaultDir ?? DEFAULT_SETTINGS.localDefaultDir
     uiTheme.value = persisted?.uiTheme ?? DEFAULT_SETTINGS.uiTheme
 
     /*
@@ -177,7 +180,8 @@ export const useSettingsStore = defineStore('settings', () => {
         localShellId: localShellId.value,
         suggestPortForward: suggestPortForward.value,
         portSentinel: portSentinel.value,
-        monitorWidth: monitorWidth.value
+        monitorWidth: monitorWidth.value,
+        localDefaultDir: localDefaultDir.value
       })
       .catch((err) => console.warn('[settings] 保存设置失败', err))
   }
@@ -194,7 +198,10 @@ export const useSettingsStore = defineStore('settings', () => {
   )
 
   watch(
-    [themeId, uiTheme, fontSize, fontId, ligatures, localShellId, suggestPortForward, portSentinel, monitorWidth],
+    [
+      themeId, uiTheme, fontSize, fontId, ligatures, localShellId,
+      suggestPortForward, portSentinel, monitorWidth, localDefaultDir
+    ],
     persist
   )
 
@@ -217,6 +224,7 @@ export const useSettingsStore = defineStore('settings', () => {
     suggestPortForward,
     portSentinel,
     monitorWidth,
+    localDefaultDir,
     dialogVisible,
     resolvedTheme,
     currentPreset,

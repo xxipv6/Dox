@@ -13,6 +13,12 @@ useEscapeToClose(
 )
 const shells = ref<LocalShellInfo[]>([])
 
+/** 本地终端默认目录：弹系统目录选择框，不让用户手输路径 */
+async function pickDefaultDir(): Promise<void> {
+  const dir = await window.api.pickDirectory('选择本地终端的默认目录')
+  if (dir) settings.localDefaultDir = dir
+}
+
 // ---- AI 容量账号（key 走 safeStorage 加密落盘，列表不回显 key）----
 interface AiAccountRow {
   id: string
@@ -176,6 +182,26 @@ onMounted(async () => {
         <p class="sub-note">
           新开的本地终端生效。支持 shell integration 的 shell 会实时上报工作目录与命令退出码；
           cmd 只能上报目录（无退出码），WSL 暂不支持。
+        </p>
+      </div>
+
+      <div class="field">
+        <label>本地终端默认目录</label>
+        <div class="dir-pick-row">
+          <span class="dir-pick-value" :title="settings.localDefaultDir || '跟随系统（家目录）'">
+            {{ settings.localDefaultDir || '跟随系统（家目录）' }}
+          </span>
+          <button class="dir-pick-btn" @click="pickDefaultDir">选择目录…</button>
+          <button
+            v-if="settings.localDefaultDir"
+            class="dir-pick-clear"
+            title="清除（回到家目录）"
+            @click="settings.localDefaultDir = ''"
+          >×</button>
+        </div>
+        <p class="sub-note">
+          设置后新开本地终端一律从这个目录启动；不设置则回家目录。
+          目录后来被删了会自动落回家目录。
         </p>
       </div>
 
@@ -410,6 +436,48 @@ select:focus {
   color: var(--fg-muted);
   margin: var(--sp-2) 0 0;
   line-height: 1.6;
+}
+/* 默认目录：只读展示 + 选择按钮（路径手输容易错，只给目录框） */
+.dir-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dir-pick-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--fg-secondary);
+  background: var(--bg-inset, var(--bg-hover));
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
+}
+.dir-pick-btn {
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  padding: 5px 10px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  cursor: pointer;
+}
+.dir-pick-btn:hover {
+  filter: brightness(1.05);
+}
+.dir-pick-clear {
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  padding: 5px 9px;
+  border-radius: var(--r-sm);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.dir-pick-clear:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
 }
 
 /* AI 容量账号管理 */

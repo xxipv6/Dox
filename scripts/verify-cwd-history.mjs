@@ -1,11 +1,8 @@
 /**
- * SFTP 目录历史（前进/后退）+ 标签右键「换到最近目录」端到端：
- *
- * A. SFTP 历史：SSH 连 dind → SFTP 进 /etc → 回根进 /var →
- *    工具栏「后退」回到 /etc、「前进」回到 /var；未导航时两按钮均禁用。
- * B. 反悔入口：预置 dirStats（本机 /tmp、/var 高频）→ 重载 →
- *    新建本地终端自动落在榜首 /tmp → 右键标签出菜单 → 点 /var →
- *    终端收到 cd '/var'。
+ * SFTP 目录历史（前进/后退）端到端：
+ *  SSH 连 dind → SFTP 进 /etc → 回根进 /var →
+ *  工具栏「后退」逐层退回（浏览器式）→「前进」原路返回；
+ *  未导航时两按钮均禁用。
  *
  * 用法：node scripts/verify-cwd-history.mjs
  * 前置：npm run build；dox-sshd-test 在跑
@@ -28,21 +25,13 @@ const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(1200)
-
-// 预置本机学习数据（测完恢复原值，不污染真实统计）
-const savedStats = await win.evaluate(() => window.api.dirStatsGet())
-await win.evaluate(() =>
-  window.api.dirStatsSet({ local: { '/tmp': 9, '/var': 6, '/etc': 3 } })
-)
 await win.evaluate(async () => {
   await window.api.setLayout({ tabs: [] })
   location.reload()
 })
 await win.waitForLoadState('domcontentloaded')
-await win.waitForTimeout(2500)
+await win.waitForTimeout(2000)
 
-// ---- A. SFTP 历史 ----
-console.log('A. SFTP 目录历史')
 await win.locator('button[title="添加设备"]').click()
 await win.waitForTimeout(400)
 await win.locator('input[placeholder^="192.168"]').fill('localhost')
@@ -103,45 +92,6 @@ await win.waitForTimeout(1500)
 check('再前进回到 /var', (await crumbText()).includes('var'))
 await win.screenshot({ path: 'shots/98-sftp-history.png' })
 
-// ---- B. 标签右键「换到最近目录」----
-console.log('B. 标签右键反悔入口')
-// 新开本地终端：学习层榜首是 /tmp（预置 9 次），应自动落过去
-await win.locator('button.tab-new').click()
-await win.waitForTimeout(2500)
-const localTab = win.locator('.tab', { hasText: '本地' }).first()
-await localTab.waitFor({ timeout: 10000 })
-// 等 OSC7 上报 cwd，标签名变成「本地 · tmp」说明确实落在了 /tmp
-let fellIntoTmp = false
-for (let i = 0; i < 10; i++) {
-  const t = (await localTab.textContent()) ?? ''
-  if (t.includes('tmp')) { fellIntoTmp = true; break }
-  await win.waitForTimeout(500)
-}
-check('新本地终端自动落到 /tmp（学习层榜首）', fellIntoTmp, (await localTab.textContent()) ?? '')
-
-await localTab.click({ button: 'right' })
-await win.waitForTimeout(600)
-const menu = win.locator('.context-menu')
-await menu.waitFor({ timeout: 5000 })
-const menuText = (await menu.textContent()) ?? ''
-check('菜单含 /tmp', menuText.includes('/tmp'), menuText)
-check('菜单含 /var', menuText.includes('/var'), menuText)
-
-await menu.locator('.menu-item', { hasText: '/var' }).first().click()
-await win.waitForTimeout(1200)
-const termText = await win.evaluate(() => {
-  // 找到「本地」标签对应的可见终端
-  for (const tc of document.querySelectorAll('.tab-content:not([style*="display: none"])')) {
-    const rows = tc.querySelector('.xterm-rows')
-    if (rows) return rows.textContent ?? ''
-  }
-  return ''
-})
-check('终端收到 cd \'/var\'', termText.includes("cd '/var'") || termText.includes('cd /var'), termText.slice(-100))
-await win.screenshot({ path: 'shots/98-tab-menu.png' })
-
-// 恢复原学习数据，清布局
-await win.evaluate((stats) => window.api.dirStatsSet(stats), savedStats)
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 await app.close()
 

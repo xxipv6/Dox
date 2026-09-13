@@ -284,12 +284,9 @@ export interface DoxApi {
    * 引用 NodeJS 命名空间会直接编译不过；而真正的用途只有「是不是 darwin」这一个判断。
    */
   /** cwd 学习层：读取/写回目录访问统计（bucket → 目录 → 次数） */
-  dirStatsGet(): Promise<Record<string, Record<string, number>>>
-  dirStatsSet(stats: Record<string, Record<string, number>>): Promise<void>
 
   readonly platform: string
   /** 本机家目录（学习层的 home 排除用） */
-  readonly homeDir: string
   /** 最小化窗口 */
   windowMinimize(): void
   /** 最大化 / 还原 */

@@ -43,6 +43,30 @@ await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(2500)
 
 try {
+  // ---- 默认目录设置：设成测试目录 → 新开本地终端落在那（标签名带目录名）----
+  await win.evaluate(async (dir) => {
+    const s = await window.api.getSettings()
+    await window.api.setSettings({ ...s, localDefaultDir: dir })
+    location.reload()
+  }, base)
+  await win.waitForLoadState('domcontentloaded')
+  await win.waitForTimeout(2500)
+  let fellIntoDefault = false
+  for (let i = 0; i < 10; i++) {
+    const t = (await win.locator('.tab').first().textContent()) ?? ''
+    if (t.includes('dox-e2e-local')) { fellIntoDefault = true; break }
+    await win.waitForTimeout(500)
+  }
+  check('默认目录设置生效（新终端落在默认目录）', fellIntoDefault)
+  // 清掉设置再重来，后续用例从家目录出发
+  await win.evaluate(async () => {
+    const s = await window.api.getSettings()
+    await window.api.setSettings({ ...s, localDefaultDir: '' })
+    location.reload()
+  })
+  await win.waitForLoadState('domcontentloaded')
+  await win.waitForTimeout(2500)
+
   // ---- 开面板 ----
   await win.locator('button.bar-btn', { hasText: '文件' }).click()
   await win.locator('.explorer .row').first().waitFor({ timeout: 10000 })
