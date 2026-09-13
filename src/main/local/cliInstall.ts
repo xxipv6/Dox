@@ -42,20 +42,26 @@ function cmdScript(execPath: string, appPath: string): string {
   // 转义引号，`"--cwd=C:\"` 会被解析成 --cwd=C:"（引号漏进值里、目录失效
   // 回退家目录）；`"--cwd=C:\\"` 才解析成 C:\。mac 的 sh 没这问题：
   // $(pwd) 输出永远不带结尾斜杠，sh 引号也没有反斜杠转义
+  //
+  // 启动包一层 cmd /c "… >NUL 2>&1"：electron.exe 每次启动都往 stdout 印
+  // 一个空行（--version 的输出前都带 \r\n，二进制层面的癖好），而 start
+  // 不把外层的 >NUL 传给子进程（实测）——不包这层，那个空行会在 cmd 画完
+  // 提示符之后才到，把输入光标顶到提示符下面一行。VS Code 的 code.cmd 没
+  // 这问题是因为它不用 start，cmd 会等 Code.exe 退出，时序天然串行
   return `@echo off
 rem Dox CLI companion - installed from Dox settings page
 if "%~1"=="" (
-  start "" "${execPath}"${appPath} --cli=focus
+  start "" cmd /c ""${execPath}"${appPath} --cli=focus >NUL 2>&1"
   exit /b 0
 )
 if exist "%~1\\" goto local
-start "" "${execPath}"${appPath} --cli=connect "--target=%~1"
+start "" cmd /c ""${execPath}"${appPath} --cli=connect "--target=%~1" >NUL 2>&1"
 exit /b 0
 
 :local
 set "p=%~f1"
 if "%p:~-1%"=="\\" set "p=%p%\\"
-start "" "${execPath}"${appPath} --cli=local "--cwd=%p%"
+start "" cmd /c ""${execPath}"${appPath} --cli=local "--cwd=%p%" >NUL 2>&1"
 exit /b 0
 `.replace(/\n/g, '\r\n')
 }
