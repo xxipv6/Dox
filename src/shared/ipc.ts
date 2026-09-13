@@ -131,6 +131,7 @@ export const IpcChannels = {
   cliCommand: 'cli:command',
   cliCommandReady: 'cli:commandReady',
   cliInstall: 'cli:install',
+  cliStatus: 'cli:status',
   aiAccountList: 'ai:accountList',
   aiAccountSave: 'ai:accountSave',
   aiAccountDelete: 'ai:accountDelete',

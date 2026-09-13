@@ -178,3 +178,39 @@ export function installCli(): CliInstallResult {
   }
   throw new Error(`没有可写的安装位置：${lastErr instanceof Error ? lastErr.message : String(lastErr)}`)
 }
+
+/**
+ * 当前安装状态（设置页回显用）：null = 没装。
+ *
+ * 文件在但 PATH 没配也算「没装好」——命令打不到就是没装；note 里给补救路径
+ * （再点一次安装，幂等的 addToUserPath 会只补 PATH 不重写文件）。
+ */
+export function cliInstallStatus(): CliInstallResult | null {
+  if (process.platform === 'win32') {
+    const dir = path.join(process.env['LOCALAPPDATA'] ?? os.homedir(), 'dox', 'bin')
+    const target = path.join(dir, 'dox.cmd')
+    if (!fs.existsSync(target)) return null
+    const norm = (s: string): string => s.replace(/[\/]+$/, '').toLowerCase()
+    const inPath = readUserPath()
+      .split(';')
+      .some((p) => norm(p.trim()) === norm(dir))
+    return {
+      path: target,
+      note: inPath ? undefined : '目录不在用户 PATH 里（命令还打不到），点「重新安装」会自动补上'
+    }
+  }
+
+  const home = os.homedir()
+  const candidates = ['/usr/local/bin', path.join(home, '.local', 'bin'), path.join(home, 'bin')]
+  for (const dir of candidates) {
+    const target = path.join(dir, 'dox')
+    if (!fs.existsSync(target)) continue
+    // 应用进程自己的 PATH 不一定等于登录 shell 的，查不到就少说少错（不提示）
+    const inPath = (process.env['PATH'] ?? '').split(':').includes(dir)
+    return {
+      path: target,
+      note: inPath ? undefined : `目录 ${dir} 可能不在 PATH 里，命令打不到的话点「重新安装」看提示`
+    }
+  }
+  return null
+}

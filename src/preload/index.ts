@@ -187,6 +187,7 @@ const api: DoxApi = {
 
   // ---- CLI 伴侣（dox 命令） ----
   cliInstall: () => ipcRenderer.invoke(IpcChannels.cliInstall),
+  cliStatus: () => ipcRenderer.invoke(IpcChannels.cliStatus),
   cliCommandReady: () => ipcRenderer.send(IpcChannels.cliCommandReady),
   onCliCommand: (cb) => {
     const listener = (_e: IpcRendererEvent, cmd: CliCommandPayload): void => cb(cmd)

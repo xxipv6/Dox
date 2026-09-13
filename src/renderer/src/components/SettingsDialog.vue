@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { FONT_PRESETS, UI_THEME_OPTIONS, useSettingsStore } from '../stores/settings'
 import { AUTO_THEME_ID, TERMINAL_THEMES } from '../utils/themes'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
@@ -31,6 +31,24 @@ async function installCli(): Promise<void> {
     cliInstallError.value = err instanceof Error ? err.message : String(err)
   }
 }
+
+/*
+ * 回显真实安装状态：本组件常驻挂载（弹层是内部 v-if），onMounted 只在
+ * 应用启动时跑一次，所以盯 dialogVisible —— 每次打开都重新问主进程。
+ * 文件在但 PATH 没配时主进程会在 note 里给补救路径。
+ */
+watch(
+  () => settings.dialogVisible,
+  async (visible) => {
+    if (!visible) return
+    try {
+      cliInstallResult.value = await window.api.cliStatus()
+      cliInstallError.value = ''
+    } catch {
+      /* 查询失败就当没装，不挡弹窗 */
+    }
+  }
+)
 
 // ---- AI 容量账号（key 走 safeStorage 加密落盘，列表不回显 key）----
 interface AiAccountRow {

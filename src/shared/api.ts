@@ -275,6 +275,8 @@ export interface DoxApi {
 
   /** CLI 伴侣：安装 dox 命令到 PATH（返回安装位置与 PATH 提示） */
   cliInstall(): Promise<{ path: string; note?: string }>
+  /** CLI 伴侣：查询安装状态（设置页回显）；null = 没装 */
+  cliStatus(): Promise<{ path: string; note?: string } | null>
   /** dox 命令事件（--cli 参数经单实例锁转发而来）：local 开标签、connect 连接、focus 前置窗口 */
   onCliCommand(cb: (cmd: CliCommandPayload) => void): () => void
   /** 渲染层挂载完成信号：主进程据此 flush 排队中的 CLI 命令（冷启动参数） */

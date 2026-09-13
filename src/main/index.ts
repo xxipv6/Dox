@@ -4,7 +4,7 @@ import { applyNativeTheme, backgroundColorFor } from './theme'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setupCliCommand, flushCliCommand } from './cliCommand'
-import { installCli } from './local/cliInstall'
+import { cliInstallStatus, installCli } from './local/cliInstall'
 import { SessionManager } from './ssh/SessionManager'
 import { ConfigStore } from './store/configStore'
 import { KnownHostsStore } from './store/knownHosts'
@@ -39,6 +39,7 @@ if (!setupCliCommand()) {
 // 渲染层挂载完成才 flush 排队命令（冷启动参数会早于第一帧到达）
 ipcMain.on(IpcChannels.cliCommandReady, () => flushCliCommand())
 ipcMain.handle(IpcChannels.cliInstall, () => installCli())
+ipcMain.handle(IpcChannels.cliStatus, () => cliInstallStatus())
 
 const configStore = new ConfigStore()
 const knownHosts = new KnownHostsStore()
