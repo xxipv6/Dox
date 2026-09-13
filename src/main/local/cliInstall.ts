@@ -37,17 +37,26 @@ function cmdScript(execPath: string, appPath: string): string {
   // 注释只能 ASCII：cmd 按系统 OEM 代码页（中文机 GBK）读批处理，UTF-8 的
   // 中文注释会被错配成可执行垃圾（报「'荆' 不是内部或外部命令」）；
   // 换行必须 CRLF：LF-only 的批处理带括号块在 cmd 里有解析坑
+  //
+  // 盘符根目录（C:\）双写结尾反斜杠：值进 CommandLineToArgvW 时 `\"` 是
+  // 转义引号，`"--cwd=C:\"` 会被解析成 --cwd=C:"（引号漏进值里、目录失效
+  // 回退家目录）；`"--cwd=C:\\"` 才解析成 C:\。mac 的 sh 没这问题：
+  // $(pwd) 输出永远不带结尾斜杠，sh 引号也没有反斜杠转义
   return `@echo off
 rem Dox CLI companion - installed from Dox settings page
 if "%~1"=="" (
   start "" "${execPath}"${appPath} --cli=focus
   exit /b 0
 )
-if exist "%~1\\" (
-  for %%I in ("%~1") do start "" "${execPath}"${appPath} --cli=local "--cwd=%%~fI"
-) else (
-  start "" "${execPath}"${appPath} --cli=connect "--target=%~1"
-)
+if exist "%~1\\" goto local
+start "" "${execPath}"${appPath} --cli=connect "--target=%~1"
+exit /b 0
+
+:local
+set "p=%~f1"
+if "%p:~-1%"=="\\" set "p=%p%\\"
+start "" "${execPath}"${appPath} --cli=local "--cwd=%p%"
+exit /b 0
 `.replace(/\n/g, '\r\n')
 }
 

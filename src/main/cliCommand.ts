@@ -35,7 +35,11 @@ export function parseCliArgv(argv: string[]): CliCommand | null {
     case 'focus':
       return { kind: 'focus' }
     case 'local': {
-      const cwd = read('--cwd')
+      let cwd = read('--cwd')
+      // 批处理把带结尾反斜杠的路径塞进引号参数时，CommandLineToArgvW 把 \"
+      // 当转义引号，值会吃进一个引号（--cwd=C:"）。dox.cmd 已对盘符根目录
+      // 双写反斜杠规避；这里剥掉残留引号兜底（win32 路径本就不能含引号）
+      if (cwd && process.platform === 'win32') cwd = cwd.replace(/"+$/g, '')
       return cwd ? { kind: 'local', cwd } : null
     }
     case 'connect': {
