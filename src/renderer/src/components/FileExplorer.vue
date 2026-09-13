@@ -117,6 +117,20 @@ const newDirName = ref('')
 const renamingPath = ref<string | null>(null)
 const renameValue = ref('')
 
+/**
+ * autofocus 属性对动态插入的元素不可靠（同一页面第二次插入常常不聚焦）。
+ * 输入框没聚焦就不会有 blur —— 用户点别处输入框也不消失（报告过的 bug）。
+ * 指令是确定性的：挂载即聚焦，并像 Finder 一样预选主名（不含扩展名）。
+ */
+const vFocus = {
+  mounted(el: HTMLElement): void {
+    if (!(el instanceof HTMLInputElement)) return
+    el.focus()
+    const dot = el.value.lastIndexOf('.')
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+  }
+}
+
 // ---- 选中（对齐本地文件管理器的操作习惯）----
 /** 已选中的条目路径。用 Set 而不是单个值，Ctrl 多选才有地方放 */
 const selected = ref<Set<string>>(new Set())
@@ -783,9 +797,9 @@ onBeforeUnmount(() => {
         <Icon class="file-icon" name="folder" :size="15" />
         <input
           v-model="newDirName"
+          v-focus
           class="rename-input"
           placeholder="文件夹名"
-          autofocus
           @keyup.enter="submitNewDir"
           @keyup.esc="creatingDir = false"
           @blur="submitNewDir"
@@ -810,8 +824,8 @@ onBeforeUnmount(() => {
         <input
           v-if="renamingPath === entry.path"
           v-model="renameValue"
+          v-focus
           class="rename-input"
-          autofocus
           @keyup.enter="submitRename(entry)"
           @keyup.esc="renamingPath = null"
           @blur="submitRename(entry)"

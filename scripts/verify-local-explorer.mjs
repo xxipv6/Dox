@@ -105,6 +105,18 @@ try {
   await win.waitForTimeout(800)
   check('重命名落盘', fs.existsSync(path.join(base, 'b.txt')) && !fs.existsSync(path.join(base, 'a.txt')))
 
+  // ---- 重命名输入框：挂载必须聚焦（autofocus 对二次插入不可靠，曾因此点别处不消失）----
+  await win.locator('.explorer .row', { hasText: 'b.txt' }).first().click({ button: 'right' })
+  await win.locator('.context-menu .menu-item', { hasText: '重命名' }).click()
+  await win.waitForTimeout(300)
+  check(
+    '重命名输入框挂载即聚焦',
+    await win.evaluate(() => document.activeElement?.classList.contains('rename-input'))
+  )
+  await win.locator('.terminal-container').first().click()
+  await win.waitForTimeout(400)
+  check('点击终端后输入框消失（blur 提交）', (await win.locator('.explorer .rename-input').count()) === 0)
+
   // ---- 编辑器：打开 b.txt，改成 bye-local 保存，磁盘校验 ----
   await win.locator('.explorer .row', { hasText: 'b.txt' }).first().dblclick()
   await win.locator('.cm-content').waitFor({ timeout: 10000 })
