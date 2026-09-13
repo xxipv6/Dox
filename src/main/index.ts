@@ -1,8 +1,10 @@
-import { app, BrowserWindow, nativeTheme, powerMonitor, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeTheme, powerMonitor, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { applyNativeTheme, backgroundColorFor } from './theme'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { setupCliCommand, flushCliCommand } from './cliCommand'
+import { installCli } from './local/cliInstall'
 import { SessionManager } from './ssh/SessionManager'
 import { ConfigStore } from './store/configStore'
 import { KnownHostsStore } from './store/knownHosts'
@@ -24,6 +26,19 @@ import { setupAutoUpdater } from './updater'
 
 // 注意：不能命名为 __dirname，electron-vite dev 模式会注入同名 polyfill 导致重复声明
 const mainDir = dirname(fileURLToPath(import.meta.url))
+
+/*
+ * 单实例（CLI 伴侣）：必须在 ready 之前注册。
+ * 没拿到锁 = 已有一个实例在跑，本进程的 --cli 参数会经 second-instance
+ * 交给它。这里用 app.exit 而不是 app.quit：ready 之前调 quit 不阻止
+ * whenReady 回调继续建窗（实测：第二个实例照样开出窗口，CLI 参数全丢）。
+ */
+if (!setupCliCommand()) {
+  app.exit(0)
+}
+// 渲染层挂载完成才 flush 排队命令（冷启动参数会早于第一帧到达）
+ipcMain.on(IpcChannels.cliCommandReady, () => flushCliCommand())
+ipcMain.handle(IpcChannels.cliInstall, () => installCli())
 
 const configStore = new ConfigStore()
 const knownHosts = new KnownHostsStore()

@@ -3,6 +3,7 @@ import { computed, reactive, ref } from 'vue'
 import { AUTH_DECRYPT_FAILED } from '@shared/types'
 import type {
   ContainerInfo,
+  CliCommandPayload,
   SavedSession,
   SaveSessionInput,
   SessionStatus,
@@ -275,6 +276,30 @@ export const useSessionStore = defineStore('sessions', () => {
 
   function requestAddDevice(prefill: { host: string; port: number; username: string }): void {
     addDevicePrefill.value = prefill
+  }
+
+  /**
+   * CLI 伴侣（dox 命令）：dox . 开本地标签；dox user@host:port 连接。
+   * 连接优先匹配已保存设备（host 必配，user/port 给了也要对上）——
+   * 库存凭证直接用；没存过就预填添加设备表单，绝不凭空试密码。
+   */
+  function handleCliCommand(cmd: CliCommandPayload): void {
+    if (cmd.kind === 'local' && cmd.cwd) {
+      void connectLocal(cmd.cwd)
+      return
+    }
+    if (cmd.kind !== 'connect' || !cmd.target) return
+    const m = /^(?:([^@]+)@)?([^:]+)(?::(\d+))?$/.exec(cmd.target)
+    if (!m) return
+    const [, user, host, portStr] = m
+    const saved = savedSessions.value.find(
+      (s) =>
+        s.host === host &&
+        (!user || s.username === user) &&
+        (!portStr || s.port === Number(portStr))
+    )
+    if (saved) void connectSaved(saved)
+    else requestAddDevice({ host, port: portStr ? Number(portStr) : 22, username: user ?? 'root' })
   }
 
   function clearAddDeviceRequest(): void {
@@ -743,6 +768,7 @@ export const useSessionStore = defineStore('sessions', () => {
     agentInstallStamp,
     markAgentInstalled,
     requestAddDevice,
+    handleCliCommand,
     clearAddDeviceRequest,
     editSessionRequest,
     requestEditSession,

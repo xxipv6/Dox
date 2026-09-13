@@ -127,6 +127,10 @@ export const IpcChannels = {
    * AI 容量（Kimi Code / DeepSeek / GLM 配额速览）。
    * 账号 key 走 safeStorage 加密落盘；查询结果由主进程缓存 + 定时轮询 + 事件广播。
    */
+  // CLI 伴侣：dox 命令的 --cli 参数（主 → 渲染事件）与安装器
+  cliCommand: 'cli:command',
+  cliCommandReady: 'cli:commandReady',
+  cliInstall: 'cli:install',
   aiAccountList: 'ai:accountList',
   aiAccountSave: 'ai:accountSave',
   aiAccountDelete: 'ai:accountDelete',

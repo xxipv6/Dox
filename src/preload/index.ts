@@ -6,6 +6,7 @@ import type {
   AiAccountInput,
   AiUsageSnapshot,
   ComposeRunEvent,
+  CliCommandPayload,
   DownloadRequest,
   DroppedFile,
   ForwardRule,
@@ -183,6 +184,15 @@ const api: DoxApi = {
 
   // ---- rz/sz（ZMODEM） ----
   pickDirectory: (title) => ipcRenderer.invoke(IpcChannels.dialogPickDirectory, title),
+
+  // ---- CLI 伴侣（dox 命令） ----
+  cliInstall: () => ipcRenderer.invoke(IpcChannels.cliInstall),
+  cliCommandReady: () => ipcRenderer.send(IpcChannels.cliCommandReady),
+  onCliCommand: (cb) => {
+    const listener = (_e: IpcRendererEvent, cmd: CliCommandPayload): void => cb(cmd)
+    ipcRenderer.on(IpcChannels.cliCommand, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.cliCommand, listener)
+  },
   pickAndReadFiles: () => ipcRenderer.invoke(IpcChannels.zmodemPickReadFiles),
   writeReceivedFile: (dir, name, data) =>
     ipcRenderer.invoke(IpcChannels.zmodemWriteFile, dir, name, data),

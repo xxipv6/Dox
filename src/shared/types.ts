@@ -494,3 +494,12 @@ export type ComposeVerb = 'up' | 'restart' | 'down'
 export type ComposeRunEvent =
   | { id: string; type: 'data'; text: string }
   | { id: string; type: 'exit'; code: number; canceled: boolean }
+
+/** dox 命令的 --cli 参数负载（主进程解析后发给渲染层；CLI 伴侣的三种动作） */
+export interface CliCommandPayload {
+  kind: 'focus' | 'local' | 'connect'
+  /** kind=local：新标签落的目录（原生路径，已解码） */
+  cwd?: string
+  /** kind=connect：`[user@]host[:port]` */
+  target?: string
+}

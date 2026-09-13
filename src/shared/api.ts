@@ -6,6 +6,7 @@ import type {
   AppSettings,
   CommandSnippet,
   ComposeRunEvent,
+  CliCommandPayload,
   ComposeVerb,
   ContainerControlAction,
   ContainerProbeResult,
@@ -271,6 +272,13 @@ export interface DoxApi {
 
   // ---- rz/sz（ZMODEM） ----
   pickDirectory(title: string): Promise<string | null>
+
+  /** CLI 伴侣：安装 dox 命令到 PATH（返回安装位置与 PATH 提示） */
+  cliInstall(): Promise<{ path: string; note?: string }>
+  /** dox 命令事件（--cli 参数经单实例锁转发而来）：local 开标签、connect 连接、focus 前置窗口 */
+  onCliCommand(cb: (cmd: CliCommandPayload) => void): () => void
+  /** 渲染层挂载完成信号：主进程据此 flush 排队中的 CLI 命令（冷启动参数） */
+  cliCommandReady(): void
   /** 弹文件选择框并读入内容（rz 上传用，单文件限 256MB） */
   pickAndReadFiles(): Promise<ZmodemFile[]>
   /** 把 sz 接收到的文件写入指定目录，重名自动加序号，返回最终路径 */

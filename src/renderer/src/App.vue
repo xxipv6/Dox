@@ -28,6 +28,11 @@ const layout = useLayoutStore()
 // Wave 形态：应用启动即开一个本地终端标签页。
 // 若上次退出时还有布局，则先按布局恢复；只有恢复不出东西时才开默认本地终端。
 onMounted(async () => {
+  // CLI 伴侣：dox 命令经主进程转到这里；先挂监听再报 ready，
+  // 否则冷启动参数 flush 时监听还没装上
+  window.api.onCliCommand((cmd) => store.handleCliCommand(cmd))
+  window.api.cliCommandReady()
+
   let restored = false
   try {
     restored = await layout.restore()

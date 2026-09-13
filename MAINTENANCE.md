@@ -196,6 +196,7 @@ node scripts/verify-render.mjs       # 终端渲染（@xterm/headless，14 种�
 node scripts/verify-ssh.mjs          # SSH 握手链路
 node scripts/verify-cwd-history.mjs  # SFTP 目录历史（前进/后退，浏览器式逐层回退）
 node scripts/verify-local-explorer.mjs # 本地终端文件面板：新建/重命名/编辑保存/删除/复制/打包全链路落盘
+node scripts/verify-cli.mjs         # CLI 伴侣：--cli 参数单实例转发、connect 预填、安装器
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
 

@@ -19,6 +19,19 @@ async function pickDefaultDir(): Promise<void> {
   if (dir) settings.localDefaultDir = dir
 }
 
+/** CLI 伴侣：把 dox 命令装进 PATH（dox . / dox user@host 随手开标签） */
+const cliInstallResult = ref<{ path: string; note?: string } | null>(null)
+const cliInstallError = ref('')
+async function installCli(): Promise<void> {
+  cliInstallResult.value = null
+  cliInstallError.value = ''
+  try {
+    cliInstallResult.value = await window.api.cliInstall()
+  } catch (err) {
+    cliInstallError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
 // ---- AI 容量账号（key 走 safeStorage 加密落盘，列表不回显 key）----
 interface AiAccountRow {
   id: string
@@ -202,6 +215,26 @@ onMounted(async () => {
         <p class="sub-note">
           设置后新开本地终端一律从这个目录启动；不设置则回家目录。
           目录后来被删了会自动落回家目录。
+        </p>
+      </div>
+
+      <div class="field">
+        <label>命令行工具（dox 命令）</label>
+        <div class="dir-pick-row">
+          <span class="dir-pick-value">
+            {{ cliInstallResult ? `已装到 ${cliInstallResult.path}` : 'dox . 当前目录开标签 · dox root@1.2.3.4 直连' }}
+          </span>
+          <button class="dir-pick-btn" @click="installCli">
+            {{ cliInstallResult ? '重新安装' : '安装' }}
+          </button>
+        </div>
+        <p v-if="cliInstallResult?.note" class="sub-note">{{ cliInstallResult.note }}</p>
+        <p v-else-if="cliInstallError" class="sub-note" style="color: var(--danger-text, #c00)">
+          安装失败：{{ cliInstallError }}
+        </p>
+        <p v-else class="sub-note">
+          在任意终端里敲 <code>dox .</code> 让 Dox 在当前目录开标签，<code>dox user@host</code> 直接连设备
+          （已保存的设备用库存凭证直连，没存过会预填表单）。
         </p>
       </div>
 

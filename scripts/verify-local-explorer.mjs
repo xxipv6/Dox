@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { mkdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 
 mkdirSync('shots', { recursive: true })
 
@@ -30,6 +31,10 @@ fs.mkdirSync(path.join(base, 'copydst'))
 fs.writeFileSync(path.join(base, 'a.txt'), 'hello-local')
 fs.writeFileSync(path.join(base, 'sub', 'c.txt'), 'x')
 
+// 上次跑挂可能留下僵尸实例：共享锁（单实例 CLI）与布局文件都会污染本次运行。
+// 只能杀本仓库的 electron（别的 verify 脚本/ dev 同时跑本来就会互相踩）
+try { execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
+
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
@@ -44,9 +49,13 @@ await win.waitForTimeout(2500)
 
 try {
   // ---- 默认目录设置：设成测试目录 → 新开本地终端落在那（标签名带目录名）----
+  // 注意必须同时清布局：布局恢复（带 cwd 的快照）优先于默认目录 ——
+  // 上一个标签的 cwd 已经 autosave 进快照，不清掉的话恢复的是旧 cwd，
+  // 根本轮不到默认目录出场（这条检查曾因此时好时坏）
   await win.evaluate(async (dir) => {
     const s = await window.api.getSettings()
     await window.api.setSettings({ ...s, localDefaultDir: dir })
+    await window.api.setLayout({ tabs: [] })
     location.reload()
   }, base)
   await win.waitForLoadState('domcontentloaded')
