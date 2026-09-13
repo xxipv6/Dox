@@ -17,6 +17,7 @@ import { parseProcNetTcp } from '../ssh/procNet'
 import { CommandError, outputsOf } from '../execError'
 import { createChunkBatcher } from '../chunkBatcher'
 import { isNotFound, runLocal } from './localRun'
+import { mergeEnv, resolveShellEnv } from '../local/shellEnv'
 import {
   assertContainerTarget,
   classifyFailure,
@@ -687,7 +688,7 @@ export class ContainerManager {
       cols: term.cols,
       rows: term.rows,
       cwd: os.homedir(),
-      env: { ...(process.env as Record<string, string>), TERM: 'xterm-256color' }
+      env: { ...mergeEnv(process.env as Record<string, string>, (await resolveShellEnv()) ?? {}), TERM: 'xterm-256color' }
     })
     return { kind: 'local', pty: proc }
   }
@@ -770,7 +771,7 @@ export class ContainerManager {
           cols: term.cols,
           rows: term.rows,
           cwd: os.homedir(),
-          env: { ...(process.env as Record<string, string>), TERM: 'xterm-256color' }
+          env: { ...mergeEnv(process.env as Record<string, string>, (await resolveShellEnv()) ?? {}), TERM: 'xterm-256color' }
         })
       }
     } else {
@@ -1109,8 +1110,14 @@ async function resolveExecutable(binary: string): Promise<string> {
   const cached = resolvedBinaryCache.get(binary)
   if (cached) return cached
   const finder = process.platform === 'win32' ? 'where' : 'which'
+  // GUI 启动只有 launchd 最小 PATH，which 要带 login shell 环境才找得到
+  // /opt/homebrew/bin 里的 docker/podman（与 runLocal 同一个缺口的另一半）
+  const env = mergeEnv(
+    process.env as Record<string, string>,
+    (await resolveShellEnv()) ?? {}
+  )
   const found = await new Promise<string[]>((resolve) => {
-    execFile(finder, [binary], { windowsHide: true }, (err, stdout) => {
+    execFile(finder, [binary], { windowsHide: true, env }, (err, stdout) => {
       resolve(
         err
           ? []
@@ -1150,6 +1157,6 @@ function killLocalPty(proc: IPty): void {
   // 而该 agent 从终端启动时可能崩溃（AttachConsole failed），导致子进程残留。
   // 这里补一刀按进程树清理，确保不留孤儿容器 shell。
   if (process.platform === 'win32' && pid) {
-    execFile('taskkill', ['/T', '/F', '/PID', String(pid)], () => undefined)
+    execFile('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true }, () => undefined)
   }
 }

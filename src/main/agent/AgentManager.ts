@@ -10,6 +10,7 @@ import { execCapture } from '../ssh/remoteExec'
 import { mkdirRemoteRecursive } from '../sftp/sftpUtils'
 import { assertContainerTarget, parseDockerInfoPlatform } from '../container/runtime'
 import { runLocal } from '../container/localRun'
+import { mergeEnv, resolveShellEnv } from '../local/shellEnv'
 import { isLocalContainerTarget } from '../../shared/sessionId'
 import { IpcChannels } from '../../shared/ipc'
 
@@ -465,7 +466,11 @@ export class AgentManager {
       const binary = await this.resolveRuntime(sessionId)
       if (!binary) throw new Error('本机没有可用的容器运行时')
       const proc = spawn(binary, ['exec', '-i', containerName, CTR_BIN, 'serve'], {
-        stdio: ['pipe', 'pipe', 'inherit']
+        stdio: ['pipe', 'pipe', 'inherit'],
+        // 长驻进程：Windows 下不加 windowsHide 会弹一个一直挂着的黑色控制台窗口
+        windowsHide: true,
+        // GUI 启动的稀疏 PATH 找不到 Homebrew 的 docker（同 localRun 的口径）
+        env: mergeEnv(process.env as Record<string, string>, (await resolveShellEnv()) ?? {})
       })
       stream = wrapLocalProc(proc)
     } else {
