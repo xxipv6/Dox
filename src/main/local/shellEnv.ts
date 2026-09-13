@@ -83,7 +83,7 @@ function fetchWindowsEnv(): Promise<Record<string, string> | null> {
           'user=[Environment]::GetEnvironmentVariables("User")' +
           '}'
       ],
-      { timeout: TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' },
+      { timeout: TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8', windowsHide: true },
       (err, stdout) => {
         if (err) {
           resolve(null)

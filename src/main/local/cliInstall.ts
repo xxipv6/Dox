@@ -86,7 +86,8 @@ function readUserPath(): string {
   try {
     const out = execFileSync('reg', ['query', 'HKCU\\Environment', '/v', 'Path'], {
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore']
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true
     })
     const m = out.match(/^\s*Path\s+REG_(?:EXPAND_)?SZ\s+(.*)$/m)
     return m?.[1]?.trim() ?? ''
@@ -112,7 +113,7 @@ function broadcastEnvironmentChange(): void {
           '$r=[System.UIntPtr]::Zero;' +
           '[W.S]::SendMessageTimeout([System.IntPtr]0xffff,0x1A,[System.UIntPtr]::Zero,"Environment",2,5000,[ref]$r) | Out-Null'
       ],
-      { stdio: 'ignore' }
+      { stdio: 'ignore', windowsHide: true }
     )
   } catch {
     /* 广播失败只是 Explorer 不刷新，注册表已经改好了 */
@@ -134,7 +135,7 @@ function addToUserPath(dir: string): boolean {
   execFileSync(
     'reg',
     ['add', 'HKCU\\Environment', '/v', 'Path', '/t', 'REG_EXPAND_SZ', '/d', next, '/f'],
-    { stdio: 'ignore' }
+    { stdio: 'ignore', windowsHide: true }
   )
   broadcastEnvironmentChange()
   return true

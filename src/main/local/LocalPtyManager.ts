@@ -136,7 +136,7 @@ export class LocalPtyManager {
     // 而该 agent 从终端启动时可能崩溃（AttachConsole failed），导致子进程残留。
     // 这里补一刀按进程树清理，确保不留孤儿 shell。
     if (process.platform === 'win32' && pid) {
-      execFile('taskkill', ['/T', '/F', '/PID', String(pid)], () => undefined)
+      execFile('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true }, () => undefined)
     }
   }
 
