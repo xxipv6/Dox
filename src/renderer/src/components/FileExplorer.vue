@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComposeVerb, DiskUsage, DroppedFile, FileEntry, TransferTask } from '@shared/types'
 import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { LOCAL_ID_PREFIX } from '@shared/sessionId'
-import { WIN_DRIVES, joinLocal, parentLocal } from '@shared/localPath'
+import { WIN_DRIVES, isWinPath, joinLocal, parentLocal } from '@shared/localPath'
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
@@ -574,15 +574,22 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
  */
 function openInTerminal(dir?: string): void {
   const target = dir ?? cwd.value
-  // 引号按 shell 种类选：cmd 不认单引号；PowerShell 单引号内单引号写两个
-  const quoted = isLocal.value
-    ? localShellKind === 'cmd'
-      ? `"${target}"`
-      : localShellKind === 'powershell'
-        ? `'${target.replace(/'/g, "''")}'`
-        : `'${target.replace(/'/g, `'\\''`)}'`
-    : `'${target.replace(/'/g, `'\\''`)}'`
-  window.api.input(props.sessionId, `cd ${quoted}\r`)
+  if (isLocal.value && localShellKind === 'cmd') {
+    // cmd 跨盘符必须 /d：cd "D:\…" 只改 D: 的记录目录，不切当前盘（同盘也兼容）
+    window.api.input(props.sessionId, `cd /d "${target}"\r`)
+  } else if (isLocal.value && localShellKind === 'none' && isWinPath(target)) {
+    // WSL（integration 'none' 且面板给的是盘符路径）：bash 不认 `D:\…`，翻成 /mnt/d/…
+    const m = target.match(/^([A-Za-z]):[\\/]+(.*)$/)!
+    const mnt = `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}`
+    window.api.input(props.sessionId, `cd '${mnt.replace(/'/g, `'\\''`)}'\r`)
+  } else {
+    // 引号按 shell 种类选：cmd 不认单引号；PowerShell 单引号内单引号写两个。
+    // Git Bash 归 posix 分支：MSYS 运行时的 cd 认 `D:\…`（实测）
+    const quoted = isLocal.value && localShellKind === 'powershell'
+      ? `'${target.replace(/'/g, "''")}'`
+      : `'${target.replace(/'/g, `'\\''`)}'`
+    window.api.input(props.sessionId, `cd ${quoted}\r`)
+  }
   // cd 打过去还得让用户看见：聚焦到挂着这个会话的终端标签，
   // 否则点了像没反应（SFTP 面板开着时终端可能在别的标签）
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))

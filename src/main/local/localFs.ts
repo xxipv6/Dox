@@ -186,9 +186,12 @@ export async function archive(paths: string[]): Promise<string> {
     target = withSuffix(base, n)
   }
   try {
-    // 目标必须给绝对路径：-C 只影响后续文件参数，-f 的相对目标会落在
-    // **进程 cwd**（打包后是天知道哪儿），而不是所选目录
-    await execFileP('tar', ['-czf', path.join(parent, target), '-C', parent, '--', ...names])
+    // 目标给相对名 + 进程 cwd 设为所选目录：Windows 上 PATH 里可能同时有
+    // GNU tar（Git Bash/msys）和 bsdtar（System32），GNU tar 会把 `-f C:\…`
+    // 里的 `C:` 当成 rsh 远程主机（Cannot connect to C: resolve failed），
+    // 而 bsdtar 不认 GNU 的 --force-local —— 不带盘符的相对名两边都安全。
+    // （-f 相对名 + -C 不行：tar 开包早于 -C 生效，会落在进程原 cwd）
+    await execFileP('tar', ['-czf', target, '--', ...names], { cwd: parent })
   } catch (err) {
     const e = err as NodeJS.ErrnoException
     if (e.code === 'ENOENT') throw new Error('系统里没有 tar 命令，无法打包')
