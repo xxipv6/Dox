@@ -854,8 +854,17 @@ onMounted(() => {
   term.loadAddon(fitAddon)
   term.loadAddon(searchAddon)
   term.loadAddon(new WebLinksAddon())
-  // 绝对路径链接仅对 SSH 会话有意义（本地/容器没有对应的 SFTP 视图）
-  if (isPlainSshId(props.sessionId)) registerPathLinks(term)
+  /*
+   * 绝对路径链接：SSH 会话（远端面板）与 POSIX 本地终端（本机面板）都有
+   * 对应的文件视图。Windows 本地终端不注册 —— PATH_RE 只认 posix 形态，
+   * 盘符路径的点击分发是另一套规则（还没做）。
+   */
+  if (
+    isPlainSshId(props.sessionId) ||
+    (props.sessionId.startsWith(LOCAL_ID_PREFIX) && window.api.platform !== 'win32')
+  ) {
+    registerPathLinks(term)
+  }
   term.open(container.value!)
 
   // 连字需要浏览器做字形替换，只有 DOM 渲染器支持；否则用 WebGL（大数据量不卡）

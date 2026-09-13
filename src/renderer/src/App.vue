@@ -180,14 +180,16 @@ function onTabMenuSelect(id: string): void {
 
 /**
  * 当前标签的文件面板目标：SSH 标签浏览宿主机；容器标签浏览容器
- * （经容器里的 dox-agent，FileExplorer 内部处理未安装的引导）。
- * 本机容器也在内（agent 通道走本机 docker CLI）；本地终端没有可浏览的目标。
+ * （经容器里的 dox-agent，FileExplorer 内部处理未安装的引导）；
+ * 本地终端标签浏览本机（主进程按 local- 前缀分流到 node:fs）。
+ * 本机容器也在内（agent 通道走本机 docker CLI）。
  */
 const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: string; containerName: string } } | null>(() => {
   const tab = store.activeTab
   const paneId = store.activePane?.sessionId
   if (!tab || !paneId) return null
   if (tab.kind === 'ssh') return { sessionId: paneId }
+  if (tab.kind === 'local') return { sessionId: paneId }
   if (tab.kind === 'container' && tab.container && !tab.container.chain?.length) {
     return {
       sessionId: paneId,
@@ -255,9 +257,15 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
             v-if="sftpTarget"
             class="bar-btn"
             :class="{ on: store.sftpVisible }"
-            :title="store.activeTab!.kind === 'container' ? '容器文件面板（经容器助手）' : 'SFTP 文件面板'"
+            :title="
+              store.activeTab!.kind === 'container'
+                ? '容器文件面板（经容器助手）'
+                : store.activeTab!.kind === 'local'
+                  ? '本机文件面板'
+                  : 'SFTP 文件面板'
+            "
             @click="toggleSftp"
-          ><Icon name="folder" /> SFTP</button>
+          ><Icon name="folder" /> {{ store.activeTab!.kind === 'local' ? '文件' : 'SFTP' }}</button>
         </template>
       </div>
 

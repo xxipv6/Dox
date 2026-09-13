@@ -77,7 +77,8 @@ export const useEditorStore = defineStore('editor', () => {
       return
     }
 
-    const name = path.split('/').pop() || path
+    // 反斜杠分隔只对本机会话认：远端 posix 文件名里反斜杠是合法字符，拆了会显示错名字
+    const name = (sessionId.startsWith('local-') ? path.split(/[\\/]/).pop() : path.split('/').pop()) || path
     const file = reactive<OpenFile>({
       path,
       sessionId,

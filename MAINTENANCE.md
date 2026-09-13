@@ -195,6 +195,7 @@ node scripts/verify-layout.mjs       # 布局持久化与重启恢复
 node scripts/verify-render.mjs       # 终端渲染（@xterm/headless，14 种场景）
 node scripts/verify-ssh.mjs          # SSH 握手链路
 node scripts/verify-cwd-history.mjs  # SFTP 目录历史（前进/后退）+ 标签右键「换到最近目录」
+node scripts/verify-local-explorer.mjs # 本地终端文件面板：新建/重命名/编辑保存/删除/复制/打包全链路落盘
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
 

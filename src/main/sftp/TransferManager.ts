@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { sanitizeWinName } from '../fsSafe'
 import fs from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join, sep } from 'node:path'
+import type { Readable, Writable } from 'node:stream'
 import type { SFTPWrapper } from 'ssh2'
 import type { TransferDirection, TransferTask } from '../../shared/types'
 import type { AgentStreamIO } from '../agent/agentStream'
@@ -72,6 +73,18 @@ interface LocalFileItem {
   size: number
   /** 相对被拖入根目录的 posix 相对路径，如 sub/a.txt */
   rel: string
+}
+
+/** 撞名避让：a.txt → a-2.txt → a-3.txt（本机复制不覆盖已存在的东西） */
+function bumpCopyName(dir: string, name: string): string {
+  if (!fs.existsSync(join(dir, name))) return name
+  const dot = name.lastIndexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ''
+  for (let n = 2; ; n++) {
+    const candidate = `${stem}-${n}${ext}`
+    if (!fs.existsSync(join(dir, candidate))) return candidate
+  }
 }
 
 /**
@@ -230,6 +243,73 @@ export class TransferManager {
       this.settle(task, 'done')
       this.emit()
       return [this.snapshot(task)]
+    }
+    return created
+  }
+
+  // ---- 本机复制（本地终端文件面板的「复制到… / 拖进来」）----
+
+  /**
+   * 本机到本机的复制。走与 SFTP 传输同一个队列：并发、进度、取消、
+   * 半截文件清理全复用；direction 沿用 'upload'（remotePath = 落地路径），
+   * 面板「传完自动刷新」因此零改动生效。
+   *
+   * 与远端上传的两个语义差别：
+   *  - 撞名避让而不是覆盖 —— 本机已存在的文件不是「旧版本」而是「别人的东西」；
+   *  - 拒绝把目录复制进它自己（walkLocal 会一边遍历一边长出新的自己）。
+   */
+  async enqueueLocalCopy(sessionId: string, sources: string[], destDir: string): Promise<TransferTask[]> {
+    const gen = this.expansionGen
+    const created: TransferTask[] = []
+    const destReal = await fs.promises.realpath(destDir).catch(() => destDir)
+
+    const attachStream = (task: InternalTask): void => {
+      task._stream = (t) =>
+        this.pipeStreams(
+          t,
+          fs.createReadStream(t.localPath, { highWaterMark: 256 * 1024 }),
+          fs.createWriteStream(t.remotePath),
+          () => void fs.promises.unlink(t.remotePath).catch(() => undefined)
+        )
+    }
+
+    for (const src of sources) {
+      const st = await fs.promises.lstat(src).catch(() => null)
+      // 符号链接跳过：跟链复制会把链接目标的内容抄一份，与 walkLocal 口径一致
+      if (!st || st.isSymbolicLink()) continue
+      const srcReal = await fs.promises.realpath(src).catch(() => src)
+      if (srcReal === destReal || destReal.startsWith(srcReal + sep)) {
+        throw new Error(`不能把「${basename(src)}」复制到它自己里面`)
+      }
+
+      if (st.isFile()) {
+        const task = this.createTask(
+          sessionId,
+          'upload',
+          src,
+          join(destDir, bumpCopyName(destDir, basename(src))),
+          st.size
+        )
+        attachStream(task)
+        this.push(task)
+        created.push(this.snapshot(task))
+        continue
+      }
+
+      if (st.isDirectory()) {
+        const rootName = bumpCopyName(destDir, basename(src))
+        const rootDst = join(destDir, rootName)
+        await fs.promises.mkdir(rootDst, { recursive: true })
+        const files = await walkLocal(src, () => this.expansionGen !== gen)
+        for (const f of files) {
+          const dst = join(rootDst, ...f.rel.split('/'))
+          await fs.promises.mkdir(dirname(dst), { recursive: true })
+          const task = this.createTask(sessionId, 'upload', f.path, dst, f.size, `${rootName}/${f.rel}`)
+          attachStream(task)
+          this.push(task)
+          created.push(this.snapshot(task))
+        }
+      }
     }
     return created
   }
@@ -615,29 +695,47 @@ export class TransferManager {
   }
 
   private pipe(task: InternalTask, sftp: SFTPWrapper): Promise<void> {
+    const isUpload = task.direction === 'upload'
+    /*
+     * 流的高水位不是内存洁癖问题，是吞吐问题（都读过 ssh2 源码确认过）：
+     * - ssh2 的 SFTP ReadStream 同一时刻只有一个在途 READ，大小跟着 highWaterMark
+     *   走（默认 64KB）——高延迟链路上下载 = 64KB/RTT 被钉死。给 1MB，单请求
+     *   顶到 OpenSSH 服务端 256KB 上限，往返数直接砍到 1/4。
+     * - ssh2 的 SFTP WriteStream 靠 _writev 把排队 chunk 全部并发打出去，
+     *   排多少取决于 hwm（默认 16KB，约等于串行）。给 4MB ≈ 几十个并发 WRITE。
+     * - 本地读侧给 256KB：请求数降到 1/4，配合写侧的并发排队刚好不断粮。
+     * 内存代价是每条活动传输多占几 MB，并发 4 封顶，可接受。
+     */
+    const src = isUpload
+      ? fs.createReadStream(task.localPath, { highWaterMark: 256 * 1024 })
+      : sftp.createReadStream(task.remotePath, { highWaterMark: 1024 * 1024 })
+    const dst = isUpload
+      ? sftp.createWriteStream(task.remotePath, { highWaterMark: 4 * 1024 * 1024 })
+      : fs.createWriteStream(task.localPath)
+
+    // 半截文件：上传删远端、下载删本地，都放在句柄释放之后
+    const cancelCleanup = isUpload
+      ? (): void => void unlinkP(sftp, task.remotePath).catch(() => undefined)
+      : (): void => void fs.promises.unlink(task.localPath).catch(() => undefined)
+    return this.pipeStreams(task, src, dst, cancelCleanup)
+  }
+
+  /**
+   * 流式搬运主体：src → dst，逐 chunk 报进度，取消/出错在句柄关闭后收尾。
+   * SFTP 上传下载与本机复制共用（本机复制两端都是本地流，见 enqueueLocalCopy）。
+   */
+  private pipeStreams(
+    task: InternalTask,
+    src: Readable,
+    dst: Writable,
+    cancelCleanup: () => void
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
-      // getSftp 期间被取消：那时 _cancel 还没挂上，这里补一次
+      // getSftp / 排队期间被取消：那时 _cancel 还没挂上，这里补一次
       if (task._cancelRequested) {
         reject(new Error(CANCELED))
         return
       }
-      const isUpload = task.direction === 'upload'
-      /*
-       * 流的高水位不是内存洁癖问题，是吞吐问题（都读过 ssh2 源码确认过）：
-       * - ssh2 的 SFTP ReadStream 同一时刻只有一个在途 READ，大小跟着 highWaterMark
-       *   走（默认 64KB）——高延迟链路上下载 = 64KB/RTT 被钉死。给 1MB，单请求
-       *   顶到 OpenSSH 服务端 256KB 上限，往返数直接砍到 1/4。
-       * - ssh2 的 SFTP WriteStream 靠 _writev 把排队 chunk 全部并发打出去，
-       *   排多少取决于 hwm（默认 16KB，约等于串行）。给 4MB ≈ 几十个并发 WRITE。
-       * - 本地读侧给 256KB：请求数降到 1/4，配合写侧的并发排队刚好不断粮。
-       * 内存代价是每条活动传输多占几 MB，并发 4 封顶，可接受。
-       */
-      const src = isUpload
-        ? fs.createReadStream(task.localPath, { highWaterMark: 256 * 1024 })
-        : sftp.createReadStream(task.remotePath, { highWaterMark: 1024 * 1024 })
-      const dst = isUpload
-        ? sftp.createWriteStream(task.remotePath, { highWaterMark: 4 * 1024 * 1024 })
-        : fs.createWriteStream(task.localPath)
 
       let failure: Error | null = null
       /** 取消/出错后要做的收尾，等 dst 真正关闭再执行（见下面 close 的说明） */
@@ -673,13 +771,7 @@ export class TransferManager {
       })
 
       task._cancel = () => {
-        abort(
-          new Error(CANCELED),
-          // 半截文件：上传删远端、下载删本地，都放在句柄释放之后
-          isUpload
-            ? (): void => void unlinkP(sftp, task.remotePath).catch(() => undefined)
-            : (): void => void fs.promises.unlink(task.localPath).catch(() => undefined)
-        )
+        abort(new Error(CANCELED), cancelCleanup)
       }
 
       src.pipe(dst)

@@ -2,10 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComposeVerb, DiskUsage, DroppedFile, FileEntry, TransferTask } from '@shared/types'
 import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
+import { LOCAL_ID_PREFIX } from '@shared/sessionId'
+import { WIN_DRIVES, joinLocal, parentLocal } from '@shared/localPath'
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
 import { useComposeStore } from '../stores/compose'
+import { useSettingsStore } from '../stores/settings'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
@@ -20,10 +23,27 @@ const props = defineProps<{
 const store = useSessionStore()
 const editor = useEditorStore()
 const composeStore = useComposeStore()
+const settings = useSettingsStore()
 
 /** 实际的文件操作会话（容器 = 父 SSH 会话；宿主机 = 自己） */
 const fsSessionId = computed(() => props.container?.parentSessionId ?? props.sessionId)
 const ctrName = computed(() => props.container?.containerName)
+
+/**
+ * 本机面板（本地终端标签）：同一套 IPC，主进程按 local- 前缀分流到 node:fs。
+ * 与远端面板的差别都在这一处收口：路径是原生形态（Windows 盘符反斜杠）、
+ * 「下载/上传」= 复制、没有 compose / du 分解（那俩是远端 agent 的能力）。
+ */
+const isLocal = computed(() => !props.container && props.sessionId.startsWith(LOCAL_ID_PREFIX))
+const isWinLocal = computed(() => isLocal.value && window.api.platform === 'win32')
+
+/** 本机终端的 shell 种类（cmd 不认单引号）：「在终端打开」的引号策略靠它 */
+let localShellKind: string | null = null
+
+/** 当前目录下拼一个名字（本机 Windows 走反斜杠，远端一律 posix） */
+function joinInCwd(name: string): string {
+  return isLocal.value ? joinLocal(cwd.value, name) : `${cwd.value}/${name}`
+}
 
 const cwd = ref('')
 const entries = ref<FileEntry[]>([])
@@ -145,6 +165,15 @@ const clearSelection = (): void => {
  * 根由模板单独渲染一次。
  */
 const breadcrumbs = computed(() => {
+  // 本机 Windows：第一级是盘符（路径补反斜杠），根那一格由模板渲染成「此电脑」
+  if (isWinLocal.value) {
+    if (cwd.value === WIN_DRIVES) return []
+    const parts = cwd.value.replace(/[\\/]+$/, '').split(/[\\/]+/).filter(Boolean)
+    return parts.map((name, i) => ({
+      name,
+      path: i === 0 ? `${name}\\` : parts.slice(0, i + 1).join('\\')
+    }))
+  }
   const parts = cwd.value.split('/').filter(Boolean)
   return parts.map((name, i) => ({ name, path: '/' + parts.slice(0, i + 1).join('/') }))
 })
@@ -242,6 +271,10 @@ function onMouseNav(e: MouseEvent): void {
 }
 
 function goUp(): void {
+  if (isLocal.value) {
+    nav(parentLocal(cwd.value))
+    return
+  }
   const parts = cwd.value.split('/').filter(Boolean)
   parts.pop()
   nav('/' + parts.join('/') || '/')
@@ -265,7 +298,7 @@ async function submitNewDir(): Promise<void> {
   const name = newDirName.value.trim()
   if (name) {
     try {
-      await window.api.sftpMkdir(fsSessionId.value, `${cwd.value}/${name}`, ctrName.value)
+      await window.api.sftpMkdir(fsSessionId.value, joinInCwd(name), ctrName.value)
       await load()
     } catch (err) {
       errorMsg.value = `新建文件夹失败：${errorText(err)}`
@@ -285,7 +318,7 @@ async function submitRename(entry: FileEntry): Promise<void> {
   const name = renameValue.value.trim()
   if (name && name !== entry.name) {
     try {
-      await window.api.sftpRename(fsSessionId.value, entry.path, `${cwd.value}/${name}`, ctrName.value)
+      await window.api.sftpRename(fsSessionId.value, entry.path, joinInCwd(name), ctrName.value)
       await load()
     } catch (err) {
       errorMsg.value = `重命名失败：${errorText(err)}`
@@ -366,7 +399,14 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
           ]),
       {
         id: 'download',
-        label: many ? `下载这 ${targets.length} 项` : '下载',
+        // 本机面板没有「下载」：落地动作是复制到另一个目录（主进程走本机复制队列）
+        label: isLocal.value
+          ? many
+            ? `复制这 ${targets.length} 项到…`
+            : '复制到…'
+          : many
+            ? `下载这 ${targets.length} 项`
+            : '下载',
         icon: 'download'
       },
       {
@@ -384,8 +424,9 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
         icon: 'trash',
         danger: true
       },
-      // compose 文件特供：右键直接编排（down 落手前在 runCompose 里确认）
-      ...(isComposeTarget(targets)
+      // compose 文件特供：右键直接编排（down 落手前在 runCompose 里确认）。
+      // 本机面板没有这一项 —— compose 走的是远端 exec / agent 通道
+      ...(isComposeTarget(targets) && !isLocal.value
         ? [
             { id: 'compose-up', label: 'Compose: up -d', icon: 'play' as const },
             { id: 'compose-restart', label: 'Compose: restart', icon: 'refresh' as const },
@@ -519,7 +560,14 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
  */
 function openInTerminal(dir?: string): void {
   const target = dir ?? cwd.value
-  const quoted = `'${target.replace(/'/g, `'\\''`)}'`
+  // 引号按 shell 种类选：cmd 不认单引号；PowerShell 单引号内单引号写两个
+  const quoted = isLocal.value
+    ? localShellKind === 'cmd'
+      ? `"${target}"`
+      : localShellKind === 'powershell'
+        ? `'${target.replace(/'/g, "''")}'`
+        : `'${target.replace(/'/g, `'\\''`)}'`
+    : `'${target.replace(/'/g, `'\\''`)}'`
   window.api.input(props.sessionId, `cd ${quoted}\r`)
   // cd 打过去还得让用户看见：聚焦到挂着这个会话的终端标签，
   // 否则点了像没反应（SFTP 面板开着时终端可能在别的标签）
@@ -558,7 +606,8 @@ let unsubscribeTransfers: (() => void) | null = null
 
 /** 落地路径是否在当前目录（含子目录）里 —— 别处的上传没必要刷这一屏 */
 function isUnderCwd(remotePath: string): boolean {
-  const base = cwd.value.endsWith('/') ? cwd.value : `${cwd.value}/`
+  const sepChar = isWinLocal.value ? '\\' : '/'
+  const base = cwd.value.endsWith(sepChar) ? cwd.value : `${cwd.value}${sepChar}`
   return remotePath.startsWith(base)
 }
 
@@ -618,6 +667,16 @@ watch(
 onMounted(() => {
   window.addEventListener('mousedown', onMouseNav, true)
   watchTransfers()
+  // 本机面板：解析终端跑的是哪种 shell（「在终端打开」的引号策略靠它，同 TerminalPanel）
+  if (isLocal.value) {
+    void window.api
+      .listLocalShells()
+      .then((shells) => {
+        const cur = shells.find((sh) => sh.id === settings.localShellId) ?? shells[0]
+        localShellKind = cur?.integration ?? null
+      })
+      .catch(() => undefined)
+  }
   void init()
 })
 onBeforeUnmount(() => {
@@ -655,7 +714,7 @@ onBeforeUnmount(() => {
       <button class="icon-btn" title="新建文件夹" @click="creatingDir = true">
         <Icon name="folder-plus" />
       </button>
-      <button class="icon-btn" title="上传文件" @click="pickUpload"><Icon name="upload" /></button>
+      <button class="icon-btn" :title="isLocal ? '选文件复制进当前目录' : '上传文件'" @click="pickUpload"><Icon name="upload" /></button>
       <span class="spacer"></span>
       <button class="icon-btn" title="在终端中打开此目录" @click="openInTerminal()">
         <Icon name="terminal" />
@@ -673,10 +732,23 @@ onBeforeUnmount(() => {
       <span v-if="props.container" class="ctr-badge" :title="`容器 ${props.container.containerName} 内的文件（经容器助手）`">
         <Icon name="box" :size="12" />{{ props.container.containerName }}
       </span>
-      <a class="crumb" title="/" @click="nav('/')">/</a>
-      <template v-for="(crumb, i) in breadcrumbs" :key="crumb.path">
-        <span v-if="i > 0" class="sep">/</span>
-        <a class="crumb" @click="nav(crumb.path)">{{ crumb.name }}</a>
+      <span v-else-if="isLocal" class="ctr-badge" title="本机文件（本地终端标签）">
+        <Icon name="monitor" :size="12" />本机
+      </span>
+      <!-- 本机 Windows 的根是「此电脑」（盘符列表），posix/远端的根是 / -->
+      <template v-if="isWinLocal">
+        <a class="crumb" title="此电脑" @click="nav(WIN_DRIVES)">此电脑</a>
+        <template v-for="(crumb, i) in breadcrumbs" :key="crumb.path">
+          <span class="sep">\</span>
+          <a class="crumb" @click="nav(crumb.path)">{{ crumb.name }}</a>
+        </template>
+      </template>
+      <template v-else>
+        <a class="crumb" title="/" @click="nav('/')">/</a>
+        <template v-for="(crumb, i) in breadcrumbs" :key="crumb.path">
+          <span v-if="i > 0" class="sep">/</span>
+          <a class="crumb" @click="nav(crumb.path)">{{ crumb.name }}</a>
+        </template>
       </template>
       <!-- 打包期间的不确定进度：远端 tar 最长 5 分钟，没反馈就像卡死 -->
       <span v-if="archiving" class="archiving" title="正在远端打包…">
@@ -750,7 +822,7 @@ onBeforeUnmount(() => {
         <span class="row-actions">
           <button
             class="icon-btn"
-            :title="entry.isDir ? '下载文件夹（递归）' : '下载'"
+            :title="isLocal ? '复制到…' : entry.isDir ? '下载文件夹（递归）' : '下载'"
             @click.stop="downloadEntry(entry)"
           ><Icon name="download" /></button>
           <button class="icon-btn" title="重命名" @click.stop="startRename(entry)">
@@ -762,7 +834,9 @@ onBeforeUnmount(() => {
         </span>
       </div>
 
-      <div v-if="!entries.length && !creatingDir" class="hint">空目录，拖拽文件到此处上传</div>
+      <div v-if="!entries.length && !creatingDir" class="hint">
+        {{ isLocal ? '空目录，拖拽文件到此处复制进来' : '空目录，拖拽文件到此处上传' }}
+      </div>
     </div>
 
     <!-- 磁盘用量分解（点用量条展开）：谁占的、各占多少，点目录直接跳进去 -->
@@ -791,13 +865,16 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <!-- 磁盘用量条：目标不支持（无 statvfs 也无 agent）时整条不出现；点击展开分解 -->
+    <!--
+      磁盘用量条：目标不支持（无 statvfs 也无 agent）时整条不出现；点击展开分解。
+      分解（du）是 agent 的能力 —— 本机面板的用量条只看不展开。
+    -->
     <div
       v-if="usage"
       class="usage-bar"
       :class="{ warn: usagePercent >= 85, open: duOpen }"
-      :title="(usage.mount ? `挂载点 ${usage.mount} · ` : '') + '点击展开占用分解'"
-      @click="toggleDu"
+      :title="isLocal ? '' : (usage.mount ? `挂载点 ${usage.mount} · ` : '') + '点击展开占用分解'"
+      @click="isLocal ? undefined : toggleDu()"
     >
       <span class="usage-track"><span class="usage-fill" :style="{ width: usagePercent + '%' }"></span></span>
       <span class="usage-text">{{ formatSize(usage.used) }} / {{ formatSize(usage.total) }}（{{ usagePercent }}%）</span>

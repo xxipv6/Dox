@@ -1,8 +1,10 @@
 import type { SFTPWrapper } from 'ssh2'
 import { MAX_EDITABLE_BYTES, type FileEntry, type RemoteFileContent } from '../../shared/types'
+import { isLocalId } from '../../shared/sessionId'
 import type { SessionManager } from '../ssh/SessionManager'
 import { execCapture } from '../ssh/remoteExec'
 import { archiveBaseName, buildArchiveCommand, withSuffix } from './archive'
+import * as localFs from '../local/localFs'
 import {
   mkdirP,
   posix,
@@ -37,6 +39,9 @@ function formatSize(bytes: number): string {
  *
  * containerName 给了就是**容器内**文件操作：SFTP 摸不到容器的 mount
  * namespace，这条路经容器里的 dox-agent（fs_* 方法，Dev Containers 式）。
+ *
+ * sessionId 带 local- 前缀就是**本机**文件操作：本地终端标签的文件面板，
+ * 与远端共用同一套 IPC，这里分流到 node:fs（见 local/localFs.ts）。
  */
 export class SftpService {
   constructor(
@@ -50,6 +55,7 @@ export class SftpService {
   }
 
   async list(sessionId: string, dir: string, containerName?: string): Promise<FileEntry[]> {
+    if (isLocalId(sessionId)) return localFs.list(dir)
     if (containerName) {
       const res = (await this.fs(sessionId, containerName, 'fs_list', { path: dir })) as {
         entries: { name: string; is_dir: boolean; is_symlink: boolean; size: number; mtime: number }[]
@@ -82,6 +88,7 @@ export class SftpService {
   }
 
   async realpath(sessionId: string, path: string, containerName?: string): Promise<string> {
+    if (isLocalId(sessionId)) return localFs.realpath(path)
     if (containerName) {
       // 容器没有「家目录」概念，面板落地在 /；cwd 跟随由终端侧 OSC 7 提供
       return path === '.' ? '/' : path
@@ -98,6 +105,7 @@ export class SftpService {
    * 点开没有结果不算错误，不值得抛给用户。
    */
   async stat(sessionId: string, path: string, containerName?: string): Promise<{ isDir: boolean } | null> {
+    if (isLocalId(sessionId)) return localFs.stat(path)
     try {
       if (containerName) {
         const res = (await this.fs(sessionId, containerName, 'fs_stat', { path })) as { is_dir: boolean }
@@ -112,6 +120,7 @@ export class SftpService {
   }
 
   async mkdir(sessionId: string, path: string, containerName?: string): Promise<void> {
+    if (isLocalId(sessionId)) return localFs.mkdir(path)
     if (containerName) {
       await this.fs(sessionId, containerName, 'fs_mkdir', { path })
       return
@@ -131,6 +140,7 @@ export class SftpService {
     path: string,
     containerName?: string
   ): Promise<{ total: number; used: number; avail: number; mount?: string } | null> {
+    if (isLocalId(sessionId)) return localFs.diskUsage(path)
     try {
       if (containerName) {
         const r = (await this.fs(sessionId, containerName, 'fs_usage', { path })) as {
@@ -167,6 +177,7 @@ export class SftpService {
    * 期间渲染进程在 await —— 失败会把 tar 的 stderr 原文带回去。
    */
   async archive(sessionId: string, paths: string[], containerName?: string): Promise<string> {
+    if (isLocalId(sessionId)) return localFs.archive(paths)
     if (!paths.length) throw new Error('没有选中任何项')
     const parent = posix.dirname(paths[0])
     const names = paths.map((p) => posix.basename(p))
@@ -224,6 +235,7 @@ export class SftpService {
   }
 
   async rename(sessionId: string, from: string, to: string, containerName?: string): Promise<void> {
+    if (isLocalId(sessionId)) return localFs.rename(from, to)
     if (containerName) {
       await this.fs(sessionId, containerName, 'fs_rename', { from, to })
       return
@@ -240,6 +252,7 @@ export class SftpService {
    * 开头 8KB 含 NUL 字节则判定为二进制，不交给编辑器（否则是满屏乱码）。
    */
   async readText(sessionId: string, path: string, containerName?: string): Promise<RemoteFileContent> {
+    if (isLocalId(sessionId)) return localFs.readText(path)
     if (containerName) {
       const st = (await this.fs(sessionId, containerName, 'fs_stat', { path })) as { size: number }
       if (st.size > MAX_EDITABLE_BYTES) {
@@ -301,6 +314,7 @@ export class SftpService {
     expectedMtime?: number,
     containerName?: string
   ): Promise<number> {
+    if (isLocalId(sessionId)) return localFs.writeText(path, content, expectedMtime)
     if (containerName) {
       const res = (await this.fs(sessionId, containerName, 'fs_write', {
         path,
@@ -332,6 +346,7 @@ export class SftpService {
    * 符号链接一律按文件 unlink，绝不跟随进入。
    */
   async remove(sessionId: string, path: string, isDir: boolean, containerName?: string): Promise<void> {
+    if (isLocalId(sessionId)) return localFs.remove(path, isDir)
     if (containerName) {
       await this.fs(sessionId, containerName, 'fs_delete', { path, recursive: isDir })
       return

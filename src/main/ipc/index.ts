@@ -321,11 +321,14 @@ export function registerIpc(
 
   ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string, containerName?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender)
+    const local = isLocalId(sessionId)
     const result = await dialog.showOpenDialog(win!, {
-      title: '选择要上传的文件',
+      title: local ? '选择要复制进当前目录的文件' : '选择要上传的文件',
       properties: ['openFile', 'multiSelections']
     })
     if (result.canceled) return []
+    // 本机面板：「上传」= 复制进当前目录（队列/进度/取消同一套）
+    if (local) return transferManager.enqueueLocalCopy(sessionId, result.filePaths, remoteDir)
     const nested = await Promise.all(
       result.filePaths.map(async (p) =>
         containerName
@@ -339,6 +342,9 @@ export function registerIpc(
   ipcMain.handle(
     IpcChannels.transferEnqueueDropped,
     async (_event, sessionId: string, remoteDir: string, files: DroppedFile[], containerName?: string) => {
+      if (isLocalId(sessionId)) {
+        return transferManager.enqueueLocalCopy(sessionId, files.map((f) => f.path), remoteDir)
+      }
       const nested = await Promise.all(
         files.map(async (f) =>
           containerName
@@ -354,6 +360,16 @@ export function registerIpc(
     IpcChannels.transferDownload,
     async (event, sessionId: string, remotePath: string, fileName: string, containerName?: string) => {
       const win = BrowserWindow.fromWebContents(event.sender)
+      // 本机面板：「下载」= 复制到所选目录（保存框那套「顺手改名」留给远端）
+      if (isLocalId(sessionId)) {
+        const result = await dialog.showOpenDialog(win!, {
+          title: '复制到（所选目录内）',
+          defaultPath: app.getPath('documents'),
+          properties: ['openDirectory', 'createDirectory']
+        })
+        if (result.canceled || !result.filePaths[0]) return []
+        return transferManager.enqueueLocalCopy(sessionId, [remotePath], result.filePaths[0])
+      }
       const result = await dialog.showSaveDialog(win!, {
         title: '下载到',
         defaultPath: join(app.getPath('downloads'), sanitizeWinName(fileName))
@@ -369,13 +385,15 @@ export function registerIpc(
     IpcChannels.transferDownloadDir,
     async (event, sessionId: string, remotePath: string, containerName?: string) => {
       const win = BrowserWindow.fromWebContents(event.sender)
+      const local = isLocalId(sessionId)
       const result = await dialog.showOpenDialog(win!, {
-        title: '选择保存位置（文件夹将下载到所选目录内）',
-        defaultPath: app.getPath('downloads'),
+        title: local ? '复制到（所选目录内）' : '选择保存位置（文件夹将下载到所选目录内）',
+        defaultPath: local ? app.getPath('documents') : app.getPath('downloads'),
         properties: ['openDirectory', 'createDirectory']
       })
       if (result.canceled || !result.filePaths[0]) return []
       const dir = result.filePaths[0]
+      if (local) return transferManager.enqueueLocalCopy(sessionId, [remotePath], dir)
       return containerName
         ? transferManager.enqueueDownloadDirContainer(sessionId, containerName, remotePath, dir, await containerIO(sessionId, containerName))
         : transferManager.enqueueDownloadDir(sessionId, remotePath, dir)
@@ -399,6 +417,9 @@ export function registerIpc(
       })
       if (result.canceled || !result.filePaths[0]) return []
       const dir = result.filePaths[0]
+      if (isLocalId(sessionId)) {
+        return transferManager.enqueueLocalCopy(sessionId, items.map((i) => i.remotePath), dir)
+      }
       const io = containerName ? await containerIO(sessionId, containerName) : null
       // 入队本身是串行排队的，这里并发提交只是在建任务记录，不占传输通道
       const nested = await Promise.all(

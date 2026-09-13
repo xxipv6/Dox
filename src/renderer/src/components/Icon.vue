@@ -17,6 +17,7 @@ export type IconName =
   | 'upload' | 'download' | 'follow' | 'paste' | 'terminal' | 'server'
   | 'split-right' | 'split-down' | 'panel-left'
   | 'key' | 'alert' | 'settings' | 'sun' | 'moon' | 'box' | 'zap'
+  | 'monitor'
   // 自绘标题栏的窗口按钮（macOS 用系统红绿灯，不会用到这两个）
   | 'square' | 'restore'
   | 'search'
@@ -101,6 +102,8 @@ const PATHS: Record<IconName, string[]> = {
   ],
   // 快捷命令：闪电
   zap: ['M13 2 3 14h9l-1 8 10-12h-9l1-8z'],
+  // 本机：显示器
+  monitor: ['M3 4h18v12H3z', 'M8 20h8', 'M12 16v4'],
 
   // 窗口按钮：□ 最大化 / ❐ 还原（两个错位的方框）
   square: ['M5.5 5.5h13v13h-13z'],
