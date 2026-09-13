@@ -96,7 +96,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes ""
+          REPO: ${{ github.repository }}
+        # 没有 checkout：gh 必须显式 -R 指定仓库，否则找 .git 直接挂
+        run: gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" --title "$TAG" --notes ""
 
   package:
     name: pack (${{ matrix.name }})
