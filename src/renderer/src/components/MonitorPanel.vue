@@ -421,14 +421,14 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="connsLoading && !conns.length" class="hint"><Spinner text="读取连接表…" /></div>
       <div v-else class="table-wrap">
-        <div class="thead">
+        <div class="thead conn-grid">
           <span class="n-proto">协议</span>
           <span class="n-addr">本地</span>
           <span class="n-addr">远端</span>
           <span class="n-state">状态</span>
           <span class="n-proc">进程</span>
         </div>
-        <div v-for="(c, i) in shownConns" :key="i" class="row conn-row">
+        <div v-for="(c, i) in shownConns" :key="i" class="row conn-row conn-grid">
           <span class="n-proto">{{ c.proto }}</span>
           <span class="n-addr mono" :title="`${c.local_addr}:${c.local_port}`">{{ c.local_addr }}:{{ c.local_port }}</span>
           <span class="n-addr mono" :title="c.remote_port ? `${c.remote_addr}:${c.remote_port}` : ''">{{
@@ -686,26 +686,33 @@ onBeforeUnmount(() => {
 }
 
 /* ---- 网络 ---- */
+/*
+ * 连接表用 grid 而不是公共 flex 行：列宽是算出来的账 ——
+ * 极限 `192.168.233.233:23244` 21 字符 × 6.6px（11px 等宽）≈ 139px，
+ * 默认面板 536px 下两列地址各分到 ~152px，不省略号；拖窄了才截断
+ * （全量在 title 悬停里）。flex 均分只会让地址列随着兄弟列宽度躺枪。
+ */
+/* 双类选择器压过共享的 `.thead,.row { display:flex }`（网格必须在 flex 之后赢） */
+.mon-panel .conn-grid {
+  display: grid;
+  grid-template-columns: 34px 1fr 1fr 70px 84px;
+  gap: 6px;
+}
 .conn-row .mono {
   font-family: var(--font-mono, monospace);
   font-size: var(--fs-xs);
 }
 .n-proto {
-  width: 36px;
-  flex-shrink: 0;
   color: var(--fg-muted);
   font-size: var(--fs-xs);
 }
 .n-addr {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .n-state {
-  width: 76px;
-  flex-shrink: 0;
   font-size: var(--fs-xs);
 }
 .n-state.established {
@@ -719,8 +726,7 @@ onBeforeUnmount(() => {
   color: var(--fg-muted);
 }
 .n-proc {
-  width: 96px;
-  flex-shrink: 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -153,8 +153,13 @@ check('宽度写进设置', Math.abs((persistedW ?? 0) - afterW) < 2, `persisted
 // 恢复默认宽度，别污染后续脚本
 await win.evaluate(async () => {
   const s = await window.api.getSettings()
-  await window.api.setSettings({ ...s, monitorWidth: 440 })
+  await window.api.setSettings({ ...s, monitorWidth: 536 })
 })
+
+// ---- 地址列容得下极限 `192.168.233.233:23244`（21 等宽字符 ≈139px）----
+// 量表头而不是数据行：grid 列宽一致，且此时 PID 过滤 chip 可能把数据行滤空
+const addrW = (await win.locator('.mon-panel .page:visible .conn-grid .n-addr').first().boundingBox())?.width ?? 0
+check('地址列 ≥139px（21 字符极限）', addrW >= 139, `addr=${addrW}px`)
 
 // ---- 关掉发起标签 → 面板必须一起收（否则概览定格假数据、本机容器轮询泄漏 agent 通道）----
 // 走真实 UI：标签条上的关闭按钮

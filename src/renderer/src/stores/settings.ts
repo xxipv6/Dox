@@ -21,7 +21,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   localShellId: '',
   suggestPortForward: true,
   portSentinel: true,
-  monitorWidth: 440
+  // 536 是算出来的：网络页极限 `192.168.233.233:23244`（21 等宽字符 ≈139px）
+  // 在默认宽度下不省略号（列账见 MonitorPanel 的 .conn-grid 注释）
+  monitorWidth: 536
 }
 
 /** 界面主题三选。'system' 那一项的解释文案见设置弹窗 */
@@ -135,6 +137,12 @@ export const useSettingsStore = defineStore('settings', () => {
     suggestPortForward.value = persisted?.suggestPortForward ?? DEFAULT_SETTINGS.suggestPortForward
     portSentinel.value = persisted?.portSentinel ?? DEFAULT_SETTINGS.portSentinel
     monitorWidth.value = persisted?.monitorWidth ?? DEFAULT_SETTINGS.monitorWidth
+    /*
+     * 一次性迁移：440 是加宽前的旧默认值。440 下网络页地址列必然省略号
+     * （默认值本身就是错的），所以把「还停在旧默认值」的人抬到新默认；
+     * 自己拖过宽度（非 440）的人不动 —— 那是明确的选择（同 uiTheme 迁移的口径）。
+     */
+    if (persisted?.monitorWidth === 440) monitorWidth.value = DEFAULT_SETTINGS.monitorWidth
     uiTheme.value = persisted?.uiTheme ?? DEFAULT_SETTINGS.uiTheme
 
     /*
