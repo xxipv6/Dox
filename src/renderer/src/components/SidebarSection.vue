@@ -65,18 +65,18 @@ function toggle(): void {
 
 <style scoped>
 .side-section {
-  margin-bottom: var(--sp-2);
+  margin-bottom: var(--sp-3);
 }
 .section-head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  height: 30px;
-  padding: 0 var(--sp-2);
+  height: 34px;
+  padding: 0 var(--sp-3);
   border-radius: var(--r-md);
   color: var(--fg-secondary);
   font-size: var(--fs-md);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-semibold);
   cursor: pointer;
   user-select: none;
   transition: background-color var(--dur-fast) var(--ease-out);
@@ -123,6 +123,6 @@ function toggle(): void {
   flex-shrink: 0;
 }
 .section-body {
-  padding: var(--sp-1) 0 var(--sp-1) var(--sp-1);
+  padding: var(--sp-2) var(--sp-1) var(--sp-1) var(--sp-2);
 }
 </style>

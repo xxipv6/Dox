@@ -95,6 +95,10 @@ export interface DoxApi {
   sftpMkdir(sessionId: string, path: string, containerName?: string): Promise<void>
   sftpRename(sessionId: string, from: string, to: string, containerName?: string): Promise<void>
   sftpDelete(sessionId: string, path: string, isDir: boolean, containerName?: string): Promise<void>
+  /** 批量删除（多选）。rm 逐操作数独立处理：一项失败不耽误其他项，失败项进错误信息 */
+  sftpDeleteMany(sessionId: string, targets: { path: string; isDir: boolean }[], containerName?: string): Promise<void>
+  /** 远端就地复制（粘贴）：sources 复制进 destDir（同会话）。覆盖语义同上传，符号链接不跟 */
+  sftpCopyWithin(sessionId: string, sources: string[], destDir: string): Promise<void>
   /** 读取远端文本文件（内置编辑器用）；超限抛错，二进制返回 binary: true */
   sftpReadText(sessionId: string, path: string, containerName?: string): Promise<RemoteFileContent>
   /**

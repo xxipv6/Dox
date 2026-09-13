@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -181,6 +182,64 @@ func socketOwners(needed map[uint64]bool, deadline time.Time) map[uint64]struct 
 // 绝不让一次 net_conns 吃掉秒级 CPU
 const socketScanBudget = 800 * time.Millisecond
 
+// socketOwnerCache：连接表每 2 秒刷新一次，但同一批长连接的 inode→进程
+// 映射通常不会变化。缓存极短时间（1s）即可避免连续打开网络页/多个面板时
+// 重扫整个 /proc/[pid]/fd，同时把连接行本身仍保持实时。inode 复用的窗口很小，
+// 过期后会重新扫描；锁保证异步 fs 请求下多个 net_conns 不会并发改 map。
+type cachedSocketOwner struct {
+	owner struct {
+		pid  int
+		comm string
+	}
+	at time.Time
+}
+
+var (
+	socketOwnerCacheMu sync.Mutex
+	socketOwnerCache   = map[uint64]cachedSocketOwner{}
+)
+
+func socketOwnersCached(needed map[uint64]bool, deadline time.Time) map[uint64]struct {
+	pid  int
+	comm string
+} {
+	const ttl = time.Second
+	now := time.Now()
+	owners := make(map[uint64]struct {
+		pid  int
+		comm string
+	}, len(needed))
+	missing := make(map[uint64]bool)
+
+	socketOwnerCacheMu.Lock()
+	for inode := range needed {
+		if c, ok := socketOwnerCache[inode]; ok && now.Sub(c.at) < ttl {
+			owners[inode] = c.owner
+		} else {
+			missing[inode] = true
+		}
+	}
+	// 长时间消失的 inode 不应让缓存无界增长。
+	for inode, c := range socketOwnerCache {
+		if now.Sub(c.at) >= 30*time.Second {
+			delete(socketOwnerCache, inode)
+		}
+	}
+	socketOwnerCacheMu.Unlock()
+
+	if len(missing) == 0 {
+		return owners
+	}
+	fresh := socketOwners(missing, deadline)
+	socketOwnerCacheMu.Lock()
+	for inode, owner := range fresh {
+		owners[inode] = owner
+		socketOwnerCache[inode] = cachedSocketOwner{owner: owner, at: now}
+	}
+	socketOwnerCacheMu.Unlock()
+	return owners
+}
+
 func netConns(params json.RawMessage) (interface{}, error) {
 	_ = params
 	var conns []netConn
@@ -211,7 +270,7 @@ func netConns(params json.RawMessage) (interface{}, error) {
 	for _, c := range conns {
 		needed[uint64(c.Pid)] = true // 此阶段 Pid 暂存 inode
 	}
-	owners := socketOwners(needed, time.Now().Add(socketScanBudget))
+	owners := socketOwnersCached(needed, time.Now().Add(socketScanBudget))
 	for i := range conns {
 		inode := uint64(conns[i].Pid)
 		conns[i].Pid = 0

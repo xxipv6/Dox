@@ -1,12 +1,25 @@
 import { randomUUID } from 'node:crypto'
-import { sanitizeWinName } from '../fsSafe'
+// 显式 .ts 后缀：验证脚本用 Node 24 type stripping 直接 import 本模块（无打包器补扩展名）
+import { sanitizeWinName } from '../fsSafe.ts'
 import fs from 'node:fs'
+import type { FileHandle } from 'node:fs/promises'
 import { basename, dirname, join, sep } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
-import type { SFTPWrapper } from 'ssh2'
+import type { Client, ClientChannel, SFTPWrapper } from 'ssh2'
 import type { TransferDirection, TransferTask } from '../../shared/types'
 import type { AgentStreamIO } from '../agent/agentStream'
-import { mkdirRemoteRecursive, posix, readdirP, statP, toPosixRel, unlinkP } from './sftpUtils'
+import { mkdirRemoteRecursive, posix, readdirP, statP, toPosixRel, unlinkP } from './sftpUtils.ts'
+import { execCapture } from '../ssh/remoteExec.ts'
+import { firstLine } from '../execError.ts'
+import {
+  TarParser,
+  safeLocalJoin,
+  tarEntryBytes,
+  tarHeaderBlocks,
+  tarPadSize,
+  tarTrailer,
+  type TarSink
+} from './tarStream.ts'
 
 const CANCELED = '__transfer_canceled__'
 /** 进度事件节流间隔（ms），避免高频 IPC 刷爆渲染进程 */
@@ -75,6 +88,24 @@ interface LocalFileItem {
   rel: string
 }
 
+/** shell 单引号转义（远端 exec 命令拼路径用） */
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+/** tar 上传要走的本地条目（目录 + 文件，按遍历序） */
+interface LocalTarEntry {
+  /** 本机绝对路径 */
+  path: string
+  /** tar 内的 posix 路径（目录以 '/' 结尾） */
+  name: string
+  size: number
+  mode: number
+  /** 秒级 mtime */
+  mtime: number
+  isDir: boolean
+}
+
 /** 撞名避让：a.txt → a-2.txt → a-3.txt（本机复制不覆盖已存在的东西） */
 function bumpCopyName(dir: string, name: string): string {
   if (!fs.existsSync(join(dir, name))) return name
@@ -114,23 +145,32 @@ async function walkLocal(root: string, isCanceled: () => boolean): Promise<Local
 }
 
 /**
- * 传输队列：流式读写（大文件不占内存）、并发 2、进度节流推送、可取消。
- * 文件夹传输在入队时展开为文件级任务（先建好目录骨架），
- * 取消时尽力删除目标端的半截文件。
+ * 传输队列：流式读写（大文件不占内存）、并发 8、进度节流推送、可取消。
+ *
+ * 文件夹传输两条路：
+ *  - 远端有 tar（几乎必有）：整棵树打成**一条 tar 流**经 exec 通道灌过去
+ *   （下载反之），每文件 0 次往返 —— 5 万小文件从「10 万次 RTT」变成
+ *   跑满通道窗口，是数量级差距。队列里只有一条任务，进度精确到字节。
+ *  - 远端没 tar：回退逐文件展开入队（先建好目录骨架），
+ *    取消时尽力删除目标端的半截文件。
  */
 export class TransferManager {
   private tasks = new Map<string, InternalTask>()
   private queue: string[] = []
   private activeCount = 0
   /*
-   * 并发 4：SFTP 跑在单条 SSH 连接的子系统上，多文件并发与 sshd 的
-   * MaxSessions 无关，只多吃几条通道。再高对本机磁盘就是随机写了。
+   * 并发 8：SFTP 跑在单条 SSH 连接的子系统上，多文件并发与 sshd 的
+   * MaxSessions 无关，只多吃几条通道。并发的收益是藏 open/close 小往返，
+   * 8 对「小文件多 + 高延迟」够用；再高会被单线程加密 CPU 和交互终端
+   * 的体感反超。大批量文件夹走 tar 流，不吃这个数。
    */
-  private readonly maxConcurrent = 4
+  private readonly maxConcurrent = 8
   private lastEmitAt = 0
   private emitScheduled = false
   /** taskId → 自动消失定时器，任务被提前移除时要顺手清掉 */
   private dismissTimers = new Map<string, NodeJS.Timeout>()
+  /** sessionId → 远端是否有 tar（探测一次缓存全程） */
+  private tarSupport = new Map<string, boolean>()
   /**
    * 中断正在进行的目录展开。
    *
@@ -146,11 +186,34 @@ export class TransferManager {
 
   constructor(
     private readonly getSftp: (sessionId: string) => Promise<SFTPWrapper>,
-    private readonly onUpdate: (tasks: TransferTask[]) => void
+    private readonly onUpdate: (tasks: TransferTask[]) => void,
+    /** tar 流的 exec 通道要从连接上开；拿不到（已断开）就走不了 tar 路 */
+    private readonly getClient: (sessionId: string) => Client | undefined
   ) {}
 
   list(): TransferTask[] {
     return [...this.tasks.values()].map((t) => publicTask(t))
+  }
+
+  /**
+   * 远端有没有 tar（决定文件夹走整流还是逐文件回退）。
+   * `command -v` 是 POSIX 内建，BusyBox 的 sh 也认；探测结果按会话缓存。
+   */
+  private async supportsTar(sessionId: string): Promise<boolean> {
+    const cached = this.tarSupport.get(sessionId)
+    if (cached !== undefined) return cached
+    const client = this.getClient(sessionId)
+    // 拿不到连接时别缓存 false：那会赶在重连前探过一次，整段会话都被判成「没 tar」
+    if (!client) return false
+    let ok = false
+    try {
+      await execCapture(client, 'command -v tar', { timeoutMs: 5000 })
+      ok = true
+    } catch {
+      ok = false
+    }
+    this.tarSupport.set(sessionId, ok)
+    return ok
   }
 
   /** 上传本地文件或文件夹（文件夹递归展开），返回创建的任务列表 */
@@ -171,15 +234,48 @@ export class TransferManager {
     }
 
     if (stat.isDirectory()) {
+      const rootName = basename(localPath)
+      // tar 整流：一条任务、一条流，免去逐文件的 open/close 往返
+      if (await this.supportsTar(sessionId)) {
+        const sftp = await this.getSftp(sessionId)
+        // tar -C 要求目标目录已存在
+        await mkdirRemoteRecursive(sftp, remoteDir)
+        const entries: LocalTarEntry[] = []
+        const completed = await this.walkTarLocal(localPath, rootName, entries, () => this.expansionGen !== gen)
+        if (!completed || this.expansionGen !== gen) return []
+        let total = tarTrailer().length
+        let fileCount = 0
+        for (const e of entries) {
+          total += tarEntryBytes(e)
+          if (!e.isDir) fileCount++
+        }
+        const task = this.createTask(
+          sessionId,
+          'upload',
+          localPath,
+          posix.join(remoteDir, rootName),
+          total,
+          `${rootName}/（${fileCount} 个文件，整流模式）`
+        )
+        task._stream = (t) => this.tarUpload(t, entries, remoteDir)
+        this.push(task)
+        return [this.snapshot(task)]
+      }
+
+      // 回退：逐文件展开入队
       const sftp = await this.getSftp(sessionId)
-      const rootRemote = posix.join(remoteDir, basename(localPath))
-      await mkdirRemoteRecursive(sftp, rootRemote)
+      const rootRemote = posix.join(remoteDir, rootName)
+      // 同树批量建目录：缓存已建层级，否则 N 文件 × 路径深度 次串行 RTT
+      const createdDirs = new Set<string>()
+      await mkdirRemoteRecursive(sftp, rootRemote, createdDirs)
       const files = await walkLocal(localPath, () => this.expansionGen !== gen)
       const created: TransferTask[] = []
       for (const f of files) {
+        // 全部取消后遍历虽停，已遍历出的文件也不能再入队
+        if (this.expansionGen !== gen) break
         const remotePath = posix.join(rootRemote, toPosixRel(f.rel))
-        await mkdirRemoteRecursive(sftp, posix.dirname(remotePath))
-        const task = this.createTask(sessionId, 'upload', f.path, remotePath, f.size, `${basename(localPath)}/${toPosixRel(f.rel)}`)
+        await mkdirRemoteRecursive(sftp, posix.dirname(remotePath), createdDirs)
+        const task = this.createTask(sessionId, 'upload', f.path, remotePath, f.size, `${rootName}/${toPosixRel(f.rel)}`)
         this.push(task)
         created.push(this.snapshot(task))
       }
@@ -201,14 +297,38 @@ export class TransferManager {
   /** 下载远端文件夹（递归展开）到本地目录，返回创建的任务列表 */
   async enqueueDownloadDir(sessionId: string, remotePath: string, localDir: string): Promise<TransferTask[]> {
     const gen = this.expansionGen
-    const sftp = await this.getSftp(sessionId)
     const rootName = sanitizeWinName(posix.basename(remotePath))
     const rootLocal = join(localDir, rootName)
+
+    // tar 整流：远端边打包边发，本地边收边解（单条任务）
+    if (await this.supportsTar(sessionId)) {
+      await fs.promises.mkdir(rootLocal, { recursive: true })
+      // 百分比需要总量：du -sb（GNU）一趟拿表观字节数；busybox 没有就
+      // 只显示已接收字节，不为总量再付一遍遍历
+      let total = 0
+      const client = this.getClient(sessionId)
+      if (client) {
+        try {
+          const r = await execCapture(client, `du -sb ${shQuote(remotePath)}`, { timeoutMs: 60_000 })
+          total = parseInt(r.stdout.trim().split(/\s/)[0], 10) || 0
+        } catch {
+          total = 0
+        }
+      }
+      const task = this.createTask(sessionId, 'download', rootLocal, remotePath, total, `${rootName}/（整流模式）`)
+      task._stream = (t) => this.tarDownload(t, remotePath, localDir)
+      this.push(task)
+      return [this.snapshot(task)]
+    }
+
+    // 回退：逐文件递归展开
+    const sftp = await this.getSftp(sessionId)
     await fs.promises.mkdir(rootLocal, { recursive: true })
 
     const created: TransferTask[] = []
     const walk = async (rDir: string, lDir: string, relDir: string): Promise<void> => {
       const items = await readdirP(sftp, rDir)
+      const subdirs: Array<{ rChild: string; lChild: string; rel: string }> = []
       for (const item of items) {
         // 用户点了「全部取消」：停在这，已建的任务由 cancelAll 负责收
         if (this.expansionGen !== gen) return
@@ -219,7 +339,7 @@ export class TransferManager {
         if (item.attrs.isDirectory()) {
           const lChild = join(lDir, sanitizeWinName(item.filename))
           await fs.promises.mkdir(lChild, { recursive: true })
-          await walk(rChild, lChild, rel)
+          subdirs.push({ rChild, lChild, rel })
         } else {
           const task = this.createTask(
             sessionId,
@@ -232,6 +352,11 @@ export class TransferManager {
           this.push(task)
           created.push(this.snapshot(task))
         }
+      }
+      // 兄弟目录 8 路并发展开：readdir 每个一次 RTT，串行 DFS 在宽目录树
+      // 下是纯「目录数 × RTT」的等待（更深处的目录仍各自并发，8 是总量级）
+      for (let i = 0; i < subdirs.length && this.expansionGen === gen; i += 8) {
+        await Promise.all(subdirs.slice(i, i + 8).map((d) => walk(d.rChild, d.lChild, d.rel)))
       }
     }
     await walk(remotePath, rootLocal, '')
@@ -303,6 +428,8 @@ export class TransferManager {
         await fs.promises.mkdir(rootDst, { recursive: true })
         const files = await walkLocal(src, () => this.expansionGen !== gen)
         for (const f of files) {
+          // 全部取消后已遍历出的文件不再入队
+          if (this.expansionGen !== gen) break
           const dst = join(rootDst, ...f.rel.split('/'))
           await fs.promises.mkdir(dirname(dst), { recursive: true })
           const task = this.createTask(sessionId, 'upload', f.path, dst, f.size, `${rootName}/${f.rel}`)
@@ -345,6 +472,21 @@ export class TransferManager {
     const gen = this.expansionGen
     const stat = await fs.promises.stat(localPath)
 
+    /*
+     * 容器目录创建去重：目录里的每个文件任务都会 ensure 一次父目录，
+     * 不缓存就是「文件数 × agent RTT」。缓存 promise 而不是结果 ——
+     * 8 路并发任务可能同时 ensure 同一目录，promise 让它们共享那一次调用。
+     */
+    const ctrDirCalls = new Map<string, Promise<void>>()
+    const ensureCtrDir = (dir: string): Promise<void> => {
+      let p = ctrDirCalls.get(dir)
+      if (!p) {
+        p = Promise.resolve(io.mkdirContainer(dir))
+        ctrDirCalls.set(dir, p)
+      }
+      return p
+    }
+
     const makeTask = (lPath: string, rel: string, size: number, displayName?: string): InternalTask => {
       const ctrPath = posix.join(remoteDir, rel)
       // agent ≥0.4.0：分块直传，无中转、真进度、distroless 可传
@@ -352,7 +494,7 @@ export class TransferManager {
       if (stream) {
         const task = this.createTask(sessionId, 'upload', lPath, ctrPath, size, displayName, containerName)
         task._stream = async (t) => {
-          await io.mkdirContainer(posix.dirname(ctrPath))
+          await ensureCtrDir(posix.dirname(ctrPath))
           await stream.upload(
             lPath,
             ctrPath,
@@ -372,7 +514,7 @@ export class TransferManager {
       task._prepare = async () => {
         const sftp = await this.getSftp(sessionId)
         await mkdirRemoteRecursive(sftp, stage)
-        await io.mkdirContainer(posix.dirname(ctrPath))
+        await ensureCtrDir(posix.dirname(ctrPath))
       }
       task._finalize = async () => {
         await io.cp(stagePath, `${containerName}:${ctrPath}`)
@@ -392,6 +534,8 @@ export class TransferManager {
       const files = await walkLocal(localPath, () => this.expansionGen !== gen)
       const created: TransferTask[] = []
       for (const f of files) {
+        // 全部取消后已遍历出的文件不再入队
+        if (this.expansionGen !== gen) break
         const rel = `${rootName}/${toPosixRel(f.rel)}`
         const task = makeTask(f.path, rel, f.size, rel)
         this.push(task)
@@ -457,6 +601,7 @@ export class TransferManager {
     const created: TransferTask[] = []
     const walk = async (rDir: string, lDir: string, relDir: string): Promise<void> => {
       const items = await io.listContainer(rDir)
+      const subdirs: Array<{ rChild: string; lChild: string; rel: string }> = []
       for (const item of items) {
         if (this.expansionGen !== gen) return
         if (item.isSymlink) continue // 与宿主机的下载目录一致：符号链接不跟随
@@ -465,7 +610,7 @@ export class TransferManager {
         if (item.isDir) {
           const lChild = join(lDir, sanitizeWinName(item.name))
           await fs.promises.mkdir(lChild, { recursive: true })
-          await walk(rChild, lChild, rel)
+          subdirs.push({ rChild, lChild, rel })
         } else {
           const lChild = join(lDir, sanitizeWinName(item.name))
           const stream = io.stream
@@ -515,6 +660,11 @@ export class TransferManager {
           this.push(task)
           created.push(this.snapshot(task))
         }
+      }
+      // 兄弟目录 8 路并发展开：listContainer 每目录一次 agent RTT，
+      // 串行 DFS 在宽目录树下是纯「目录数 × RTT」的等待
+      for (let i = 0; i < subdirs.length && this.expansionGen === gen; i += 8) {
+        await Promise.all(subdirs.slice(i, i + 8).map((d) => walk(d.rChild, d.lChild, d.rel)))
       }
     }
     await walk(remotePath, rootLocal, '')
@@ -696,29 +846,198 @@ export class TransferManager {
   }
 
   private pipe(task: InternalTask, sftp: SFTPWrapper): Promise<void> {
-    const isUpload = task.direction === 'upload'
-    /*
-     * 流的高水位不是内存洁癖问题，是吞吐问题（都读过 ssh2 源码确认过）：
-     * - ssh2 的 SFTP ReadStream 同一时刻只有一个在途 READ，大小跟着 highWaterMark
-     *   走（默认 64KB）——高延迟链路上下载 = 64KB/RTT 被钉死。给 1MB，单请求
-     *   顶到 OpenSSH 服务端 256KB 上限，往返数直接砍到 1/4。
-     * - ssh2 的 SFTP WriteStream 靠 _writev 把排队 chunk 全部并发打出去，
-     *   排多少取决于 hwm（默认 16KB，约等于串行）。给 4MB ≈ 几十个并发 WRITE。
-     * - 本地读侧给 256KB：请求数降到 1/4，配合写侧的并发排队刚好不断粮。
-     * 内存代价是每条活动传输多占几 MB，并发 4 封顶，可接受。
-     */
-    const src = isUpload
-      ? fs.createReadStream(task.localPath, { highWaterMark: 256 * 1024 })
-      : sftp.createReadStream(task.remotePath, { highWaterMark: 1024 * 1024 })
-    const dst = isUpload
-      ? sftp.createWriteStream(task.remotePath, { highWaterMark: 4 * 1024 * 1024 })
-      : fs.createWriteStream(task.localPath)
+    if (task.direction === 'upload') return this.uploadPipelined(task, sftp)
+    return this.downloadPipelined(task, sftp)
+  }
 
-    // 半截文件：上传删远端、下载删本地，都放在句柄释放之后
-    const cancelCleanup = isUpload
-      ? (): void => void unlinkP(sftp, task.remotePath).catch(() => undefined)
-      : (): void => void fs.promises.unlink(task.localPath).catch(() => undefined)
-    return this.pipeStreams(task, src, dst, cancelCleanup)
+  /**
+   * 下载专用：fastGet 式并发管道读。
+   *
+   * 之前走 ReadStream（1MB hwm）：ssh2 的 SFTP ReadStream 同一时刻只有一个
+   * 在途 READ，OpenSSH 服务端又把单次响应砍到 256KB —— 等于 256KB/RTT 的
+   * 纯串行。Wi-Fi ~10ms RTT 上理论 25MB/s，实测只有 ~10MB/s（500MB 要 49s），
+   * 是同链路 scp（57MB/s）的 1/6。
+   *
+   * 这里改成与 uploadPipelined 同构的 48 路 worker（fastGet 同款形态）：
+   * 每路「带偏移 READ 一块 → 带偏移写本地一块」，在途 READ 稳定 48 个，
+   * 实测 63MB/s，反超 scp。内存上限 = 48 × 256KB ≈ 12MB / 条活动下载。
+   *
+   * 收尾语义与旧 pipeStreams 对齐：取消 → 等在途请求落定、关句柄、再删本地
+   * 半截文件；出错（非取消）→ 半截留着给断点续传。
+   */
+  private async downloadPipelined(task: InternalTask, sftp: SFTPWrapper): Promise<void> {
+    if (task._cancelRequested) throw new Error(CANCELED)
+
+    const CHUNK = 256 * 1024
+    const CONCURRENCY = 48
+    const handle = await new Promise<Buffer>((resolve, reject) => {
+      sftp.open(task.remotePath, 'r', (err, h) => (err ? reject(err) : resolve(h)))
+    })
+    let total: number
+    let fh: FileHandle
+    try {
+      const stats = await new Promise<{ size: number }>((resolve, reject) => {
+        sftp.fstat(handle, (err, st) => (err ? reject(err) : resolve(st)))
+      })
+      total = stats.size
+      fh = await fs.promises.open(task.localPath, 'w')
+    } catch (err) {
+      // fstat/本地文件打开失败时也要释放远端句柄，否则长时间传输会耗尽
+      // sshd 的 SFTP handle 配额。
+      await new Promise<void>((resolve) => sftp.close(handle, () => resolve()))
+      throw err
+    }
+
+    let readPos = 0
+    let failure: Error | null = null
+    task._cancel = () => {
+      if (!failure) failure = new Error(CANCELED)
+    }
+    // 取消可能发生在 open/fstat 期间，此时 _cancel 尚未安装；补读标记。
+    if (task._cancelRequested) failure = new Error(CANCELED)
+
+    const worker = async (): Promise<void> => {
+      const buf = Buffer.allocUnsafe(CHUNK)
+      for (;;) {
+        if (failure) return
+        // 分配块位置：同步代码段，worker 之间不会交错
+        const pos = readPos
+        if (pos >= total) return
+        const len = Math.min(CHUNK, total - pos)
+        readPos += len
+
+        const bytesRead = await new Promise<number>((resolve) => {
+          sftp.read(handle, buf, 0, len, pos, (err, n) => {
+            if (err) {
+              if (!failure) failure = err
+              resolve(0)
+            } else {
+              resolve(n)
+            }
+          })
+        })
+        if (bytesRead === 0) return // EOF 或出错（出错时 failure 已置）
+        if (failure) return
+        try {
+          await fh.write(buf, 0, bytesRead, pos)
+        } catch (err) {
+          if (!failure) failure = err as Error
+          return
+        }
+        task.transferred += bytesRead
+        this.emitThrottled()
+      }
+    }
+
+    try {
+      await Promise.all(Array.from({ length: CONCURRENCY }, worker))
+    } finally {
+      // 等在途请求全部落定后才关句柄；之后删半截文件才不和句柄释放赛跑
+      await fh!.close().catch(() => undefined)
+      await new Promise<void>((resolve) => sftp.close(handle, () => resolve()))
+    }
+
+    // failure 的写入全在闭包里，TS 流分析到这已把它窄化成 null —— 断言绕开
+    const err = failure as Error | null
+    if (err) {
+      if (err.message === CANCELED) {
+        await fs.promises.unlink(task.localPath).catch(() => undefined)
+      }
+      throw err
+    }
+  }
+
+  /**
+   * 上传专用：fastPut 式并发管道写。
+   *
+   * 之前走 WriteStream（256KB 读 → 4MB hwm 写）：ssh2 的 WriteStream 靠 _writev
+   * 把排队 chunk 打出去，但在途 WRITE 数跟着 hwm 走，4MB 也就十几个 ——
+   * 有点延迟的链路（Wi-Fi ~10ms RTT）上窗口填不满，实测内网只有 ~39MB/s。
+   *
+   * 这里改成固定 256KB 块 × 48 路「读一块写一块」的 worker 循环（fastPut 同款
+   * 形态）：写请求自带偏移量，无需保序，在途 WRITE 稳定在 48 个，窗口始终
+   * 是满的，实测同一链路 48MB/s（打满 Wi-Fi），与 scp 持平。
+   * 内存上限 = 48 × 256KB ≈ 12MB / 条活动上传。
+   *
+   * 收尾语义与 pipeStreams 对齐：取消 → 等在途写落定、关句柄、再删远端半截
+   * 文件（不和句柄释放赛跑）；出错（非取消）→ 半截文件**留着**给断点续传。
+   */
+  private async uploadPipelined(task: InternalTask, sftp: SFTPWrapper): Promise<void> {
+    // getSftp / 排队期间被取消：那时 _cancel 还没挂上，这里补一次
+    if (task._cancelRequested) throw new Error(CANCELED)
+
+    const CHUNK = 256 * 1024
+    const CONCURRENCY = 48
+    const { size: total } = await fs.promises.stat(task.localPath)
+    const handle = await new Promise<Buffer>((resolve, reject) => {
+      sftp.open(task.remotePath, 'w', (err, h) => (err ? reject(err) : resolve(h)))
+    })
+    let fh: FileHandle
+    try {
+      fh = await fs.promises.open(task.localPath, 'r')
+    } catch (err) {
+      await new Promise<void>((resolve) => sftp.close(handle, () => resolve()))
+      throw err
+    }
+
+    let readPos = 0
+    /** 第一个错误赢；取消也是经由它传播（_cancel 只置标记，由 worker 循环收尾） */
+    let failure: Error | null = null
+    task._cancel = () => {
+      if (!failure) failure = new Error(CANCELED)
+    }
+    // 同上：句柄建立期间的取消不能被漏掉。
+    if (task._cancelRequested) failure = new Error(CANCELED)
+
+    const worker = async (): Promise<void> => {
+      const buf = Buffer.allocUnsafe(CHUNK)
+      for (;;) {
+        if (failure) return
+        // 分配块位置：同步代码段，worker 之间不会交错
+        const pos = readPos
+        if (pos >= total) return
+        const len = Math.min(CHUNK, total - pos)
+        readPos += len
+
+        let bytesRead: number
+        try {
+          ;({ bytesRead } = await fh.read(buf, 0, len, pos))
+        } catch (err) {
+          if (!failure) failure = err as Error
+          return
+        }
+        if (bytesRead === 0) return // 传输期间本地文件被截短
+        if (failure) return
+        await new Promise<void>((resolve) => {
+          sftp.write(handle, buf, 0, bytesRead, pos, (err) => {
+            if (err) {
+              if (!failure) failure = err
+            } else {
+              task.transferred += bytesRead
+              this.emitThrottled()
+            }
+            resolve()
+          })
+        })
+      }
+    }
+
+    try {
+      await Promise.all(Array.from({ length: CONCURRENCY }, worker))
+    } finally {
+      // 等在途写全部落定后才关句柄；之后删半截文件才不和句柄释放赛跑
+      await fh!.close().catch(() => undefined)
+      await new Promise<void>((resolve) => sftp.close(handle, () => resolve()))
+    }
+
+    // failure 的写入全在闭包里，TS 流分析到这已把它窄化成 null —— 断言绕开
+    const err = failure as Error | null
+    if (err) {
+      if (err.message === CANCELED) {
+        await unlinkP(sftp, task.remotePath).catch(() => undefined)
+      }
+      throw err
+    }
   }
 
   /**
@@ -776,6 +1095,328 @@ export class TransferManager {
       }
 
       src.pipe(dst)
+    })
+  }
+
+  /**
+   * tar 上传用的本地遍历：目录条目也要（保空目录、目录 mtime），
+   * 顺序即 tar 内顺序（父目录在其内容之前）。
+   * 返回 false = 被「全部取消」中断。
+   */
+  private async walkTarLocal(
+    localRoot: string,
+    rootName: string,
+    out: LocalTarEntry[],
+    isCanceled: () => boolean
+  ): Promise<boolean> {
+    const pushDir = async (absPath: string, tarName: string): Promise<void> => {
+      const st = await fs.promises.stat(absPath)
+      out.push({
+        path: absPath,
+        name: `${tarName}/`,
+        size: 0,
+        mode: st.mode & 0o777,
+        mtime: Math.floor(st.mtimeMs / 1000),
+        isDir: true
+      })
+    }
+    const walk = async (dir: string, relDir: string): Promise<boolean> => {
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (isCanceled()) return false
+        const full = join(dir, entry.name)
+        const rel = relDir ? `${relDir}/${entry.name}` : entry.name
+        const tarName = `${rootName}/${toPosixRel(rel)}`
+        if (entry.isDirectory()) {
+          await pushDir(full, tarName)
+          if (!(await walk(full, rel))) return false
+        } else if (entry.isFile()) {
+          const st = await fs.promises.stat(full)
+          out.push({
+            path: full,
+            name: tarName,
+            size: st.size,
+            mode: st.mode & 0o777,
+            mtime: Math.floor(st.mtimeMs / 1000),
+            isDir: false
+          })
+        }
+        // 符号链接等跳过（与逐文件路径同一口径：不跟链）
+      }
+      return true
+    }
+    await pushDir(localRoot, rootName)
+    return walk(localRoot, '')
+  }
+
+  /** 往通道写一块，尊重背压；等 drain 期间通道死了要立刻醒而不是挂住 */
+  private writeChannel(channel: ClientChannel, buf: Buffer): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let flushed = false
+      try {
+        flushed = channel.write(buf)
+      } catch (err) {
+        reject(err as Error)
+        return
+      }
+      if (flushed) {
+        resolve()
+        return
+      }
+      const cleanup = (): void => {
+        channel.off('drain', onDrain)
+        channel.off('close', onClose)
+        channel.off('error', onError)
+      }
+      const onDrain = (): void => {
+        cleanup()
+        resolve()
+      }
+      const onClose = (): void => {
+        cleanup()
+        reject(new Error('通道已关闭'))
+      }
+      const onError = (err: Error): void => {
+        cleanup()
+        reject(err)
+      }
+      channel.once('drain', onDrain)
+      channel.once('close', onClose)
+      channel.once('error', onError)
+    })
+  }
+
+  /**
+   * tar 整流上传：本地生成 tar 字节流 → exec `tar -xf - -C <remoteDir>` 的 stdin。
+   * 远端边收边解（没有「传完再解压」阶段）；取消 = 关通道，远端 tar 拿 EOF 自退，
+   * 已解开的文件保留（与逐文件路径「已完成保留」同口径），正在写的那个可能是半截。
+   */
+  private async tarUpload(task: InternalTask, entries: LocalTarEntry[], remoteDir: string): Promise<void> {
+    const client = this.getClient(task.sessionId)
+    if (!client) throw new Error('会话已断开')
+    const cmd = `tar -xf - -C ${shQuote(remoteDir)}`
+
+    return new Promise<void>((resolve, reject) => {
+      client.exec(cmd, { pty: false }, (execErr, channel) => {
+        if (execErr) {
+          reject(execErr)
+          return
+        }
+        let exitCode: number | null = null
+        let sawExit = false
+        const errChunks: Buffer[] = []
+        let errLen = 0
+        channel.stderr?.on('data', (c: Buffer) => {
+          if (errLen < 4096) {
+            errChunks.push(c)
+            errLen += c.length
+          }
+        })
+        channel.on('exit', (code: number | null) => {
+          sawExit = true
+          exitCode = code
+        })
+        channel.on('error', (err: Error) => reject(err))
+        /*
+         * 读侧必须消费（resume）：ssh2 的 Duplex 要等读侧流完才发 'close'，
+         * 没人读就永远等 —— 远端 tar 明明已退出（exit 0 都到了），任务却
+         * 卡在 active 不落定。stdout 本来没内容（tar 静默），纯粹是放行读侧。
+         */
+        channel.resume()
+        channel.on('close', () => {
+          // 取消的优先级最高：取消导致的 EOF 会让 tar 非零退出，别覆盖成「失败」
+          if (task._cancelRequested) {
+            reject(new Error(CANCELED))
+            return
+          }
+          if (!sawExit) {
+            reject(new Error('连接中断，传输未完成'))
+            return
+          }
+          if (exitCode !== 0) {
+            const detail = firstLine(Buffer.concat(errChunks).toString('utf8'))
+            reject(new Error(detail || `远端 tar 退出码 ${exitCode}`))
+            return
+          }
+          resolve()
+        })
+
+        // 写流主体：头块 + 文件内容 + 填充 + 结束块，全程逐块查取消
+        void (async () => {
+          try {
+            for (const entry of entries) {
+              if (task._cancelRequested) throw new Error(CANCELED)
+              for (const hb of tarHeaderBlocks(entry)) {
+                task.transferred += hb.length
+                await this.writeChannel(channel, hb)
+              }
+              if (entry.isDir) continue
+              const rs = fs.createReadStream(entry.path)
+              try {
+                for await (const chunk of rs) {
+                  if (task._cancelRequested) throw new Error(CANCELED)
+                  task.transferred += (chunk as Buffer).length
+                  this.emitThrottled()
+                  await this.writeChannel(channel, chunk as Buffer)
+                }
+              } finally {
+                rs.destroy()
+              }
+              const pad = tarPadSize(entry.size)
+              if (pad) {
+                task.transferred += pad
+                await this.writeChannel(channel, Buffer.alloc(pad))
+              }
+              this.emitThrottled()
+            }
+            const trailer = tarTrailer()
+            task.transferred += trailer.length
+            await this.writeChannel(channel, trailer)
+            // EOF 给远端 tar：它解完最后一块自己退出，结果由 close/exit 落定
+            channel.end()
+          } catch (err) {
+            channel.close()
+            reject(err as Error)
+          }
+        })()
+      })
+    })
+  }
+
+  /**
+   * tar 整流下载：exec `tar -cf - -C <父目录> <名>` 的 stdout 边收边解边写盘。
+   * 背压靠 for-await（await 磁盘写期间通道自动暂停）；取消 = 关通道 +
+   * 删掉正在写的半截文件，已解开的文件保留（同逐文件路径口径）。
+   */
+  private async tarDownload(task: InternalTask, remotePath: string, localDir: string): Promise<void> {
+    const client = this.getClient(task.sessionId)
+    if (!client) throw new Error('会话已断开')
+    // `--` 防止合法但以 '-' 开头的目录名被 tar 当成选项。
+    const cmd = `tar -cf - -C ${shQuote(posix.dirname(remotePath))} -- ${shQuote(posix.basename(remotePath))}`
+
+    return new Promise<void>((resolve, reject) => {
+      client.exec(cmd, { pty: false }, (execErr, channel) => {
+        if (execErr) {
+          reject(execErr)
+          return
+        }
+        let exitCode: number | null = null
+        let sawExit = false
+        const errChunks: Buffer[] = []
+        let errLen = 0
+        channel.stderr?.on('data', (c: Buffer) => {
+          if (errLen < 4096) {
+            errChunks.push(c)
+            errLen += c.length
+          }
+        })
+        channel.on('exit', (code: number | null) => {
+          sawExit = true
+          exitCode = code
+        })
+        channel.on('error', (err: Error) => reject(err))
+        // EOF（for-await 结束）可能先于 exit-status 到达，退出码要等 close 再判
+        const closed = new Promise<void>((res) => channel.on('close', res))
+
+        const parser = new TarParser()
+        let writer: fs.WriteStream | null = null
+        let currentFile: string | null = null
+
+        const closeWriter = async (): Promise<void> => {
+          if (!writer) return
+          const w = writer
+          writer = null
+          await new Promise<void>((res) => w.end(res))
+        }
+        const dropHalf = (): void => {
+          if (currentFile) void fs.promises.unlink(currentFile).catch(() => undefined)
+          currentFile = null
+        }
+        const emitProgress = (): void => this.emitThrottled()
+
+        const sink: TarSink = {
+          async onDir(entry) {
+            const p = safeLocalJoin(localDir, entry.name)
+            if (p) await fs.promises.mkdir(p, { recursive: true })
+          },
+          async onFileStart(entry) {
+            const p = safeLocalJoin(localDir, entry.name)
+            if (!p) {
+              // 越界条目：数据照样读完（丢弃），别污染解析状态
+              currentFile = null
+              return
+            }
+            await fs.promises.mkdir(dirname(p), { recursive: true })
+            currentFile = p
+            // 默认 16KB hwm 会把 write syscall 放大 64 倍，慢盘上 drain 反压整个通道
+            writer = fs.createWriteStream(p, { highWaterMark: 1024 * 1024 })
+            writer.on('error', (err) => {
+              channel.close()
+              reject(err)
+            })
+          },
+          async onFileData(chunk) {
+            // task.size 使用 du 得到的文件字节数；tar 头、填充和结束块
+            // 不计入进度，否则进度会超过 100%。
+            task.transferred += chunk.length
+            emitProgress()
+            if (!writer) return
+            if (!writer.write(chunk)) {
+              await new Promise<void>((res) => writer!.once('drain', res))
+            }
+          },
+          async onFileEnd() {
+            await closeWriter()
+            currentFile = null
+          }
+        }
+
+        void (async () => {
+          try {
+            let canceled = false
+            for await (const chunk of channel) {
+              if (task._cancelRequested) {
+                canceled = true
+                channel.close()
+                break
+              }
+              await parser.push(chunk as Buffer, sink)
+            }
+            await closeWriter()
+            /*
+             * 取消路径不能等 'close'：for-await 被 break 会销毁读侧，
+             * ssh2 的 Channel 在本地销毁后不再发 'close' —— 等了就是
+             * 任务卡在 active 永不落定。正常结束（远端 EOF）才能等。
+             */
+            if (canceled || task._cancelRequested) {
+              dropHalf()
+              reject(new Error(CANCELED))
+              return
+            }
+            await closed
+            if (task._cancelRequested) {
+              dropHalf()
+              reject(new Error(CANCELED))
+              return
+            }
+            if (!sawExit) {
+              reject(new Error('连接中断，传输未完成'))
+              return
+            }
+            if (exitCode !== 0) {
+              const detail = firstLine(Buffer.concat(errChunks).toString('utf8'))
+              reject(new Error(detail || `远端 tar 退出码 ${exitCode}`))
+              return
+            }
+            resolve()
+          } catch (err) {
+            await closeWriter()
+            dropHalf()
+            channel.close()
+            reject(err as Error)
+          }
+        })()
+      })
     })
   }
 

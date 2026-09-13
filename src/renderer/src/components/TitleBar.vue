@@ -40,8 +40,9 @@ onUnmounted(() => off?.())
 <template>
   <header class="title-bar" :class="{ mac: isMac }">
     <span class="tb-brand">
-      <Logo :size="16" />
+      <Logo :size="18" />
       <span class="tb-title">Dox</span>
+      <span class="tb-subtitle">Terminal workspace</span>
     </span>
 
     <span class="tb-right">
@@ -50,17 +51,17 @@ onUnmounted(() => off?.())
 
       <!-- macOS 有系统红绿灯，这三枚不画 -->
       <span v-if="!isMac" class="tb-controls">
-        <button class="tb-btn" title="最小化" @click="api.windowMinimize()">
+        <button class="tb-btn" aria-label="最小化" title="最小化" @click="api.windowMinimize()">
           <Icon name="minus" :size="15" />
         </button>
         <button
           class="tb-btn"
           :title="maximized ? '向下还原' : '最大化'"
-          @click="api.windowToggleMaximize()"
+          aria-label="切换最大化" @click="api.windowToggleMaximize()"
         >
           <Icon :name="maximized ? 'restore' : 'square'" :size="13" />
         </button>
-        <button class="tb-btn close" title="关闭" @click="api.windowClose()">
+        <button class="tb-btn close" aria-label="关闭窗口" title="关闭" @click="api.windowClose()">
           <Icon name="x" :size="15" />
         </button>
       </span>
@@ -70,12 +71,12 @@ onUnmounted(() => off?.())
 
 <style scoped>
 .title-bar {
-  height: 36px;
+  height: 42px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-left: var(--sp-3);
+  padding: 0 var(--sp-3);
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   /* 整条可拖窗口 */
@@ -93,10 +94,16 @@ onUnmounted(() => off?.())
   min-width: 0;
 }
 .tb-title {
-  font-size: var(--fs-sm);
+  font-size: var(--fs-lg);
   font-weight: var(--fw-medium);
-  color: var(--fg-secondary);
+  color: var(--fg);
   letter-spacing: 0.01em;
+}
+.tb-subtitle {
+  padding-left: var(--sp-2);
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  border-left: 1px solid var(--border);
 }
 
 .tb-controls {

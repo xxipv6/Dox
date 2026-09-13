@@ -250,3 +250,38 @@ body {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
+
+/* UI 2.0：滚动条和禁用态统一，避免 Chromium 默认样式破坏主题一致性。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid transparent;
+  border-radius: var(--r-pill);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-muted);
+  background-clip: content-box;
+}
+
+button:disabled,
+.icon-btn:disabled {
+  color: var(--fg-muted);
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}

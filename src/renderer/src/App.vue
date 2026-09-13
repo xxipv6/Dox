@@ -13,6 +13,7 @@ import ComposeDrawer from './components/ComposeDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
 import Icon from './components/Icon.vue'
+import ToastHost from './components/ToastHost.vue'
 
 /*
  * 编辑器懒加载：CodeMirror + 15 个语言包是首包里最大的一块死重 ——
@@ -24,6 +25,15 @@ const FileEditor = defineAsyncComponent(() => import('./components/FileEditor.vu
 const store = useSessionStore()
 const editor = useEditorStore()
 const layout = useLayoutStore()
+
+/*
+ * 编辑器面板是否真的占地方。visible 只是用户的展开意愿：
+ * 当前会话一个打开的文件都没有时，渲染出来就是一块空白 ——
+ * 标签全关掉面板就跟着收掉；切到还有文件的会话它又会回来。
+ */
+const editorShown = computed(
+  () => editor.visible && editor.filesOf(store.activeSessionId).length > 0
+)
 
 // Wave 形态：应用启动即开一个本地终端标签页。
 // 若上次退出时还有布局，则先按布局恢复；只有恢复不出东西时才开默认本地终端。
@@ -138,6 +148,11 @@ async function toggleSftp(): Promise<void> {
   if (store.activeTab) refitTab(store.activeTab)
 }
 
+function openWelcomeDevice(): void {
+  // 复用侧栏的添加设备弹窗；空地址表示不预填主机。
+  store.requestAddDevice({ host: '', port: 22, username: 'root' })
+}
+
 /**
  * 当前标签的文件面板目标：SSH 标签浏览宿主机；容器标签浏览容器
  * （经容器里的 dox-agent，FileExplorer 内部处理未安装的引导）；
@@ -189,12 +204,12 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
               class="exit-badge"
               :title="`上一条命令退出码 ${activeExitCode(tab)}`"
             >✗{{ activeExitCode(tab) }}</span>
-            <button class="tab-close" title="关闭" @click.stop="store.closeTab(tab)">
+            <button class="tab-close" aria-label="关闭标签" title="关闭" @click.stop="store.closeTab(tab)">
               <Icon name="x" :size="12" />
             </button>
           </div>
 
-          <button class="tab-new" title="新建本地终端" @click="store.connectLocal()">
+          <button class="tab-new" aria-label="新建本地终端" title="新建本地终端" @click="store.connectLocal()">
             <Icon name="plus" :size="15" />
           </button>
         </div>
@@ -236,11 +251,23 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
         （双击、悬停、拖拽全被截走）。改成一整条底部停靠，占自己的高度，
         不再遮任何东西。
       -->
-      <div class="terminal-area" :class="{ 'editor-open': editor.visible }">
+      <div class="terminal-area" :class="{ 'editor-open': editorShown }">
         <div class="workspace">
           <div v-if="!store.tabs.length" class="welcome">
-            <h2>Dox 终端</h2>
-            <p>本地终端启动中… SSH 会话请从左侧连接。</p>
+            <div class="welcome-mark"><Icon name="terminal" :size="28" /></div>
+            <h2>欢迎使用 Dox</h2>
+            <p class="welcome-subtitle">在本地终端、SSH 会话和容器之间快速切换</p>
+            <div class="welcome-actions">
+              <button class="welcome-card primary" @click="store.connectLocal()">
+                <Icon name="terminal" :size="20" />
+                <span><strong>打开本地终端</strong><small>使用当前系统 Shell</small></span>
+              </button>
+              <button class="welcome-card" @click="openWelcomeDevice">
+                <Icon name="server" :size="20" />
+                <span><strong>添加 SSH 设备</strong><small>密码或私钥登录</small></span>
+              </button>
+            </div>
+            <p class="welcome-tip">也可以从左侧设备列表双击打开已保存的会话</p>
           </div>
 
           <div class="terminal-stack">
@@ -337,7 +364,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 
           <!-- 双击文件后在此编辑；key 绑定会话，切会话不串内容 -->
           <FileEditor
-            v-if="store.sftpVisible && editor.visible && store.activeSessionId"
+            v-if="store.sftpVisible && editorShown && store.activeSessionId"
             :key="`ed-${store.activeSessionId}`"
             :session-id="store.activeSessionId"
           />
@@ -350,6 +377,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 
     <SettingsDialog />
     <HostKeyDialog />
+    <ToastHost />
   </div>
 </template>
 
@@ -366,7 +394,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 .layout {
   display: grid;
   grid-template-columns: auto 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: 42px 1fr;
   width: 100vw;
   height: 100vh;
 }
@@ -402,9 +430,9 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 .tab-bar {
   display: flex;
   align-items: center;
-  height: 48px;
-  padding: 0 var(--sp-2);
-  gap: var(--sp-2);
+  height: 44px;
+  padding: 0 var(--sp-3);
+  gap: var(--sp-1);
   background: var(--bg-sunken);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -425,7 +453,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
    * 定高 + 居中，而不是靠上下 padding 撑出来：图标、标题、关闭按钮三者的
    * 垂直中线这样才对得齐。也顺带让标签栏高度不随内容（比如退出码徽标）跳动。
    */
-  height: 32px;
+  height: 30px;
   padding: 0 var(--sp-2) 0 var(--sp-3);
   font-size: var(--fs-md);
   color: var(--fg-secondary);
@@ -481,7 +509,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   background: none;
   color: var(--fg-muted);
   font-size: var(--fs-md);
-  padding: 0 10px;
+  padding: 0 9px;
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
@@ -660,7 +688,86 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  color: var(--fg);
+  background:
+    radial-gradient(circle at 50% 38%, var(--accent-soft), transparent 34%),
+    var(--bg);
+}
+.welcome-mark {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin-bottom: var(--sp-4);
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  box-shadow: var(--shadow-md);
+}
+.welcome h2 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: var(--fw-semibold);
+  letter-spacing: -0.02em;
+}
+.welcome-subtitle {
+  margin: 8px 0 20px;
+  color: var(--fg-secondary);
+  font-size: var(--fs-lg);
+}
+.welcome-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(210px, 1fr));
+  gap: var(--sp-3);
+  width: min(520px, calc(100% - 40px));
+}
+.welcome-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 72px;
+  padding: 0 var(--sp-4);
+  color: var(--fg);
+  text-align: left;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.welcome-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.welcome-card.primary {
+  color: var(--fg-on-accent);
+  background: var(--accent-text);
+  border-color: var(--accent-text);
+}
+.welcome-card.primary:hover {
+  background: var(--accent-hover);
+}
+.welcome-card span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.welcome-card strong {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+}
+.welcome-card small {
+  color: inherit;
+  opacity: 0.72;
+  font-size: var(--fs-xs);
+}
+.welcome-tip {
+  margin: 18px 0 0;
   color: var(--fg-muted);
+  font-size: var(--fs-sm);
 }
 .tab-placeholder {
   flex: 1;

@@ -3,10 +3,11 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { MAX_EDITABLE_BYTES, type FileEntry, type RemoteFileContent } from '../../shared/types'
-import { WIN_DRIVES } from '../../shared/localPath'
-import { archiveBaseName, withSuffix } from '../sftp/archive'
-import { sanitizeWinName } from '../fsSafe'
+// 显式 .ts 后缀：验证脚本用 Node 24 type stripping 直接 import（无打包器补扩展名）
+import { MAX_EDITABLE_BYTES, type FileEntry, type RemoteFileContent } from '../../shared/types.ts'
+import { WIN_DRIVES } from '../../shared/localPath.ts'
+import { archiveBaseName, withSuffix } from '../sftp/archive.ts'
+import { sanitizeWinName } from '../fsSafe.ts'
 
 const execFileP = promisify(execFile)
 

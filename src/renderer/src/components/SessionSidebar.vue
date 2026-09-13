@@ -13,6 +13,7 @@ import AgentPanel from './AgentPanel.vue'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import { errorText } from '../utils/errors'
 import type { ContainerInfo, SavedSession } from '@shared/types'
+import { pushToast } from '../stores/toast'
 
 const store = useSessionStore()
 const settings = useSettingsStore()
@@ -40,6 +41,10 @@ const filteredSessions = computed(() => {
     [s.name, s.host, s.username, String(s.port)].some((v) => v.toLowerCase().includes(q))
   )
 })
+
+function isDeviceActive(session: SavedSession): boolean {
+  return store.tabs.some((tab) => tab.kind === 'ssh' && tab.savedSessionId === session.id)
+}
 
 onMounted(() => store.refreshSaved())
 
@@ -149,7 +154,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
     try {
       await store.viewContainerLogs(tid, box, saved.id)
     } catch (err) {
-      alert(`查看日志失败：${errorText(err)}`)
+      pushToast(`查看日志失败：${errorText(err)}`)
     }
     return
   }
@@ -163,7 +168,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
     await new Promise((r) => setTimeout(r, 600))
     await store.loadDeviceContainers(saved.id)
   } catch (err) {
-    alert(`操作失败：${errorText(err)}`)
+    pushToast(`操作失败：${errorText(err)}`)
     await store.loadDeviceContainers(saved.id)
   } finally {
     ctrControlling.value = null
@@ -255,6 +260,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
           >
             <div
               class="device"
+              :class="{ active: isDeviceActive(s) }"
               :title="`${s.username}@${s.host}:${s.port} — 双击连接`"
               @dblclick="store.connectSaved(s)"
             >
@@ -341,10 +347,13 @@ async function onCtrMenuSelect(id: string): Promise<void> {
         </div>
       </SidebarSection>
 
-      <ForwardPanel />
-      <ContainerPanel />
-      <AgentPanel />
-      <SnippetPanel />
+      <div class="sidebar-tools">
+        <div class="tools-label">工具</div>
+        <ForwardPanel />
+        <ContainerPanel />
+        <AgentPanel />
+        <SnippetPanel />
+      </div>
     </div>
 
     <DeviceDialog
@@ -367,7 +376,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
 
 <style scoped>
 .sidebar {
-  width: 264px;
+  width: 288px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -384,7 +393,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   min-width: 0;
 }
 .sidebar.collapsed {
-  width: 44px;
+  width: 52px;
   align-items: center;
 }
 /*
@@ -394,7 +403,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
  */
 .sidebar-header {
   flex-shrink: 0;
-  height: 48px;
+  height: 44px;
   padding: 0 var(--sp-2) 0 var(--sp-3);
   display: flex;
   align-items: center;
@@ -405,7 +414,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
 }
 .sidebar.collapsed .sidebar-header {
   height: auto;
-  padding: var(--sp-2) 0;
+  padding: var(--sp-3) 0;
   border-bottom: none;
   flex-direction: column;
   gap: var(--sp-1);
@@ -482,6 +491,20 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   min-height: 0;
   overflow-y: auto;
   padding: var(--sp-3) var(--sp-2) var(--sp-2);
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-tools {
+  margin-top: auto;
+  padding-top: var(--sp-4);
+}
+.tools-label {
+  padding: 0 var(--sp-3) var(--sp-2);
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .device-list {
   display: flex;
@@ -493,6 +516,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  min-height: 48px;
   padding: 7px var(--sp-2);
   border-radius: var(--r-md);
   cursor: pointer;
@@ -500,6 +524,13 @@ async function onCtrMenuSelect(id: string): Promise<void> {
 }
 .device:hover {
   background: var(--bg-hover);
+}
+.device.active {
+  background: var(--bg-active);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.device.active .device-name {
+  color: var(--fg);
 }
 /*
  * 行首的容器展开箭头：常驻低透明度（hover 才显形 = 这个功能等于不存在），
@@ -647,7 +678,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
 }
 .device-host {
   font-size: var(--fs-xs);
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

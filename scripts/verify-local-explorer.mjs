@@ -182,6 +182,56 @@ try {
   }
   check('打包落盘（系统 tar）', archived)
 
+  // ---- 键盘快捷键：Cmd/Ctrl+A 全选、F 过滤、C/V 复制粘贴 ----
+  const modKey = process.platform === 'darwin' ? 'Meta' : 'Control'
+  await win.locator('.explorer .row', { hasText: 'b.txt' }).first().click()
+  await win.keyboard.press(`${modKey}+a`)
+  const totalRows = await win.locator('.explorer .row').count()
+  const selectedRows = await win.locator('.explorer .row.selected').count()
+  check('Cmd/Ctrl+A 全选', totalRows > 1 && selectedRows === totalRows, `${selectedRows}/${totalRows}`)
+
+  await win.keyboard.press(`${modKey}+f`)
+  await win.waitForTimeout(300)
+  check(
+    '过滤框出现并聚焦',
+    await win.evaluate(() => document.activeElement?.classList.contains('filter-input'))
+  )
+  await win.keyboard.type('b.tx')
+  await win.waitForTimeout(400)
+  const filteredNames = await win.evaluate(() =>
+    [...document.querySelectorAll('.explorer .file-list .row .file-name')].map((e) => e.textContent.trim())
+  )
+  check(
+    'Cmd/Ctrl+F 过滤只显示匹配行',
+    filteredNames.length > 0 && filteredNames.every((n) => n.includes('b.tx')),
+    JSON.stringify(filteredNames)
+  )
+  await win.keyboard.press('Escape')
+  await win.waitForTimeout(300)
+  check(
+    'Esc 关闭过滤恢复全量',
+    (await win.locator('.explorer .filter-input').count()) === 0 &&
+      (await win.locator('.explorer .row').count()) === totalRows
+  )
+
+  // C/V：复制 b.txt，进 sub 粘贴（本机走传输队列），落盘校验后退回根目录
+  await win.locator('.explorer .row', { hasText: 'b.txt' }).first().click()
+  await win.keyboard.press(`${modKey}+c`)
+  await win.locator('.explorer .row', { hasText: 'sub' }).first().dblclick()
+  await win.waitForTimeout(800)
+  await win.keyboard.press(`${modKey}+v`)
+  let kbCopied = false
+  for (let i = 0; i < 20; i++) {
+    await win.waitForTimeout(500)
+    if (fs.existsSync(path.join(base, 'sub', 'b.txt'))) { kbCopied = true; break }
+  }
+  check(
+    'Cmd/Ctrl+C → V 粘贴落盘（本机走传输队列）',
+    kbCopied && fs.readFileSync(path.join(base, 'sub', 'b.txt'), 'utf8') === 'bye-local'
+  )
+  await win.locator('.explorer button[title="后退（鼠标侧键）"]').click()
+  await win.waitForTimeout(800)
+
   // ---- 删除（右键 made → 删除，dialog 自动确认）----
   await win.locator('.explorer .row', { hasText: 'made' }).first().click({ button: 'right' })
   await win.locator('.context-menu .menu-item', { hasText: '删除' }).click()

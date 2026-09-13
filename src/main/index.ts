@@ -65,7 +65,9 @@ const transferManager = new TransferManager(
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(IpcChannels.transferUpdate, tasks)
     }
-  }
+  },
+  // tar 整流传输要在连接上开 exec 通道
+  (sessionId) => sessionManager.getClient(sessionId)
 )
 const forwardManager = new ForwardManager(
   (sessionId) => sessionManager.getClient(sessionId),

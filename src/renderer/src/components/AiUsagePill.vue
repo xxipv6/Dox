@@ -61,6 +61,13 @@ function level(a: AiUsageResult): 'ok' | 'warn' | 'danger' | 'err' {
   return 'ok'
 }
 
+function windowLevel(used?: number): 'ok' | 'warn' | 'danger' | 'err' {
+  if (used === undefined) return 'ok'
+  if (used >= 90) return 'danger'
+  if (used >= 70) return 'warn'
+  return 'ok'
+}
+
 const PROVIDER_LABEL: Record<string, string> = { kimi: 'Kimi', deepseek: 'DeepSeek', glm: 'GLM' }
 
 function fmtTime(iso?: string): string {
@@ -103,7 +110,18 @@ function openSettings(): void {
         class="ai-acc"
         :class="level(a)"
         :title="`${a.name}（${PROVIDER_LABEL[a.provider] ?? a.provider}）`"
-      >{{ a.name }} {{ headText(a) }}</span>
+      >
+        <span class="ai-acc-name">{{ a.name }}</span>
+        <template v-if="a.provider !== 'deepseek'">
+          <span class="ai-window" :class="windowLevel(a.fiveHourUsed)">
+            <span class="ai-window-label">5h</span>{{ a.fiveHourUsed === undefined ? '—' : `${Math.round(a.fiveHourUsed)}%` }}
+          </span>
+          <span class="ai-window" :class="windowLevel(a.weeklyUsed)">
+            <span class="ai-window-label">7d</span>{{ a.weeklyUsed === undefined ? '—' : `${Math.round(a.weeklyUsed)}%` }}
+          </span>
+        </template>
+        <span v-else class="ai-window balance">{{ headText(a) }}</span>
+      </span>
     </button>
 
     <!-- 明细浮层：点击其他区域关闭 -->
@@ -179,12 +197,14 @@ function openSettings(): void {
 }
 .ai-pill {
   display: inline-flex;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: none;
-  padding: 2px 8px;
+  max-width: min(560px, 42vw);
+  overflow: hidden;
+  padding: 3px 9px;
   cursor: pointer;
   font-size: var(--fs-xs);
   transition: border-color var(--dur-fast) var(--ease-out);
@@ -194,9 +214,40 @@ function openSettings(): void {
   border-color: var(--accent-text);
 }
 .ai-acc {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--fg-secondary);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  min-width: 0;
+}
+.ai-acc + .ai-acc {
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+.ai-acc-name {
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-window {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--success-text);
+  font-size: var(--fs-xs);
+}
+.ai-window-label {
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+.ai-window.warn { color: var(--warning-text); }
+.ai-window.danger,
+.ai-window.err { color: var(--danger-text); }
+.ai-window.balance { color: var(--fg-secondary); }
+.ai-pill > .ai-acc:not(:first-child) {
+  flex-shrink: 1;
 }
 .ai-acc.warn {
   color: var(--warning-text);

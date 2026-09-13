@@ -52,6 +52,15 @@ onBeforeUnmount(() => unsubscribe?.())
 
 const errorMsg = ref('')
 
+async function removeRule(id: string): Promise<void> {
+  try {
+    await api.removeForward(id)
+    errorMsg.value = ''
+  } catch (err) {
+    errorMsg.value = errorText(err)
+  }
+}
+
 async function add(): Promise<void> {
   if (!store.activeSessionId) return
   if (!formValid.value) {
@@ -134,7 +143,7 @@ const statusText: Record<ForwardRule['status'], string> = {
       <template v-else>:{{ rule.listenPort }} → {{ rule.targetHost }}:{{ rule.targetPort }}</template>
     </span>
     <span class="rule-status" :class="rule.status">{{ statusText[rule.status] }}</span>
-    <button class="icon-btn danger" title="移除" @click="api.removeForward(rule.id)">
+    <button class="icon-btn danger" title="移除" @click="removeRule(rule.id)">
       <Icon name="x" />
     </button>
   </div>

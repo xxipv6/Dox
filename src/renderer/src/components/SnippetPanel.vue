@@ -186,12 +186,14 @@ async function remove(s: CommandSnippet): Promise<void> {
       <button
         class="icon-btn"
         :class="{ dim: !store.activeSessionId }"
+        :disabled="!store.activeSessionId"
         title="发送到终端并执行"
         @click="run(s)"
       ><Icon name="play" /></button>
       <button
         class="icon-btn"
         :class="{ dim: !store.activeSessionId }"
+        :disabled="!store.activeSessionId"
         title="粘贴到命令行（不执行）"
         @click="pasteOnly(s)"
       ><Icon name="paste" /></button>

@@ -15,10 +15,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.6.7"
+var version = "0.6.8"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -78,6 +79,11 @@ func serve() error {
 	portsRunning := false
 	stopStats := make(chan struct{})
 	statsRunning := false
+	var fsWG sync.WaitGroup
+	// 文件请求来自传输窗口和多个面板，不能无限制地创建 goroutine。
+	// 8 个并发足够填满 SSH 窗口，同时避免 fs_du/archive 与分块读写一起
+	// 把远端磁盘和内存打满；超出的请求在这里排队，响应仍按 id 对应。
+	fsSlots := make(chan struct{}, 8)
 
 	for scanner.Scan() {
 		var req request
@@ -125,16 +131,29 @@ func serve() error {
 			if statsRunning {
 				close(stopStats)
 			}
+			// 等待异步文件请求完成再退出，避免 stop 抢在 fs_write_commit /
+			// 回包之前执行，调用方收到一个无响应的 pending 请求。
+			fsWG.Wait()
 			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"bye": true}})
 			return nil
 		default:
-			// fs_* 文件方法统一走分发器（容器文件管理的承载）
-			if result, handled, err := dispatchFS(req.Method, req.Params); handled {
-				if err != nil {
-					_ = enc.Encode(response{ID: req.ID, Error: err.Error()})
-				} else {
-					_ = enc.Encode(response{ID: req.ID, Result: result})
-				}
+			// fs_* 可能包含磁盘扫描或大块读写。放到独立 goroutine，
+			// 让请求循环继续接收后续分块；否则一个 fs_du/读块会把
+			// watch_stats、取消和其他传输请求全部排在后面。safeEncoder
+			// 负责并发回包的原子性，响应由 id 与调用方对应。
+			if isFSMethod(req.Method) {
+				fsWG.Add(1)
+				go func(r request) {
+					defer fsWG.Done()
+					fsSlots <- struct{}{}
+					defer func() { <-fsSlots }()
+					result, _, err := dispatchFS(r.Method, r.Params)
+					if err != nil {
+						_ = enc.Encode(response{ID: r.ID, Error: err.Error()})
+					} else {
+						_ = enc.Encode(response{ID: r.ID, Result: result})
+					}
+				}(req)
 			} else {
 				switch req.Method {
 				case "ps_list":
@@ -157,4 +176,17 @@ func serve() error {
 	}
 	// stdin 关闭 = SSH 通道断了：agent 没有存在的意义，跟着退出
 	return scanner.Err()
+}
+
+// isFSMethod 与 dispatchFS 保持同一份方法集合。将 fs 请求异步化后，
+// 未知方法仍在主循环内立即返回错误，避免把协议拼写错误静默吞掉。
+func isFSMethod(method string) bool {
+	switch method {
+	case "fs_list", "fs_stat", "fs_read", "fs_write", "fs_mkdir", "fs_rename", "fs_delete",
+		"fs_archive", "fs_usage", "fs_du", "fs_read_chunk", "fs_write_begin", "fs_write_chunk",
+		"fs_write_commit", "fs_write_abort":
+		return true
+	default:
+		return false
+	}
 }

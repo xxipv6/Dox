@@ -20,6 +20,11 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const busy = ref(false)
 const errorMsg = ref('')
 
+/** 连接/保存进行中时保留弹窗，避免用户误以为请求已取消。 */
+function requestClose(): void {
+  if (!busy.value) emit('close')
+}
+
 // 正在连接时不让 Esc 关掉：请求已经发出去了，关掉弹窗会让用户
 // 以为操作被取消了，实际连接还在后台建
 useEscapeToClose(
@@ -123,11 +128,11 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
 </script>
 
 <template>
-  <div v-if="visible" class="overlay" @click.self="emit('close')">
+  <div v-if="visible" class="overlay" @click.self="requestClose">
     <div class="dialog">
       <div class="dialog-header">
         <span>{{ isEdit ? '编辑设备' : '添加设备' }}</span>
-        <button class="close-btn" @click="emit('close')">×</button>
+        <button class="close-btn" :disabled="busy" @click="requestClose">×</button>
       </div>
 
       <div class="grid">
@@ -197,7 +202,7 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
 
       <div class="actions">
-        <button class="btn" @click="emit('close')">取消</button>
+        <button class="btn" :disabled="busy" @click="requestClose">取消</button>
         <button v-if="!isEdit" class="btn" :disabled="!valid || busy" @click="run('connect')">
           仅连接
         </button>

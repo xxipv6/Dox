@@ -52,7 +52,7 @@ src/
 │   │   └── remoteExec.ts      # 一次性的 exec 往返（探测用），带 stdout/stderr 判别
 │   ├── container/             # 容器终端（Docker/Podman）
 │   ├── local/                 # 本地终端（node-pty）
-│   ├── sftp/                  # SFTP + 传输队列
+│   ├── sftp/                  # SFTP 通道与传输队列（文件夹走 tar 整流；tarStream.ts 是纯格式层，不碰 IO）
 │   ├── forward/               # 端口转发
 │   └── store/                 # electron-store 各持久化门面
 ├── preload/index.ts           # contextBridge → window.api，唯一的桥
@@ -180,6 +180,25 @@ Windows / Linux 上是 `frame: false`，macOS 上是 `titleBarStyle: 'hiddenInse
 
 `scripts/verify-titlebar.mjs` 守着这两条。
 
+### 3.6 远端批量操作走「整命令」，逐条协议是回退
+
+凡是 O(N) 的远端操作（文件夹传输、递归删除、多选删除），**不许逐条
+SFTP 往返** —— N × RTT 在高延迟链路上是分钟~小时级。一律收敛成一条
+远端本地命令一次往返（远端盘速）：
+
+- 文件夹传输：`tar -xf -` / `tar -cf -` 整流（TransferManager，本机侧
+  纯 JS 拼拆 tar，不依赖本机 tar）
+- 目录删除 / 多选删除：`rm -rf --` 整删、每批 100 条路径分块（SftpService）
+- 就地复制（面板粘贴）：`cp -a --`（含 --no-dereference，符号链接不跟；
+  SFTP 协议没有 copy 原语，无 cp 时明确报错而不是本机绕一圈）
+
+共同的守卫：递归删除过浅路径永远拒绝（`assertRecursiveDeleteSafe`，
+与 agent `fs_delete` 同一道）；命令拼路径一律双引号转义拒换行
+（dqPath / archive.ts 的 dq 同款）；命令不存在（退出码 127）才允许
+回退逐条协议路径，权限等错误两边一样撞、直接抛。
+
+新增一类远端批量操作时按这个套路上，别再写逐条 await 的递归。
+
 ---
 
 ## 4. 验证脚本
@@ -198,6 +217,7 @@ node scripts/verify-cwd-history.mjs  # SFTP 目录历史（前进/后退，浏�
 node scripts/verify-local-explorer.mjs # 本地终端文件面板：新建/重命名/编辑保存/删除/复制/打包全链路落盘
 node scripts/verify-cli.mjs         # CLI 伴侣：--cli 参数单实例转发、connect 预填、安装器
 node scripts/verify-shell-env.mjs   # 新终端环境解析：POSIX 假 $SHELL / Windows 注册表注入变量，终端里可见
+node scripts/verify-tar-transfer.mjs # tar 整流文件夹传输：格式纯函数 + 2000 文件树双向 sha256 + 取消两条路 + UI 冒烟
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
 
@@ -343,6 +363,28 @@ node scripts/verify-shell-env.mjs   # 新终端环境解析：POSIX 假 $SHELL /
 - **大表格必须限制渲染行数。** 千级进程的宿主机上，进程表全量 v-for
   每 2s 重绘能把 Electron 渲染进程打到 80%+ —— 排序照全量排，只渲染
   前 300 行，尾部给「共 N 条」提示（MonitorPanel 的 *_RENDER_CAP）。
+- **ssh2 exec 通道的读侧必须有人消费，否则 'close' 永远不来。** 往通道
+  写 tar 流（stdin 型用法）时 stdout 明明没内容，不 resume() 的话
+  Duplex 读侧不流完就不发 'close' —— 远端进程早退出了（exit 0 都到了），
+  等 close 的代码却挂死，任务永远卡在 active。写侧用法也要 `channel.resume()`。
+- **for-await 遍历 ssh2 通道时 break = 读侧被销毁，'close' 可能再也不来。**
+  取消路径不能 `await closed`（踩过：下载取消后任务卡 active 13 秒+）。
+  只有远端主动 EOF 的正常结束才能等 close；取消路径直接收尾。
+- **tar 文件名超 255 字节（NAME_MAX）是文件系统拒收，不是流错了。**
+  pax 扩展头能装任意长的名字，但 ext4/overlayfs 单段上限 255 ——
+  busybox tar 报「can't remove old file: Filename too long」，
+  意思是「建不了这个文件」。验证夹具的长名要 >100（触发 pax）但 ≤255。
+- **verify-tar-transfer.mjs 直接 import 主进程源码的两条规矩。**
+  显式 `.ts` 后缀（Node 24 type stripping 没有打包器补扩展名）+
+  类型导入独立 `import type`（transform-types 不做类型擦除分析，
+  值位置混进类型运行期炸「does not provide an export」）；
+  用了构造参数属性的类（如 TransferManager）要
+  `--experimental-transform-types`，脚本自重入一次。
+- **验证脚本的「就绪」检查要防上次的残留。** 中途崩掉的脚本会在远端
+  留下 fixture，下次跑「看见目录了就绪」全是假的 —— 目录名带体量
+  标识（dox-many-files-1g），看见这个名字才证明本次命令真跑完了。
+  同类：夹具体量要按本机带宽校准 —— 本机容器夹具 25MB 一秒传完，
+  「传输中点取消」根本来不及，得 GB 级。
 
 ---
 

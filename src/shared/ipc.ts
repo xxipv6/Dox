@@ -37,6 +37,10 @@ export const IpcChannels = {
   sftpMkdir: 'sftp:mkdir',
   sftpRename: 'sftp:rename',
   sftpDelete: 'sftp:delete',
+  /** 批量删除（多选）：主进程按批拼一条 rm，避免逐项往返 */
+  sftpDeleteMany: 'sftp:deleteMany',
+  /** 远端就地复制（同会话内粘贴）：服务端 cp -a，不经本机中转 */
+  sftpCopyWithin: 'sftp:copyWithin',
   sftpReadText: 'sftp:readText',
   sftpWriteText: 'sftp:writeText',
   /** 打包：在远端当前目录把选中项 tar 成 .tar.gz（不下载），返回包路径 */

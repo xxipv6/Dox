@@ -13,6 +13,7 @@ import { useSettingsStore } from '../stores/settings'
 import { useEditorStore } from '../stores/editor'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
 import { detectListenPorts } from '../utils/portSuggest'
+import { pushToast } from '../stores/toast'
 import Icon from './Icon.vue'
 
 const props = defineProps<{ sessionId: string }>()
@@ -640,6 +641,22 @@ function trackInput(data: string): void {
 }
 
 // ---- 搜索 ----
+/*
+ * 匹配高亮配色。装饰只有背景/边框可配（不能改文字色），所以背景色要
+ * 同时扛住黑字（亮色终端）和白字（深色终端）：
+ *  - 匹配项 #b58900：对白字 ~4.9:1、对黑字 ~4.3:1，两套都够得着
+ *  - 当前项  #cb4b16：橙，与黄匹配项一眼分开，边框给亮黄再提一档
+ * overview ruler 颜色是 API 必填，顺带给了。
+ */
+const SEARCH_DECORATIONS = {
+  matchBackground: '#b58900',
+  matchBorder: '#b58900',
+  matchOverviewRuler: '#b58900',
+  activeMatchBackground: '#cb4b16',
+  activeMatchBorder: '#ffd700',
+  activeMatchColorOverviewRuler: '#ff9f1a'
+} as const
+
 function toggleSearch(): void {
   searchVisible.value = !searchVisible.value
   if (searchVisible.value) {
@@ -653,16 +670,16 @@ function toggleSearch(): void {
 
 watch(searchText, (q) => {
   if (!searchAddon) return
-  if (q) searchAddon.findNext(q, { incremental: true })
+  if (q) searchAddon.findNext(q, { incremental: true, decorations: SEARCH_DECORATIONS })
   else searchAddon.clearDecorations()
 })
 
 function findNext(): void {
-  if (searchText.value) searchAddon?.findNext(searchText.value)
+  if (searchText.value) searchAddon?.findNext(searchText.value, { decorations: SEARCH_DECORATIONS })
 }
 
 function findPrevious(): void {
-  if (searchText.value) searchAddon?.findPrevious(searchText.value)
+  if (searchText.value) searchAddon?.findPrevious(searchText.value, { decorations: SEARCH_DECORATIONS })
 }
 
 // ---- 右键菜单（不再盲目粘贴）----
@@ -828,7 +845,7 @@ function onDropFiles(e: DragEvent): void {
     return
   }
   window.api.enqueueDropped(t.sessionId, t.dir, files, t.containerName).catch((err) => {
-    alert(`上传启动失败：${err instanceof Error ? err.message : String(err)}`)
+    pushToast(`上传启动失败：${err instanceof Error ? err.message : String(err)}`)
   })
 }
 
@@ -929,16 +946,17 @@ onMounted(() => {
       if (key === 'escape') zmodem.abort()
       return false
     }
-    if (e.ctrlKey && !e.shiftKey && key === 'f') {
+    const primary = e.ctrlKey || e.metaKey
+    if (primary && !e.shiftKey && key === 'f') {
       toggleSearch()
       return false
     }
-    if (e.ctrlKey && e.shiftKey && key === 'c') {
+    if (primary && e.shiftKey && key === 'c') {
       const sel = term?.getSelection()
       if (sel) void navigator.clipboard.writeText(sel)
       return false
     }
-    if (e.ctrlKey && e.shiftKey && key === 'v') {
+    if (primary && e.shiftKey && key === 'v') {
       void pasteClipboard()
       return false
     }

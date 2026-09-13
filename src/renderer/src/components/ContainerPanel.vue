@@ -8,6 +8,7 @@ import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
 import SidebarSection from './SidebarSection.vue'
+import { pushToast } from '../stores/toast'
 
 /**
  * 远端容器列表（Docker / Podman）。
@@ -176,7 +177,7 @@ async function onMenuSelect(id: string): Promise<void> {
     try {
       await store.viewContainerLogs(sessionId, target, undefined, nestedChain.value)
     } catch (err) {
-      alert(`查看日志失败：${errorText(err)}`)
+      pushToast(`查看日志失败：${errorText(err)}`)
     }
     return
   }
@@ -188,7 +189,7 @@ async function onMenuSelect(id: string): Promise<void> {
       // 这里如实抛出来给用户看，不要吞成一句「失败了」
       await store.enterContainer(sessionId, target, undefined, nestedChain.value)
     } catch (err) {
-      alert(`进入容器失败：${errorText(err)}`)
+      pushToast(`进入容器失败：${errorText(err)}`)
     } finally {
       entering.value = null
     }
@@ -205,7 +206,7 @@ async function onMenuSelect(id: string): Promise<void> {
     await new Promise((r) => setTimeout(r, 600))
     await refresh()
   } catch (err) {
-    alert(`操作失败：${errorText(err)}`)
+    pushToast(`操作失败：${errorText(err)}`)
     await refresh()
   } finally {
     controlling.value = null

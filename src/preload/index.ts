@@ -77,6 +77,10 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.sftpRename, sessionId, from, to, containerName),
   sftpDelete: (sessionId, path, isDir, containerName) =>
     ipcRenderer.invoke(IpcChannels.sftpDelete, sessionId, path, isDir, containerName),
+  sftpDeleteMany: (sessionId, targets, containerName) =>
+    ipcRenderer.invoke(IpcChannels.sftpDeleteMany, sessionId, targets, containerName),
+  sftpCopyWithin: (sessionId, sources, destDir) =>
+    ipcRenderer.invoke(IpcChannels.sftpCopyWithin, sessionId, sources, destDir),
   sftpReadText: (sessionId, path, containerName) =>
     ipcRenderer.invoke(IpcChannels.sftpReadText, sessionId, path, containerName),
   sftpWriteText: (sessionId, path, content, expectedMtime, containerName) =>

@@ -19,7 +19,9 @@ import { tmpdir } from 'node:os'
 mkdirSync('shots', { recursive: true })
 
 const NAME = 'dox-progress-test.bin'
-const SIZE_MB = 20
+// 本机容器夹具的带宽极高，20MB 一秒不到传完（采样只能看到 100%）；
+// 要看到「传输中」的进度条在走，体量必须撑过几秒的传输时间
+const SIZE_MB = 500
 const LOCAL_DIR = join(tmpdir(), 'dox-progress-test')
 rmSync(LOCAL_DIR, { recursive: true, force: true })
 mkdirSync(LOCAL_DIR, { recursive: true })
@@ -80,15 +82,43 @@ await win.waitForFunction(
   { timeout: 15000 }
 )
 
-if (!(await win.locator('.device').count())) {
-  console.log('没有已保存设备，无法验证。')
-  await app.close()
-  process.exit(1)
-}
+const host = process.argv[2]
+const port = Number(process.argv[3] ?? 22)
+const user = process.argv[4] ?? 'root'
+const password = process.argv[5] ?? ''
 
-await win.locator('.device .device-name').first().dblclick()
+if (host) {
+  // 仅连接指定主机（不保存设备，不碰真实配置）
+  await win.locator('button[title="添加设备"]').click()
+  await win.waitForTimeout(400)
+  await win.locator('input[placeholder^="192.168"]').fill(host)
+  await win.locator('input.port').fill(String(port))
+  await win.locator('input[placeholder="root"]').fill(user)
+  await win.locator('input[placeholder="登录密码"]').fill(password)
+  await win.locator('button:has-text("仅连接")').click()
+  for (let i = 0; i < 8; i++) {
+    await win.waitForTimeout(1000)
+    const hk = await win.evaluate(() =>
+      [...document.querySelectorAll('.dialog-header')].map((e) => e.textContent.trim()).some((t) => t.includes('主机'))
+    )
+    if (hk) {
+      await win.locator('button:has-text("信任并保存")').click()
+      break
+    }
+  }
+  await win.locator('.terminal-container:visible').first().click()
+  await win.waitForTimeout(1500)
+  await win.keyboard.press('Escape')
+} else {
+  if (!(await win.locator('.device').count())) {
+    console.log('没有已保存设备，无法验证（可传 host 参数走仅连接）。')
+    await app.close()
+    process.exit(1)
+  }
+  await win.locator('.device .device-name').first().dblclick()
+}
 await win.waitForFunction(
-  () => document.querySelectorAll('.terminal-container').length >= 2,
+  () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
   undefined,
   { timeout: 25000 }
 )
@@ -162,15 +192,20 @@ for (let i = 0; i < 40; i++) {
 check('完成后该条自己消失了，不用手点「清除已完成」', goneAfter !== null, `${goneAfter} ms`)
 check('队列空了后面板整个收起来', (await win.locator('.transfer-panel').count()) === 0)
 
-// ---------- 清理 ----------
+// ---------- 清理（带重试：焦点/首字符可能被吃，MAINTENANCE 踩坑录） ----------
 const input = win.locator('.tab-content:visible .xterm-helper-textarea').first()
-await input.click()
-await win.keyboard.type(`rm -f /root/${NAME}`)
-await win.keyboard.press('Enter')
-await win.waitForTimeout(1500)
-await win.locator('.toolbar button[title="刷新"]').click()
-await win.waitForTimeout(1500)
-check('远端测试文件已清理', !(await rows()).includes(NAME))
+let cleaned = false
+for (let attempt = 0; attempt < 3 && !cleaned; attempt++) {
+  await input.click()
+  await win.waitForTimeout(600)
+  await win.keyboard.type(`rm -f ~/${NAME}`, { delay: 30 })
+  await win.keyboard.press('Enter')
+  await win.waitForTimeout(1500)
+  await win.locator('.toolbar button[title="刷新"]').click()
+  await win.waitForTimeout(1500)
+  cleaned = !(await rows()).includes(NAME)
+}
+check('远端测试文件已清理', cleaned)
 
 rmSync(LOCAL_DIR, { recursive: true, force: true })
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))

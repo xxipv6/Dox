@@ -1,6 +1,9 @@
 import { StringDecoder } from 'node:string_decoder'
 import type { Client, ClientChannel } from 'ssh2'
-import { CommandError, ExecFailure, firstLine } from '../execError'
+// 显式 .ts 后缀：验证脚本用 Node 24 type stripping 直接 import（无打包器补扩展名）。
+// 类型导入必须独立 import type：transform-types 不做类型擦除分析，值位置混进类型会在运行期炸
+import { CommandError, firstLine } from '../execError.ts'
+import type { ExecFailure } from '../execError.ts'
 
 /**
  * 在**已有**的 SSH 连接上跑一条命令，把 stdout / stderr 分开收齐。

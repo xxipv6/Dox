@@ -1,10 +1,12 @@
 import type { SFTPWrapper } from 'ssh2'
-import { MAX_EDITABLE_BYTES, type FileEntry, type RemoteFileContent } from '../../shared/types'
-import { isLocalId } from '../../shared/sessionId'
+// 显式 .ts 后缀：验证脚本用 Node 24 type stripping 直接 import 本模块（无打包器补扩展名）
+import { MAX_EDITABLE_BYTES, type FileEntry, type RemoteFileContent } from '../../shared/types.ts'
+import { isLocalId } from '../../shared/sessionId.ts'
 import type { SessionManager } from '../ssh/SessionManager'
-import { execCapture } from '../ssh/remoteExec'
-import { archiveBaseName, buildArchiveCommand, withSuffix } from './archive'
-import * as localFs from '../local/localFs'
+import { execCapture } from '../ssh/remoteExec.ts'
+import { outputsOf } from '../execError.ts'
+import { archiveBaseName, buildArchiveCommand, withSuffix } from './archive.ts'
+import * as localFs from '../local/localFs.ts'
 import {
   mkdirP,
   posix,
@@ -14,7 +16,7 @@ import {
   statP,
   unlinkP,
   writeFileP
-} from './sftpUtils'
+} from './sftpUtils.ts'
 
 /** 容器文件操作桥：带 containerName 的调用经 agent fs 协议走（AgentManager.call） */
 export interface AgentFsBridge {
@@ -32,6 +34,36 @@ function formatSize(bytes: number): string {
   }
   return `${value.toFixed(1)} ${units[i]}`
 }
+
+/**
+ * shell 双引号转义（与 archive.ts 的 dq 同款：登录 shell 兼容红线，
+ * 命令经 /bin/sh -c 时双引号内的 $、`、\ 必须转义）
+ */
+function dqPath(s: string): string {
+  if (/[\n\r]/.test(s)) {
+    throw new Error(`路径含换行，无法删除：${JSON.stringify(s)}`)
+  }
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')}"`
+}
+
+/**
+ * 递归删除的深度防线：/ 与近根目录永远拒绝（与 agent fs_delete 同一道，
+ * 写死的规则不猜）。段数按 / 计：/a/b 两段放行，/a 一段拒绝。
+ */
+function assertRecursiveDeleteSafe(path: string): void {
+  const segs = path.split('/').filter(Boolean)
+  if (!path.startsWith('/') || segs.length < 2) {
+    throw new Error(`拒绝递归删除过浅的路径: ${path}`)
+  }
+}
+
+/** rm 整条命令不存在（退出码 127）才值得回退 SFTP 递归；权限等错误两边一样撞，直接抛 */
+function isCommandMissing(err: unknown): boolean {
+  return outputsOf(err).code === 127
+}
+
+/** rm -rf 单条命令拼接的路径数上限：防命令行过长（sshd 对 exec 命令串有长度限制） */
+const RM_BATCH = 100
 
 /**
  * SFTP 文件操作。远端一律按 posix 语义处理路径（服务器基本是 Linux），
@@ -343,7 +375,12 @@ export class SftpService {
   /**
    * 删除文件（unlink）或目录（递归）。
    * 递归删除是高危操作，渲染进程必须显式确认后才允许调用目录分支。
-   * 符号链接一律按文件 unlink，绝不跟随进入。
+   * 符号链接一律按文件 unlink/rm，绝不跟随进入（rm -rf 对链接本就是
+   * 只删链不进目录，与 SFTP 递归的口径一致）。
+   *
+   * 目录走 exec `rm -rf`：删除在远端是本地操作，一条命令一次往返、
+   * 远端盘速 —— SFTP 递归是「readdir + 每文件一次 unlink RTT」，
+   * 5 万文件在高延迟链路上要按小时计。rm 不存在（127）回退 SFTP 递归。
    */
   async remove(sessionId: string, path: string, isDir: boolean, containerName?: string): Promise<void> {
     if (isLocalId(sessionId)) return localFs.remove(path, isDir)
@@ -356,6 +393,80 @@ export class SftpService {
       await unlinkP(sftp, path)
       return
     }
+    const client = this.sessions.getClient(sessionId)
+    if (client) {
+      assertRecursiveDeleteSafe(path)
+      try {
+        // 目录可能很大：远端盘速，但 5 万文件也要几秒，给足超时
+        await execCapture(client, `rm -rf -- ${dqPath(path)}`, { timeoutMs: 10 * 60_000 })
+        return
+      } catch (err) {
+        if (!isCommandMissing(err)) throw err
+        // 没有 rm 的怪环境：落回 SFTP 递归（慢，但能用）
+      }
+    }
+    await this.removeRecursiveSftp(sessionId, path)
+  }
+
+  /**
+   * 批量删除（多选）：SSH 路按批拼进一条 rm（每批 100 条路径），
+   * 5000 项从 5000 次往返降到几十次。rm 逐操作数独立处理 ——
+   * 一项失败不耽误其他项（失败项进 stderr，比逐项 await 首个失败
+   * 就中断的语义还好）。容器/本机本来就快，逐项调用即可。
+   */
+  async removeMany(
+    sessionId: string,
+    targets: { path: string; isDir: boolean }[],
+    containerName?: string
+  ): Promise<void> {
+    if (isLocalId(sessionId) || containerName) {
+      for (const t of targets) await this.remove(sessionId, t.path, t.isDir, containerName)
+      return
+    }
+    const client = this.sessions.getClient(sessionId)
+    if (client) {
+      for (const t of targets) {
+        if (t.isDir) assertRecursiveDeleteSafe(t.path)
+      }
+      try {
+        for (let i = 0; i < targets.length; i += RM_BATCH) {
+          const chunk = targets.slice(i, i + RM_BATCH).map((t) => dqPath(t.path)).join(' ')
+          await execCapture(client, `rm -rf -- ${chunk}`, { timeoutMs: 10 * 60_000 })
+        }
+        return
+      } catch (err) {
+        if (!isCommandMissing(err)) throw err
+      }
+    }
+    for (const t of targets) await this.remove(sessionId, t.path, t.isDir)
+  }
+
+  /**
+   * 远端就地复制（同会话内粘贴）：exec `cp -a --`，服务端本地操作一次往返、
+   * 盘速 —— 不走「下载再上传」（那是本机绕一圈的冤枉路）。
+   * -a 保留属性与递归，且含 --no-dereference：符号链接复制为链接（不跟链）。
+   * 覆盖语义与上传一致（撞名覆盖、目录合并）；目录拷进自己会被 cp 拒绝，错误原文上浮。
+   * cp 是 POSIX 必配，真没有（127）明确报错 —— 没有像 rm 那样的 SFTP
+   * 回退（SFTP 协议本身没有 copy 原语，回退只能本机绕一圈，意义不大）。
+   */
+  async copyWithin(sessionId: string, sources: string[], destDir: string): Promise<void> {
+    if (!sources.length) return
+    const client = this.sessions.getClient(sessionId)
+    if (!client) throw new Error('会话已断开，无法就地复制')
+    for (let i = 0; i < sources.length; i += RM_BATCH) {
+      const chunk = sources.slice(i, i + RM_BATCH).map(dqPath).join(' ')
+      try {
+        await execCapture(client, `cp -a -- ${chunk} ${dqPath(destDir)}`, { timeoutMs: 10 * 60_000 })
+      } catch (err) {
+        if (isCommandMissing(err)) throw new Error('远端没有 cp 命令，无法就地复制')
+        throw err
+      }
+    }
+  }
+
+  /** SFTP 递归删除（rm 不可用时的回退）：逐文件 unlink，符号链接不跟随 */
+  private async removeRecursiveSftp(sessionId: string, path: string): Promise<void> {
+    const sftp = await this.sessions.sftp(sessionId)
     const items = await readdirP(sftp, path)
     for (const item of items) {
       if (item.filename === '.' || item.filename === '..') continue
@@ -363,7 +474,7 @@ export class SftpService {
       if (item.attrs.isSymbolicLink() || !item.attrs.isDirectory()) {
         await unlinkP(sftp, child)
       } else {
-        await this.remove(sessionId, child, true)
+        await this.removeRecursiveSftp(sessionId, child)
       }
     }
     await rmdirP(sftp, path)

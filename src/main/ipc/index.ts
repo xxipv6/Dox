@@ -179,6 +179,16 @@ export function registerIpc(
     (_event, sessionId: string, path: string, isDir: boolean, containerName?: string) =>
       sftpService.remove(sessionId, path, isDir, containerName)
   )
+  ipcMain.handle(
+    IpcChannels.sftpDeleteMany,
+    (_event, sessionId: string, targets: { path: string; isDir: boolean }[], containerName?: string) =>
+      sftpService.removeMany(sessionId, targets, containerName)
+  )
+  ipcMain.handle(
+    IpcChannels.sftpCopyWithin,
+    (_event, sessionId: string, sources: string[], destDir: string) =>
+      sftpService.copyWithin(sessionId, sources, destDir)
+  )
   ipcMain.handle(IpcChannels.sftpReadText, (_event, sessionId: string, path: string, containerName?: string) =>
     sftpService.readText(sessionId, path, containerName)
   )

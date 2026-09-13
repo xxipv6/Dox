@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComposeVerb, DiskUsage, DroppedFile, FileEntry, TransferTask } from '@shared/types'
 import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { LOCAL_ID_PREFIX } from '@shared/sessionId'
@@ -9,6 +9,7 @@ import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
 import { useComposeStore } from '../stores/compose'
 import { useSettingsStore } from '../stores/settings'
+import { panelClipboard } from '../stores/fileClipboard'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
@@ -48,6 +49,7 @@ function joinInCwd(name: string): string {
 const cwd = ref('')
 const entries = ref<FileEntry[]>([])
 const loading = ref(false)
+let loadSeq = 0
 const errorMsg = ref('')
 const dragOver = ref(false)
 /** 容器标签但还没装容器助手：文件面板无米下锅，指路去装 */
@@ -62,14 +64,21 @@ const archiving = ref(false)
 // ---- 磁盘用量条（宿主 statvfs 扩展 / 容器 agent fs_usage；不支持就不显示）----
 const usage = ref<DiskUsage | null>(null)
 let usageFetchedAt = 0
+let usageFetchedKey = ''
 
 async function refreshUsage(): Promise<void> {
   // 10s 缓存：用量变化慢，每次 cd 都问一次远端是浪费
-  if (Date.now() - usageFetchedAt < 10_000) return
+  const key = `${fsSessionId.value}|${ctrName.value ?? ''}|${cwd.value}`
+  if (key === usageFetchedKey && Date.now() - usageFetchedAt < 10_000) return
+  usageFetchedKey = key
   usageFetchedAt = Date.now()
-  usage.value = await window.api
+  const value = await window.api
     .sftpDiskUsage(fsSessionId.value, cwd.value || '/', ctrName.value)
     .catch(() => null)
+  // 导航期间旧请求可能晚于新请求返回，不能把旧目录的用量写回当前面板。
+  if (key === `${fsSessionId.value}|${ctrName.value ?? ''}|${cwd.value}`) {
+    usage.value = value
+  }
 }
 
 const usagePercent = computed(() =>
@@ -150,8 +159,9 @@ function onRowClick(e: MouseEvent, entry: FileEntry, index: number): void {
   const next = new Set(selected.value)
   if (e.shiftKey && anchorIndex.value !== null) {
     const [from, to] = [anchorIndex.value, index].sort((a, b) => a - b)
+    // 下标按当前可见列表（过滤后）取，和 v-for 的 index 同源
     for (let i = from; i <= to; i++) {
-      const item = entries.value[i]
+      const item = visibleEntries.value[i]
       if (item) next.add(item.path)
     }
   } else if (e.ctrlKey || e.metaKey) {
@@ -169,6 +179,98 @@ function onRowClick(e: MouseEvent, entry: FileEntry, index: number): void {
 const clearSelection = (): void => {
   selected.value = new Set()
   anchorIndex.value = null
+}
+
+// ---- 键盘快捷键（面板聚焦后 Cmd/Ctrl+A/C/V/F）----
+/**
+ * 面板内剪贴板，模块级单例：跨标签实例共享（同服务器换个标签也能粘）。
+ * key 相同（同会话同容器）才允许粘贴 —— 跨会话/跨面板粘贴的语义
+ * （本机绕一圈 or 双连接对传）没定论，v1 给提示不硬做。
+ */
+const panelKey = computed(() => `${fsSessionId.value}|${ctrName.value ?? ''}`)
+
+/** 过滤框（Ctrl+F）：客户端按名过滤当前目录（entries 本来就在手边，零往返） */
+const filterOpen = ref(false)
+const filterText = ref('')
+const filterInput = ref<HTMLInputElement>()
+const visibleEntries = computed(() => {
+  const q = filterText.value.trim().toLowerCase()
+  if (!q) return entries.value
+  return entries.value.filter((x) => x.name.toLowerCase().includes(q))
+})
+
+const canPaste = computed(
+  () => panelClipboard.value !== null && panelClipboard.value.key === panelKey.value && !props.container
+)
+
+function selectAll(): void {
+  selected.value = new Set(visibleEntries.value.map((x) => x.path))
+}
+
+function copySelection(): void {
+  if (!selected.value.size) return
+  panelClipboard.value = { key: panelKey.value, paths: [...selected.value] }
+}
+
+async function pasteClipboard(): Promise<void> {
+  const clip = panelClipboard.value
+  if (!clip) return
+  if (clip.key !== panelKey.value) {
+    errorMsg.value = '暂不支持跨会话/跨面板粘贴，请用拖拽或「复制到…」'
+    return
+  }
+  if (props.container) {
+    errorMsg.value = '容器面板暂不支持粘贴'
+    return
+  }
+  await guard(async () => {
+    if (isLocal.value) {
+      // 本机：走传输队列（撞名避让/进度/取消同一套），DroppedFile 只用到 path
+      await window.api.enqueueDropped(
+        fsSessionId.value,
+        cwd.value,
+        clip.paths.map((p) => ({ path: p, name: p, size: 0 }))
+      )
+    } else {
+      // 远端：服务端 cp -a 就地复制（不经本机中转），完事刷新
+      await window.api.sftpCopyWithin(fsSessionId.value, clip.paths, cwd.value)
+      await load()
+    }
+  })
+}
+
+function openFilter(): void {
+  filterOpen.value = true
+  void nextTick(() => filterInput.value?.focus())
+}
+
+function closeFilter(): void {
+  filterOpen.value = false
+  filterText.value = ''
+}
+
+/**
+ * 键盘入口挂在 .explorer 根上（tabindex=0，点面板任意处即聚焦）。
+ * 输入框（重命名/新建/过滤）里的按键归输入框自己，不拦截。
+ */
+function onKeydown(e: KeyboardEvent): void {
+  if (!(e.ctrlKey || e.metaKey)) return
+  const tag = (e.target as HTMLElement).tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return
+  const key = e.key.toLowerCase()
+  if (key === 'a') {
+    e.preventDefault()
+    selectAll()
+  } else if (key === 'c') {
+    e.preventDefault()
+    copySelection()
+  } else if (key === 'v') {
+    e.preventDefault()
+    void pasteClipboard()
+  } else if (key === 'f') {
+    e.preventDefault()
+    openFilter()
+  }
 }
 
 /**
@@ -193,6 +295,7 @@ const breadcrumbs = computed(() => {
 })
 
 async function load(dir?: string): Promise<void> {
+  const seq = ++loadSeq
   loading.value = true
   errorMsg.value = ''
   // 换目录后旧路径已经没意义，留着会选中一个看不见的东西
@@ -200,16 +303,21 @@ async function load(dir?: string): Promise<void> {
   const prev = cwd.value
   try {
     if (dir) cwd.value = dir
-    entries.value = await window.api.sftpList(fsSessionId.value, cwd.value, ctrName.value)
+    const nextEntries = await window.api.sftpList(fsSessionId.value, cwd.value, ctrName.value)
+    // 用户快速连续导航时，较早请求可能晚返回；只接受最后一次结果，避免
+    // 旧目录列表覆盖当前目录。
+    if (seq !== loadSeq) return
+    entries.value = nextEntries
     // 与终端的 cwd 跟踪保持同步（作为下次 cd 相对路径的基准）
     store.setCwd(props.sessionId, cwd.value)
   } catch (err) {
+    if (seq !== loadSeq) return
     // 进不去目标目录：回滚路径、保留旧列表 —— 否则面包屑指着新路径、
     // 行却是旧目录的，用户会以为自己在删/改另一个目录的东西
     cwd.value = prev
     errorMsg.value = (dir ? '无法进入目录：' : '') + errorText(err)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
   // 顺手刷新磁盘用量（自带 10s 缓存；失败静默 —— 用量条是加分项不是刚需）
   void refreshUsage()
@@ -430,6 +538,9 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
         label: many ? `打包这 ${targets.length} 项` : '打包',
         icon: 'box'
       },
+      // 复制进面板剪贴板；粘贴只接受同源（同会话同容器），跨面板给提示
+      { id: 'copy', label: many ? `复制这 ${targets.length} 项` : '复制', icon: 'copy' },
+      { id: 'paste', label: '粘贴到当前目录', icon: 'paste', disabled: !canPaste.value },
       // 重命名只能对一项，多选时给个禁用项比整条去掉更好读
       { id: 'rename', label: '重命名', icon: 'pencil', disabled: many },
       {
@@ -458,7 +569,10 @@ function onBlankContextMenu(e: MouseEvent): void {
   menu.value = {
     x: e.clientX,
     y: e.clientY,
-    items: [{ id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' }]
+    items: [
+      { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' },
+      { id: 'paste', label: '粘贴到当前目录', icon: 'paste', disabled: !canPaste.value }
+    ]
   }
 }
 
@@ -501,9 +615,16 @@ async function onMenuSelect(id: string): Promise<void> {
     openInTerminal(dir)
     return
   }
-  if (!targets.length) return
+  if (!targets.length) {
+    if (id === 'paste') await pasteClipboard()
+    return
+  }
   if (id === 'download') await downloadTargets(targets)
   else if (id === 'archive') await archiveTargets(targets)
+  else if (id === 'copy') {
+    panelClipboard.value = { key: panelKey.value, paths: targets.map((t) => t.path) }
+    clearSelection()
+  } else if (id === 'paste') await pasteClipboard()
   else if (id === 'rename') startRename(targets[0])
   else if (id === 'delete') await removeTargets(targets)
   else if (id.startsWith('compose-')) await runCompose(id.slice('compose-'.length) as ComposeVerb, targets[0])
@@ -555,10 +676,12 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
   const hint = dirs ? `，其中 ${dirs} 个是目录（连同内容递归删除）` : ''
   if (!confirm(`确认删除选中的 ${targets.length} 项？${hint}。不可恢复。`)) return
   try {
-    // 逐项删：一项失败不该把剩下的都吞掉，删成的那些也要如实反映出来
-    for (const t of targets) {
-      await window.api.sftpDelete(fsSessionId.value, t.path, t.isDir, ctrName.value)
-    }
+    // 批量一条命令删（rm 逐操作数独立：一项失败不耽误其他项，失败原因进错误信息）
+    await window.api.sftpDeleteMany(
+      fsSessionId.value,
+      targets.map((t) => ({ path: t.path, isDir: t.isDir })),
+      ctrName.value
+    )
   } catch (err) {
     errorMsg.value = `删除过程中出错：${errorText(err)}`
   } finally {
@@ -718,6 +841,8 @@ onBeforeUnmount(() => {
   <div
     class="explorer"
     :class="{ 'drag-over': dragOver }"
+    tabindex="0"
+    @keydown="onKeydown"
     @dragover.prevent="dragOver = true"
     @dragleave.prevent="dragOver = false"
     @drop.prevent="onDrop"
@@ -737,6 +862,21 @@ onBeforeUnmount(() => {
       </button>
       <button class="icon-btn" :title="isLocal ? '选文件复制进当前目录' : '上传文件'" @click="pickUpload"><Icon name="upload" /></button>
       <span class="spacer"></span>
+      <!-- 过滤（Ctrl+F）：只过滤当前目录已加载的条目，客户端零往返 -->
+      <input
+        v-if="filterOpen"
+        ref="filterInput"
+        v-model="filterText"
+        class="filter-input"
+        placeholder="过滤当前目录…"
+        @keyup.esc="closeFilter"
+      />
+      <button
+        class="icon-btn"
+        :class="{ active: filterOpen }"
+        title="过滤当前目录（Ctrl/Cmd+F）"
+        @click="filterOpen ? closeFilter() : openFilter()"
+      ><Icon name="search" /></button>
       <button class="icon-btn" title="在终端中打开此目录" @click="openInTerminal()">
         <Icon name="terminal" />
       </button>
@@ -813,8 +953,10 @@ onBeforeUnmount(() => {
         />
       </div>
 
+      <!-- 过滤命中 0 条要给话，不然像目录空了 -->
+      <div v-if="filterText && !visibleEntries.length" class="hint">没有匹配「{{ filterText }}」的条目</div>
       <div
-        v-for="(entry, index) in entries"
+        v-for="(entry, index) in visibleEntries"
         :key="entry.path"
         class="row"
         :class="{ selected: isSelected(entry) }"
@@ -913,6 +1055,23 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 键盘焦点环不外显：选中态本身可见，焦点只是快捷键的载体 */
+.explorer:focus {
+  outline: none;
+}
+.filter-input {
+  width: 140px;
+  padding: 3px 8px;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  outline: none;
+}
+.filter-input:focus {
+  border-color: var(--focus-ring);
+}
 .explorer {
   width: 360px;
   position: relative; /* compose 结果卡 absolute 定位的锚 */

@@ -94,7 +94,16 @@ function statusIcon(status: string): { name: 'check' | 'alert' | 'x' | null; cls
         </button>
       </span>
     </div>
-    <pre ref="outEl" class="cd-out" @scroll="onScroll">{{ active?.text || '（等待输出…）' }}</pre>
+    <!-- pre 默认不可聚焦；不加 tabindex 时点击日志后焦点仍留在终端，
+         Ctrl+A/C 会继续送给 shell。让日志区成为真正的键盘焦点目标。 -->
+    <pre
+      ref="outEl"
+      class="cd-out"
+      tabindex="0"
+      @mousedown.stop="($event.currentTarget as HTMLElement).focus()"
+      @keydown.stop
+      @scroll="onScroll"
+    >{{ active?.text || '（等待输出…）' }}</pre>
     <div v-if="active && active.status !== 'running'" class="cd-foot" :class="active.status">
       <template v-if="active.status === 'ok'">完成（退出码 0）</template>
       <template v-else-if="active.status === 'canceled'">已取消</template>

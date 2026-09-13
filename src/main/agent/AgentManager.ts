@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import { app, type WebContents } from 'electron'
 import type { ClientChannel } from 'ssh2'
 import type { SessionManager } from '../ssh/SessionManager'
@@ -498,12 +499,20 @@ export class AgentManager {
     this.channels.set(key, ch)
 
     let buf = ''
+    // SSH/stdio 的 chunk 边界不保证落在 UTF-8 字符边界；逐块 toString
+    // 会把中文路径拆成替换字符，导致 JSON 内容损坏。
+    const decoder = new StringDecoder('utf8')
+    // buf[0..scanned) 已确认不含 \n：1.4MB 的 fs_read_chunk 响应以 ~32KB 通道块
+    // 到达时，每个块都从 0 重扫就是 O(n²) 的字符扫描（每 GB 下载 ≈ 数十 GB），
+    // 而这发生在服务所有 IPC 的主进程上。只扫新追加的尾部即可。
+    let scanned = 0
     stream.onData((d: Buffer) => {
-      buf += d.toString('utf8')
+      buf += decoder.write(d)
       let idx: number
-      while ((idx = buf.indexOf('\n')) >= 0) {
+      while ((idx = buf.indexOf('\n', scanned)) >= 0) {
         const line = buf.slice(0, idx)
         buf = buf.slice(idx + 1)
+        scanned = 0
         let msg: { id?: number; event?: string; result?: unknown; error?: string }
         try {
           msg = JSON.parse(line)
@@ -526,6 +535,8 @@ export class AgentManager {
           }
         }
       }
+      // 整块都没扫到 \n：记住已扫长度，下个通道块只从尾巴接着扫
+      scanned = buf.length
     })
     const onDead = (): void => this.dropChannel(key, ch)
     stream.onDead(onDead)

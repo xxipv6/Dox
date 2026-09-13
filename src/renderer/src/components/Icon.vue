@@ -14,7 +14,7 @@ export type IconName =
   | 'chevron-up' | 'chevron-down' | 'chevron-right' | 'chevron-left'
   | 'arrow-up' | 'arrow-down' | 'refresh' | 'play' | 'pencil' | 'trash' | 'check-square'
   | 'folder' | 'folder-plus' | 'file' | 'link'
-  | 'upload' | 'download' | 'follow' | 'paste' | 'terminal' | 'server'
+  | 'upload' | 'download' | 'follow' | 'paste' | 'copy' | 'terminal' | 'server'
   | 'split-right' | 'split-down' | 'panel-left'
   | 'key' | 'alert' | 'settings' | 'sun' | 'moon' | 'box' | 'zap'
   | 'monitor'
@@ -68,6 +68,7 @@ const PATHS: Record<IconName, string[]> = {
   download: ['M12 4v11M8 11l4 4 4-4', 'M4 16v2a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-2'],
   follow: ['M4 8h13M14 5l3 3-3 3', 'M20 16H7M10 13l-3 3 3 3'],
   paste: ['M9 11l-5 5 5 5', 'M4 16h10a6 6 0 0 0 6-6V4'],
+  copy: ['M9 9h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1z', 'M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1'],
   terminal: ['M4 7l5 5-5 5', 'M12 17h8'],
   server: [
     'M4 5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z',
