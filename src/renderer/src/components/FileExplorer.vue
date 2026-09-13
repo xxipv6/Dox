@@ -455,6 +455,10 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
 function openInTerminal(): void {
   const quoted = `'${cwd.value.replace(/'/g, `'\\''`)}'`
   window.api.input(props.sessionId, `cd ${quoted}\r`)
+  // cd 打过去还得让用户看见：聚焦到挂着这个会话的终端标签，
+  // 否则点了像没反应（SFTP 面板开着时终端可能在别的标签）
+  const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
+  if (tab) store.activeTabId = tab.tabId
 }
 
 // ---- 拖拽上传 ----
