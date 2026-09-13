@@ -22,6 +22,7 @@ jobs:
   app:
     name: app typecheck+build (${{ matrix.os }})
     env:
+      electron_config_cache: ${{ github.workspace }}/.cache/electron
       ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
       ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     strategy:
@@ -118,6 +119,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [release-shell]
     env:
+      electron_config_cache: ${{ github.workspace }}/.cache/electron
       ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
       ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     permissions:
