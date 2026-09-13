@@ -10,6 +10,7 @@ import { IpcChannels } from '../../shared/ipc'
 import type { LocalShellInfo, TermSize } from '../../shared/types'
 import { LOCAL_ID_PREFIX } from '../../shared/sessionId'
 import { detectShells, resolveShell } from './shells'
+import { resolveShellEnv } from './shellEnv'
 import { createChunkBatcher } from '../chunkBatcher'
 
 // 前缀定义在 shared/sessionId.ts（渲染层也要用同一份），这里转出去保持既有导入可用
@@ -33,9 +34,12 @@ export class LocalPtyManager {
     return detectShells()
   }
 
-  spawn(owner: WebContents, term: TermSize, shellId?: string, cwd?: string): string {
+  async spawn(owner: WebContents, term: TermSize, shellId?: string, cwd?: string): Promise<string> {
     const id = `${LOCAL_ID_PREFIX}${randomUUID()}`
     const { command, args, env } = resolveShell(shellId)
+    // login shell 环境（zprofile 系变量 + Dox 启动后新增的变量），
+    // 合并顺序：process.env < login 环境 < integration 注入（ZDOTDIR 等）
+    const loginEnv = await resolveShellEnv()
 
     const proc = pty.spawn(command, args, {
       name: 'xterm-256color',
@@ -44,7 +48,7 @@ export class LocalPtyManager {
       // 永远显式指定初始目录（继承父进程 cwd 在 Windows 管理员启动时会
       // 落到 system32）；指定的目录已不存在就回家目录
       cwd: cwd && existsSync(cwd) ? cwd : os.homedir(),
-      env: { ...(process.env as Record<string, string>), ...env }
+      env: { ...(process.env as Record<string, string>), ...loginEnv, ...env }
       // 注意：不要设 useConptyDll。实测该选项会让 pty 完全无输出（仅 23 字节
       // 控制序列）。从终端启动 Electron 时 conpty_console_list_agent 的
       // AttachConsole 报错是噪音，不影响 pty 工作，打包后也不出现。
