@@ -1,8 +1,9 @@
 name: CI
 
+# push main 不触发：日常推送不需要三平台 matrix 空跑（本地已验）。
+# 要跑 CI 的三条路：打 v* tag 发版、网页/命令行手动 dispatch、开 PR。
 on:
   push:
-    branches: [main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
