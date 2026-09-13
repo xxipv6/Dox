@@ -21,6 +21,9 @@ jobs:
   # verify-*.mjs 那套端到端依赖测试服务器/dind 夹具，不进 CI（见 MAINTENANCE.md）
   app:
     name: app typecheck+build (${{ matrix.os }})
+    env:
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     strategy:
       fail-fast: false
       matrix:
@@ -34,9 +37,19 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: 缓存 Electron 二进制
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/electron
+            .cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
       # npm 12 默认 allow-remote=none，lockfile 里 zmodem.js 解析到 npmmirror 会被拒
-      - name: 安装依赖
-        run: npm ci
+      - name: 安装依赖（优先缓存）
+        run: npm ci --prefer-offline --no-audit --no-fund
         env:
           npm_config_allow_remote: all
 
@@ -104,6 +117,9 @@ jobs:
     name: pack (${{ matrix.name }})
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [release-shell]
+    env:
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     permissions:
       contents: write # 建 Release / 传资产
     strategy:
@@ -122,13 +138,23 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: 缓存 Electron 二进制
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/electron
+            .cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
           cache: false
 
-      - name: 安装依赖
-        run: npm ci
+      - name: 安装依赖（优先缓存）
+        run: npm ci --prefer-offline --no-audit --no-fund
         env:
           npm_config_allow_remote: all
 

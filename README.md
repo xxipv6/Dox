@@ -1,120 +1,126 @@
 # Dox
 
-跨平台 SSH 终端 + SFTP 文件管理器（Electron，对标 electerm / Tabby）。
+Dox 是一个面向远程开发的桌面工作区：把 SSH 终端、SFTP 文件管理、容器、端口转发和主机监控放在同一个窗口里。它基于 Electron，支持 Windows、macOS 和 Linux。
 
-![CI](https://github.com/xxipv6/Dox/actions/workflows/ci.yml/badge.svg)
+[![CI](https://github.com/xxipv6/Dox/actions/workflows/ci.yml/badge.svg)](https://github.com/xxipv6/Dox/actions/workflows/ci.yml) · [下载最新版本 v0.1.3](https://github.com/xxipv6/Dox/releases/latest)
 
-## 功能
+## 为什么用 Dox
 
-**终端**
-- 密码 / 私钥登录、多标签、分屏（每 pane 一条独立会话）、resize 同步、断线重连与状态提示
-- 跳板机 ProxyJump（等效 `ssh -J`，最多 3 层）、known_hosts 指纹确认（首连信任 / 变更告警）
-- rz/sz（ZMODEM）、Ctrl+F 搜索（匹配黄色高亮）、选中即复制、终端输出里的绝对路径 Ctrl/Cmd+点击直达面板或编辑器
-- 本地 shell 全平台集成：Windows 列 cmd / PowerShell / pwsh / Git Bash / WSL，POSIX 探测 bash / zsh / fish，cwd 跟踪（OSC 7 / OSC 133 注入）
-- 新开本地终端自动带上当前环境（POSIX 走 login shell，~/.zprofile / Homebrew shellenv 也进得来；Windows 读注册表 Machine+User 环境；Dox 开着时在别处改的变量，下个标签就生效）
-- 拖文件进终端：远端会话 = 上传到当前目录，本地终端 = 粘贴引号包裹的路径
-- 本地终端默认目录可设置（设置里目录框选择，不设则回家目录）；布局恢复记住每个标签当时的目录
+- **一个远程工作区**：终端、目录、容器和转发绑定到同一台设备，切换标签即可继续工作。
+- **远端操作少绕路**：文件夹传输使用 tar 整流，远端删除和复制优先使用服务器本地命令，减少高延迟链路上的往返。
+- **本地与远端一致**：本地 shell 也有终端、文件面板、编辑器、打包和传输队列。
+- **助手按需安装**：`dox-agent` 只有在用户明确点击安装时才推送到主机或容器，不静默改动远端环境。
 
-**SFTP 文件管理**
-- 浏览 / 新建 / 重命名 / 递归删除、面包屑、排序；内置编辑器（查看 / 编辑 / 保存回远端，mtime 乐观锁冲突提示）
-- 面板快捷键：⌘/Ctrl+A 全选、C/V 复制粘贴（远端走服务端 cp -a 就地复制，不经本机中转）、F 按名过滤当前目录
-- 本地终端也有同一套面板：浏览本机、编辑器改存、就地 tar 打包、「复制到…」/ 拖入复制（走传输队列，有进度可取消）
-- 目录历史前进 / 后退（工具栏按钮 + 鼠标侧键），浏览器式逐层回退
-- 传输队列：并发 8、流式、进度、取消；文件夹走 tar 整流（远端有 tar 时整树一条流，否则递归逐文件）；拖拽上传；断点续传
-- 右键「打包」：远端就地 tar.gz（不下载），撞名自动避让
-- 右键（文件 / 文件夹 / 空白处）「在终端打开此目录」：终端 cd 过去并聚焦；SFTP 自己翻目录绝不动终端
-- 目录磁盘用量条 + 「谁占的」du 分解
+## 核心功能
 
-**容器（Docker / Podman）**
-- 侧栏列出本机或 SSH 远端的容器，右键进入 shell / 查看日志 / 启动 / 停止 / 删除
-- 直连容器：设备行展开即进，免宿主机终端标签；容器标签独立存活
-- 嵌套容器：任意深度 `docker exec` 链（dind 套 dind），distroless 也进得去
-- 容器文件管理：浏览 / 编辑 / 上传下载（分块直传）/ 打包，全程在宿主机零残留
-- 零改动红线：不装东西、不建文件、不留痕迹；`docker run/create/pull/cp` 永不出现
+### 终端与工作区
 
-**远程助手 dox-agent（opt-in，Go 静态二进制 ~2MB）**
-- 显式点安装才推送（宿主机 SFTP / 容器 docker cp 注入），删目录即完全卸载，永不静默装
-- 性能监控：概览（每核 CPU 格子 + 内存）、网络（netstat 式连接表）、进程（排序 / 过滤 / 结束任务）
-- 端口哨兵：连接后新出现的监听端口弹提醒，反查进程名 + PID，一键建转发
-- 静默执行：不开终端跑命令拿退出码与输出（argv 不经 shell）
+- SSH 密码 / 私钥登录，多标签和分屏；支持 ProxyJump（最多三层）与 known_hosts 指纹确认。
+- 断线重连、状态提示、终端搜索、选中复制，以及 Ctrl/Cmd 点击绝对路径直达文件面板或编辑器。
+- 本地 shell：Windows 的 cmd、PowerShell、pwsh、Git Bash、WSL；macOS/Linux 的 bash、zsh、fish。
+- 跟踪当前目录，恢复标签布局；拖入文件可上传到远端当前目录，或在本地终端粘贴已转义的路径。
+- rz/sz（ZMODEM）文件传输。
 
-**网络与代理**
-- 端口转发面板：本地 -L / 远程 -R，规则绑定会话、断开自动停
-- SOCKS5 一键代理（等效 `ssh -D`）：浏览器指向 `socks5://127.0.0.1:端口` 即走服务器网络出口
+### SFTP 与文件面板
 
-**效率与界面**
-- 快捷命令片段：一键注入终端 / 仅粘贴 / 经 agent 静默执行
-- CLI 伴侣：`dox .` 当前目录开标签、`dox root@1.2.3.4` 直连设备（设置页一键安装，单实例转发不注册协议）
-- 亮色「晴空」/ 深色「冷夜」/ 跟随系统，终端与编辑器主题联动实时切换
-- 自绘标题栏（Windows / Linux）、设备搜索（名称 / 地址 / 登录名 / 端口）
-- AI 容量速览：标题栏常驻 Kimi / DeepSeek / GLM 配额用量，Key 经系统钥匙串加密
+- 浏览、新建、重命名、递归删除、排序、面包屑和目录历史。
+- 内置查看 / 编辑器，保存时检查远端 mtime，避免覆盖他人修改。
+- Ctrl/Cmd+A 全选、C/V 复制粘贴、F 按名过滤；远端同会话复制走 `cp -a`，不经本机中转。
+- 传输队列支持并发 8、进度、取消、断点续传和拖拽上传；文件夹优先走 tar 整流，目标不支持 tar 时自动回退逐文件传输。
+- 远端就地打包 tar.gz、目录磁盘用量和 du 分解；右键可在终端打开当前目录。
+
+### Docker / Podman
+
+- 查看本机或 SSH 远端容器，进入 shell、查看日志、启动、停止和删除。
+- 容器标签独立于宿主机连接；支持嵌套 `docker exec`，也能进入 distroless 容器。
+- 容器文件浏览、编辑、上传、下载和打包；传输在宿主机完成，不在容器留下临时文件。
+
+### 远程助手与网络
+
+- `dox-agent` 提供 CPU / 内存、网络连接、进程、监听端口和静默命令执行。
+- 发现新监听端口时提醒，并可一键创建转发。
+- 端口转发支持本地 `-L`、远程 `-R`，以及 SOCKS5（等效 `ssh -D`）。
+
+### 效率与界面
+
+- 快捷命令片段：注入终端、仅粘贴，或通过 agent 静默执行。
+- CLI 伴侣：`dox .` 打开当前目录，`dox user@host` 直接连接设备；单实例转发避免重复启动。
+- 晴空 / 冷夜 / 跟随系统三种主题，标题栏和终端主题同步切换。
+- 标题栏常驻显示每个 AI 账号的 5 小时和 7 天额度；Key 使用系统钥匙串保护。
 
 ## 下载与安装
 
-[GitHub Releases](https://github.com/xxipv6/Dox/releases) 提供 Windows（NSIS 安装包）、macOS（dmg / zip，未签名）、Linux（AppImage / deb）。
+前往 [GitHub Releases](https://github.com/xxipv6/Dox/releases) 下载对应平台的安装包：
 
-> macOS 未签名：首次打开需在「系统设置 → 隐私与安全性」里放行。Windows 未签名会出 SmartScreen 提示，选「仍要运行」。
+| 平台 | 产物 |
+| --- | --- |
+| Windows | NSIS 安装包 |
+| macOS | `.dmg` / `.zip`（未签名） |
+| Linux | AppImage / `.deb` |
+
+Windows 未签名安装包可能触发 SmartScreen，选择“仍要运行”。macOS 首次打开时，在“系统设置 → 隐私与安全性”中允许打开。
+
+### macOS 提示“文件已损坏，无法打开”
+
+将 Dox 移到“应用程序”目录并退出应用后，在终端依次执行（路径按实际应用名称调整）：
+
+```bash
+sudo codesign --force --deep --sign - /Applications/Dox.app
+sudo xattr -rd com.apple.quarantine /Applications/Dox.app
+sudo codesign --force --deep --sign - /Applications/Dox.app
+```
+
+执行完成后重新打开 Dox。若应用仍在下载目录，请先拖到 `/Applications`，并把命令中的 `Dox.app` 改成实际文件名。
 
 ## 开发
 
 ```bash
 npm install
-npm run dev          # 开发模式（HMR）
-npm run typecheck    # tsc(主/preload) + vue-tsc(渲染层)，提交前必过
-npm run build        # 产物输出到 out/
-npm run pack:win     # electron-builder 打包（另有 pack:mac / pack:linux）
+npm run dev          # Electron 开发模式（HMR）
+npm run typecheck    # 主进程、preload、渲染层类型检查
+npm run build        # 构建到 out/
+npm run pack:win     # 另有 pack:mac / pack:linux
 ```
 
-国内环境：`npm install` 被拦时设 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/` 后手动 `node node_modules/electron/install.js`；`pack:*` 需要 `ELECTRON_MIRROR` + `ELECTRON_BUILDER_BINARIES_MIRROR` 两个镜像（详见 MAINTENANCE.md）。
+国内网络安装 Electron 失败时，可设置：
 
-> **接手维护先看 [MAINTENANCE.md](MAINTENANCE.md)** —— 会话 id 路由、必须守住的约束（远端零改动、令牌层、容器标签不重连）、验证脚本怎么跑、以及一批踩过的环境坑。
+```bash
+ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm install
+```
+
+打包还需要 `ELECTRON_BUILDER_BINARIES_MIRROR`。维护约束、验证脚本和发布流程见 [MAINTENANCE.md](MAINTENANCE.md)。
 
 ## 技术栈
 
 | 层 | 选型 |
-|---|---|
-| 框架 | Electron 44 + electron-vite 6（Vite 8） |
-| UI | Vue 3.5 + Pinia 4 |
-| 终端 | @xterm/xterm 6 + fit / webgl / web-links addons |
-| SSH/SFTP | ssh2 1.17（主进程持有连接） |
-| 远程助手 | Go 1.25 静态二进制（linux/amd64 + arm64，NDJSON over SSH exec） |
-| 配置 | electron-store 11 + safeStorage 加密敏感字段 |
-| 语言 | TypeScript 5.9，全工程 ESM |
+| --- | --- |
+| 桌面框架 | Electron 44、electron-vite 6、Vite 8 |
+| UI | Vue 3.5、Pinia 4 |
+| 终端 | xterm 6（fit、search、web-links、webgl） |
+| SSH / SFTP | ssh2 1.17 |
+| 远程助手 | Go 1.25 静态二进制，NDJSON over SSH exec |
+| 配置与凭证 | electron-store 11、safeStorage |
+| 语言 | TypeScript 5.9、Go |
 
-## 架构速览
+## 项目结构
 
-```
-src/
-├── main/                  # 主进程：所有连接与凭证都在这里
-│   ├── ssh/               #   ssh2 连接池、shell 数据流、心跳保活、ProxyJump
-│   ├── sftp/              #   SFTP 通道与传输队列
-│   ├── container/         #   容器探测/进入/日志/生命周期（ContainerManager 独立成模块）
-│   ├── agent/             #   dox-agent 安装与 NDJSON 协议通道
-│   ├── forward/           #   端口转发（-L/-R）与 SOCKS5
-│   ├── local/             #   本地 shell（node-pty）与各 shell integration 注入
-│   └── store/             #   electron-store + safeStorage
-├── preload/index.ts       # contextBridge → window.api（渲染层唯一入口）
-├── shared/                # 主/渲染共用的类型与 IPC 通道常量
-└── renderer/src/          # Vue：App（布局/标签栏）+ components/ + stores/
-agent/                     # dox-agent（Go）：fs_* / ps_* / watch_* / exec 协议
-scripts/                   # 验证脚本（见下）与构建工具
+```text
+src/main/       主进程：SSH、SFTP、容器、agent、转发、本地 shell、配置
+src/preload/    安全的 contextBridge API
+src/shared/     主进程与渲染层共用类型和 IPC 常量
+src/renderer/   Vue 界面、标签栏、终端、文件面板和设置
+agent/          dox-agent Go 源码
+scripts/        agent 构建工具与验证脚本
 ```
 
-会话 id 前缀决定管理器路由：`local-` 本地终端、`container-` 容器、无前缀 SSH —— 这是「容器标签不重连、不拿宿主机 SFTP」等行为的根（细节见 MAINTENANCE.md）。
-
-## 测试与验证
-
-终端类项目光靠类型检查远远不够。`scripts/` 下有 40+ 个**可自动复现**的验证脚本（Playwright 驱动真实 Electron 窗口 + ssh2 直连夹具），每个都对应过至少一个真实 bug：渲染断言、主题漏改检测、断线重连、传输双向 sha256、容器端到端、agent 协议、端口转发、SOCKS5、compose 右键……跑法与夹具搭建（dind 测试容器）见 [MAINTENANCE.md](MAINTENANCE.md)。
-
-CI（GitHub Actions）：三平台（macOS / Windows / Linux）typecheck + build，agent 三平台 `go build/vet/test`；打 `v*` tag 自动打包三平台产物上传 artifacts。
+主进程持有所有 SSH 连接和凭证；渲染层只通过 preload API 访问这些能力。会话 id 前缀用于区分本地终端、容器终端和 SSH 会话。
 
 ## 已知限制
 
-- 连接建立到 TerminalPanel 挂载之间有毫秒级窗口，首屏 banner 有极小概率丢失
-- Linux 无 Secret Service 时 safeStorage 退化为 base64
-- safeStorage 密文绑定系统钥匙串：换机 / 重装后旧密码需重输一次（连接时自动弹编辑框自愈）
-- cwd 跟踪基于本地输入解析（远端无 OSC 7 时）：`cd -`、脚本内 cd 会导致面板与终端不一致，点 ⟳ 或关跟随即可
-- 符号链接不参与递归传输与删除（按设计跳过，防跟链风险）
+- macOS 构建目前未配置 Apple 开发者签名与公证。
+- Linux 没有 Secret Service 时，safeStorage 会退化为 base64；换机后需要重新输入保存的密码。
+- 远端没有 OSC 7 时，脚本内部 `cd` 可能无法被面板准确跟踪，可手动刷新目录。
+- 符号链接在递归传输和删除时按链接本身处理，不跟随进入目标目录。
 
 ## License
 
