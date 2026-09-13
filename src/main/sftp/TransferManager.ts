@@ -268,7 +268,8 @@ export class TransferManager {
         this.pipeStreams(
           t,
           fs.createReadStream(t.localPath, { highWaterMark: 256 * 1024 }),
-          fs.createWriteStream(t.remotePath),
+          // 本机复制没有网络栈兜底，写侧默认 16KB 会把 syscall 数放大 64 倍
+          fs.createWriteStream(t.remotePath, { highWaterMark: 1024 * 1024 }),
           () => void fs.promises.unlink(t.remotePath).catch(() => undefined)
         )
     }

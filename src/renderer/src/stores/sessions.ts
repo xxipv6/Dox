@@ -283,15 +283,20 @@ export const useSessionStore = defineStore('sessions', () => {
    * 连接优先匹配已保存设备（host 必配，user/port 给了也要对上）——
    * 库存凭证直接用；没存过就预填添加设备表单，绝不凭空试密码。
    */
-  function handleCliCommand(cmd: CliCommandPayload): void {
+  async function handleCliCommand(cmd: CliCommandPayload): Promise<void> {
     if (cmd.kind === 'local' && cmd.cwd) {
-      void connectLocal(cmd.cwd)
+      await connectLocal(cmd.cwd)
       return
     }
     if (cmd.kind !== 'connect' || !cmd.target) return
-    const m = /^(?:([^@]+)@)?([^:]+)(?::(\d+))?$/.exec(cmd.target)
+    // 冷启动（dox 命令把 app 唤起）时设备列表可能还没拉回来：
+    // 不匹配直接掉进预填表单 = 明明存过的设备连不上。先确保列表在手
+    if (!savedSessions.value.length) await refreshSaved()
+    // IPv6 用 [addr] 写法（root@[2001:db8::1]:2222），否则按 host[:port] 拆
+    const m = /^(?:([^@]+)@)?(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(cmd.target)
     if (!m) return
-    const [, user, host, portStr] = m
+    const [, user, hostRaw, portStr] = m
+    const host = hostRaw.startsWith('[') ? hostRaw.slice(1, -1) : hostRaw
     const saved = savedSessions.value.find(
       (s) =>
         s.host === host &&

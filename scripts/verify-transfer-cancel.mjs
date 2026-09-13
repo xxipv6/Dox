@@ -35,6 +35,8 @@ const fd = openSync(LOCAL_FILE, 'w')
 for (let i = 0; i < SIZE_MB; i++) writeSync(fd, CHUNK)
 closeSync(fd)
 
+// 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
+try { (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => d.accept())

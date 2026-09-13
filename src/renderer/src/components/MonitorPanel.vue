@@ -39,20 +39,32 @@ const settings = useSettingsStore()
  */
 const panelWidth = ref(settings.monitorWidth)
 
+/** 拖动中的监听句柄：卸载时若正拖着（拖到一半关面板）必须摘掉，不然泄漏到 window 上 */
+let resizeMove: ((ev: MouseEvent) => void) | null = null
+let resizeUp: (() => void) | null = null
+
+function stopResizeListeners(): void {
+  if (resizeMove) window.removeEventListener('mousemove', resizeMove)
+  if (resizeUp) window.removeEventListener('mouseup', resizeUp)
+  resizeMove = null
+  resizeUp = null
+}
+
 function startResize(e: MouseEvent): void {
   const startX = e.clientX
   const startW = panelWidth.value
-  const onMove = (ev: MouseEvent): void => {
+  resizeMove = (ev: MouseEvent): void => {
     panelWidth.value = Math.min(960, Math.max(360, startW + (startX - ev.clientX)))
   }
-  const onUp = (): void => {
-    window.removeEventListener('mousemove', onMove)
-    window.removeEventListener('mouseup', onUp)
+  resizeUp = (): void => {
+    stopResizeListeners()
     settings.monitorWidth = panelWidth.value
   }
-  window.addEventListener('mousemove', onMove)
-  window.addEventListener('mouseup', onUp)
+  window.addEventListener('mousemove', resizeMove)
+  window.addEventListener('mouseup', resizeUp)
 }
+
+onBeforeUnmount(() => stopResizeListeners())
 
 const tab = ref(props.initialTab ?? 'overview')
 // initialFilter 按目标页签路由：网络页 → 连接过滤框；进程页 → 进程过滤框
