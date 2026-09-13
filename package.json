@@ -19,7 +19,8 @@
     "pack": "npm run typecheck && npm run build && electron-builder",
     "pack:win": "npm run typecheck && npm run build && electron-builder --win",
     "pack:mac": "npm run typecheck && npm run build && electron-builder --mac",
-    "pack:linux": "npm run typecheck && npm run build && electron-builder --linux"
+    "pack:linux": "npm run typecheck && npm run build && electron-builder --linux",
+    "postinstall": "node scripts/fix-node-pty-perms.mjs"
   },
   "dependencies": {
     "electron-store": "^11.0.2",
