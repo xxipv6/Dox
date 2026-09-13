@@ -77,10 +77,31 @@ jobs:
 
   # ---------- 打包：tag（v*）发布到 Releases；手动触发只传 artifacts ----------
   # mac 未配证书（electron-builder.yml identity: null），出未签名 dmg/zip
+
+  # 预建 Release：三个 pack job 并行时 electron-builder 各自「看不
+  # 到 release → POST 创建」，只有一个能成功，其余 422 already_exists
+  # 直接挂（v0.1.2 的 linux 就这么红的）。先在单独 job 里幂等建好，
+  # electron-builder 发现已存在就只传资产，不再抢。
+  release-shell:
+    name: 预建 Release（防并行创建竞争）
+    # 与 package 同条件：被 skip 的 needs 会连坐 skip 掉 package（manual 触发也要打包）
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [app, agent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 建 Release（已存在则跳过）
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes ""
+
   package:
     name: pack (${{ matrix.name }})
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    needs: [app, agent]
+    needs: [release-shell]
     permissions:
       contents: write # 建 Release / 传资产
     strategy:
