@@ -13,6 +13,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { AgentStatsPayload, NetConn, ProcInfo } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
+import { useSettingsStore } from '../stores/settings'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
 
@@ -29,6 +30,30 @@ const props = defineProps<{
 }>()
 
 const store = useSessionStore()
+const settings = useSettingsStore()
+
+/*
+ * 面板宽度：拖左缘调整，松手才写设置（拖动期间高频写持久化是浪费）。
+ * 网络页的「地址:端口」在 440px 默认宽度下必然省略号 —— 加宽是用户自己的
+ * 第一反应，给个拖柄比反复加默认宽度对。
+ */
+const panelWidth = ref(settings.monitorWidth)
+
+function startResize(e: MouseEvent): void {
+  const startX = e.clientX
+  const startW = panelWidth.value
+  const onMove = (ev: MouseEvent): void => {
+    panelWidth.value = Math.min(960, Math.max(360, startW + (startX - ev.clientX)))
+  }
+  const onUp = (): void => {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+    settings.monitorWidth = panelWidth.value
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
 const tab = ref(props.initialTab ?? 'overview')
 // initialFilter 按目标页签路由：网络页 → 连接过滤框；进程页 → 进程过滤框
 const initConnsFilter = props.initialTab === 'network' ? (props.initialFilter ?? '') : ''
@@ -310,7 +335,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="mon-panel">
+  <div class="mon-panel" :style="{ width: panelWidth + 'px' }">
+    <div class="resize-handle" title="拖动调整面板宽度" @mousedown.prevent="startResize"></div>
     <div class="toolbar">
       <span class="title" :title="label">性能监控 · {{ label }}</span>
       <span class="spacer"></span>
@@ -497,13 +523,26 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .mon-panel {
-  width: 440px;
+  position: relative; /* 拖宽柄的锚 */
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--border);
   background: var(--bg-panel);
   min-height: 0;
+}
+/* 左缘拖宽柄：压一半在边框外，6px 的命中区比 1px 边框好抓 */
+.resize-handle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+}
+.resize-handle:hover {
+  background: var(--accent-soft);
 }
 .toolbar {
   display: flex;
@@ -665,7 +704,7 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .n-state {
-  width: 88px;
+  width: 76px;
   flex-shrink: 0;
   font-size: var(--fs-xs);
 }
@@ -680,7 +719,7 @@ onBeforeUnmount(() => {
   color: var(--fg-muted);
 }
 .n-proc {
-  width: 110px;
+  width: 96px;
   flex-shrink: 0;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -135,6 +135,27 @@ check(
   `tab=${tabNow} chip=${chipText} filter=${connFilterVal} pid=${pidText}`
 )
 
+// ---- 面板拖宽：左缘往左拖 160px → 变宽且写进设置 ----
+const beforeW = (await win.locator('.mon-panel').boundingBox())?.width ?? 0
+const handle = win.locator('.mon-panel .resize-handle')
+const hb = await handle.boundingBox()
+if (hb) {
+  await win.mouse.move(hb.x + hb.width / 2, hb.y + 200)
+  await win.mouse.down()
+  await win.mouse.move(hb.x - 160, hb.y + 200, { steps: 5 })
+  await win.mouse.up()
+}
+await win.waitForTimeout(400)
+const afterW = (await win.locator('.mon-panel').boundingBox())?.width ?? 0
+check('拖左缘面板变宽', afterW > beforeW + 100, `${beforeW} -> ${afterW}`)
+const persistedW = await win.evaluate(async () => (await window.api.getSettings()).monitorWidth)
+check('宽度写进设置', Math.abs((persistedW ?? 0) - afterW) < 2, `persisted=${persistedW} actual=${afterW}`)
+// 恢复默认宽度，别污染后续脚本
+await win.evaluate(async () => {
+  const s = await window.api.getSettings()
+  await window.api.setSettings({ ...s, monitorWidth: 440 })
+})
+
 // ---- 关掉发起标签 → 面板必须一起收（否则概览定格假数据、本机容器轮询泄漏 agent 通道）----
 // 走真实 UI：标签条上的关闭按钮
 const activeTabClose = win.locator('.tab.active .tab-close, .tab.active button[title="关闭"]').first()

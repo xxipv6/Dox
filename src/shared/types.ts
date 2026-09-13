@@ -153,6 +153,8 @@ export interface AppSettings {
   suggestPortForward: boolean
   /** 端口哨兵：agent 差分发现**新出现**的监听端口时弹警告（谁开的、什么进程） */
   portSentinel: boolean
+  /** 性能监控面板宽度（拖左缘调整，像素） */
+  monitorWidth: number
 }
 
 /**

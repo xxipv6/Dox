@@ -20,7 +20,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   ligatures: false,
   localShellId: '',
   suggestPortForward: true,
-  portSentinel: true
+  portSentinel: true,
+  monitorWidth: 440
 }
 
 /** 界面主题三选。'system' 那一项的解释文案见设置弹窗 */
@@ -68,6 +69,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const localShellId = ref(DEFAULT_SETTINGS.localShellId)
   const suggestPortForward = ref(DEFAULT_SETTINGS.suggestPortForward)
   const portSentinel = ref(DEFAULT_SETTINGS.portSentinel)
+  const monitorWidth = ref(DEFAULT_SETTINGS.monitorWidth)
   const dialogVisible = ref(false)
   /** load() 完成前不写盘，否则会用默认值覆盖掉用户已保存的设置 */
   let loaded = false
@@ -132,6 +134,7 @@ export const useSettingsStore = defineStore('settings', () => {
     localShellId.value = persisted?.localShellId ?? DEFAULT_SETTINGS.localShellId
     suggestPortForward.value = persisted?.suggestPortForward ?? DEFAULT_SETTINGS.suggestPortForward
     portSentinel.value = persisted?.portSentinel ?? DEFAULT_SETTINGS.portSentinel
+    monitorWidth.value = persisted?.monitorWidth ?? DEFAULT_SETTINGS.monitorWidth
     uiTheme.value = persisted?.uiTheme ?? DEFAULT_SETTINGS.uiTheme
 
     /*
@@ -165,7 +168,8 @@ export const useSettingsStore = defineStore('settings', () => {
         ligatures: ligatures.value,
         localShellId: localShellId.value,
         suggestPortForward: suggestPortForward.value,
-        portSentinel: portSentinel.value
+        portSentinel: portSentinel.value,
+        monitorWidth: monitorWidth.value
       })
       .catch((err) => console.warn('[settings] 保存设置失败', err))
   }
@@ -181,7 +185,10 @@ export const useSettingsStore = defineStore('settings', () => {
     () => (FONT_PRESETS.find((f) => f.id === fontId.value) ?? FONT_PRESETS[0]).family
   )
 
-  watch([themeId, uiTheme, fontSize, fontId, ligatures, localShellId, suggestPortForward, portSentinel], persist)
+  watch(
+    [themeId, uiTheme, fontSize, fontId, ligatures, localShellId, suggestPortForward, portSentinel, monitorWidth],
+    persist
+  )
 
   /** 一键切换（侧栏那个太阳/月亮按钮）：亮 ↔ 暗 */
   function toggleTheme(): void {
@@ -201,6 +208,7 @@ export const useSettingsStore = defineStore('settings', () => {
     localShellId,
     suggestPortForward,
     portSentinel,
+    monitorWidth,
     dialogVisible,
     resolvedTheme,
     currentPreset,
