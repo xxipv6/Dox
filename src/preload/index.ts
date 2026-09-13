@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
+import os from 'node:os'
 import { IpcChannels } from '../shared/ipc'
 import type { DoxApi } from '../shared/api'
 import type {
@@ -23,8 +24,8 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.sshConnect, config, term, opts),
   connectTransport: (savedSessionId: string) =>
     ipcRenderer.invoke(IpcChannels.sshConnectTransport, savedSessionId),
-  connectLocal: (term: TermSize, shellId?: string) =>
-    ipcRenderer.invoke(IpcChannels.localConnect, term, shellId),
+  connectLocal: (term: TermSize, shellId?: string, cwd?: string) =>
+    ipcRenderer.invoke(IpcChannels.localConnect, term, shellId, cwd),
   listLocalShells: () => ipcRenderer.invoke(IpcChannels.localListShells),
   input: (id, data) => ipcRenderer.send(IpcChannels.sshInput, id, data),
   resize: (id, cols, rows) => ipcRenderer.send(IpcChannels.sshResize, id, cols, rows),
@@ -189,6 +190,7 @@ const api: DoxApi = {
 
   // ---- 自绘标题栏 ----
   platform: process.platform,
+  homeDir: os.homedir(),
   windowMinimize: () => ipcRenderer.send(IpcChannels.windowMinimize),
   windowToggleMaximize: () => ipcRenderer.send(IpcChannels.windowToggleMaximize),
   windowClose: () => ipcRenderer.send(IpcChannels.windowClose),
@@ -200,6 +202,9 @@ const api: DoxApi = {
   },
 
   // ---- AI 容量 ----
+  dirStatsGet: () => ipcRenderer.invoke(IpcChannels.dirStatsGet),
+  dirStatsSet: (stats: Record<string, Record<string, number>>) =>
+    ipcRenderer.invoke(IpcChannels.dirStatsSet, stats),
   aiAccountList: () => ipcRenderer.invoke(IpcChannels.aiAccountList),
   aiAccountSave: (input) => ipcRenderer.invoke(IpcChannels.aiAccountSave, input),
   aiAccountDelete: (id) => ipcRenderer.invoke(IpcChannels.aiAccountDelete, id),

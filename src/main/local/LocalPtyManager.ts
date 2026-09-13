@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import os from 'node:os'
 import { join } from 'node:path'
 import * as pty from 'node-pty'
@@ -33,7 +33,7 @@ export class LocalPtyManager {
     return detectShells()
   }
 
-  spawn(owner: WebContents, term: TermSize, shellId?: string): string {
+  spawn(owner: WebContents, term: TermSize, shellId?: string, cwd?: string): string {
     const id = `${LOCAL_ID_PREFIX}${randomUUID()}`
     const { command, args, env } = resolveShell(shellId)
 
@@ -41,7 +41,9 @@ export class LocalPtyManager {
       name: 'xterm-256color',
       cols: term.cols,
       rows: term.rows,
-      cwd: os.homedir(),
+      // 永远显式指定初始目录（继承父进程 cwd 在 Windows 管理员启动时会
+      // 落到 system32）；指定的目录已不存在就回家目录
+      cwd: cwd && existsSync(cwd) ? cwd : os.homedir(),
       env: { ...(process.env as Record<string, string>), ...env }
       // 注意：不要设 useConptyDll。实测该选项会让 pty 完全无输出（仅 23 字节
       // 控制序列）。从终端启动 Electron 时 conpty_console_list_agent 的

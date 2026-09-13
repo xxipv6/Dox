@@ -177,6 +177,8 @@ export interface LayoutTabSnapshot {
   host?: string
   port?: number
   username?: string
+  /** 标签当时的 cwd（cd 跟踪）：恢复时落回原目录，而不是回家目录 */
+  cwd?: string
 }
 
 export interface LayoutSnapshot {

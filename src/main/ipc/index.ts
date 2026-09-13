@@ -95,8 +95,8 @@ export function registerIpc(
     })
   )
   // ---- 本地终端 ----
-  ipcMain.handle(IpcChannels.localConnect, (event, term: TermSize, shellId?: string) =>
-    localPtyManager.spawn(event.sender, term, shellId)
+  ipcMain.handle(IpcChannels.localConnect, (event, term: TermSize, shellId?: string, cwd?: string) =>
+    localPtyManager.spawn(event.sender, term, shellId, cwd)
   )
   ipcMain.handle(IpcChannels.localListShells, () => localPtyManager.listShells())
   /*
@@ -512,6 +512,10 @@ export function registerIpc(
    * 账号列表返回时剥掉 encryptedKey —— key 的职责是在主进程里完成一次
    * HTTPS 查询，没有理由越过 IPC 到渲染层（与会话密码同一口径）。
    */
+  ipcMain.handle(IpcChannels.dirStatsGet, () => configStore.getDirStats())
+  ipcMain.handle(IpcChannels.dirStatsSet, (_e, stats: Record<string, Record<string, number>>) =>
+    configStore.setDirStats(stats)
+  )
   ipcMain.handle(IpcChannels.aiAccountList, () =>
     configStore.listAiAccounts().map(({ encryptedKey: _k, ...rest }) => rest)
   )

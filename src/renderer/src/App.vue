@@ -12,6 +12,7 @@ import TransferQueue from './components/TransferQueue.vue'
 import ComposeDrawer from './components/ComposeDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
+import ContextMenu, { type ContextMenuItem } from './components/ContextMenu.vue'
 import Icon from './components/Icon.vue'
 
 /*
@@ -133,6 +134,50 @@ async function toggleSftp(): Promise<void> {
   if (store.activeTab) refitTab(store.activeTab)
 }
 
+/*
+ * 标签右键「换到最近目录」—— 学习层的反悔入口。
+ *
+ * 新标签自动落常去目录是"猜"；猜错了用户不用关掉重来：右键标签直接列出
+ * 这台设备（或本机）最常用的 5 个目录，点一下就在当前窗格 cd 过去。
+ * 容器标签没有 bucket（学习只记本机/SSH 设备），不弹菜单。
+ */
+const tabMenu = ref<{ x: number; y: number; tab: SessionTab; dirs: string[] } | null>(null)
+
+function tabBucket(tab: SessionTab): string | null {
+  if (tab.kind === 'local') return 'local'
+  if (tab.kind === 'ssh') return tab.savedSessionId ?? tab.config?.host ?? null
+  return null
+}
+
+const tabMenuItems = computed<ContextMenuItem[]>(() => {
+  const menu = tabMenu.value
+  if (!menu) return []
+  if (!menu.dirs.length) return [{ id: 'none', label: '暂无常用目录（多用几次就有了）', disabled: true }]
+  return menu.dirs.map((p, i) => ({ id: `cd:${i}`, label: p, icon: 'folder' }))
+})
+
+function onTabContextMenu(e: MouseEvent, tab: SessionTab): void {
+  const bucket = tabBucket(tab)
+  if (!bucket) return
+  tabMenu.value = { x: e.clientX, y: e.clientY, tab, dirs: store.topDirs(bucket).map((d) => d.path) }
+}
+
+function onTabMenuSelect(id: string): void {
+  const menu = tabMenu.value
+  tabMenu.value = null
+  if (!menu || !id.startsWith('cd:')) return
+  const dir = menu.dirs[Number(id.slice(3))]
+  const pane = menu.tab.panes.find((p) => p.paneId === menu.tab.activePaneId)
+  if (!dir || !pane?.sessionId) return
+  store.activeTabId = menu.tab.tabId
+  // cmd 不认单引号；Windows 路径本身不可能含双引号，双引号对 cmd/PowerShell 都安全
+  const quoted =
+    menu.tab.kind === 'local' && window.api.platform === 'win32'
+      ? `"${dir}"`
+      : `'${dir.replace(/'/g, `'\\''`)}'`
+  window.api.input(pane.sessionId, `cd ${quoted}\r`)
+}
+
 /**
  * 当前标签的文件面板目标：SSH 标签浏览宿主机；容器标签浏览容器
  * （经容器里的 dox-agent，FileExplorer 内部处理未安装的引导）。
@@ -173,6 +218,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
             :class="{ active: tab.tabId === store.activeTabId }"
             @click="activate(tab)"
             @auxclick.middle.prevent="store.closeTab(tab)"
+            @contextmenu.prevent="onTabContextMenu($event, tab)"
           >
             <span class="status-dot" :class="tabStatus(tab)"></span>
             <span class="tab-title">{{ tabLabel(tab) }}</span>
@@ -337,6 +383,14 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 
     <SettingsDialog />
     <HostKeyDialog />
+    <ContextMenu
+      v-if="tabMenu"
+      :x="tabMenu.x"
+      :y="tabMenu.y"
+      :items="tabMenuItems"
+      @select="onTabMenuSelect"
+      @close="tabMenu = null"
+    />
   </div>
 </template>
 

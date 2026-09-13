@@ -194,6 +194,7 @@ node scripts/verify-ui-polish.mjs    # 界面走查回归
 node scripts/verify-layout.mjs       # 布局持久化与重启恢复
 node scripts/verify-render.mjs       # 终端渲染（@xterm/headless，14 种场景）
 node scripts/verify-ssh.mjs          # SSH 握手链路
+node scripts/verify-cwd-history.mjs  # SFTP 目录历史（前进/后退）+ 标签右键「换到最近目录」
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
 

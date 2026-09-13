@@ -51,7 +51,9 @@ export const useLayoutStore = defineStore('layout', () => {
         // 密码绝不进快照 —— 它只活在内存里，落盘一律不碰。
         host: tab.savedSessionId ? undefined : tab.config?.host,
         port: tab.savedSessionId ? undefined : tab.config?.port,
-        username: tab.savedSessionId ? undefined : tab.config?.username
+        username: tab.savedSessionId ? undefined : tab.config?.username,
+        // 恢复时落回原目录（cd 跟踪只在 shell integration 活着时有值，没有就回家目录）
+        cwd: (tab.panes[0]?.sessionId && store.cwdBySession[tab.panes[0].sessionId]) || undefined
       }))
     }
   }
@@ -67,7 +69,10 @@ export const useLayoutStore = defineStore('layout', () => {
   function startAutoSave(): void {
     const store = useSessionStore()
     watch(
-      () => store.tabs.map((t) => [t.tabId, t.split, t.panes.length, t.title, t.tabId === store.activeTabId]),
+      () => [
+        ...store.tabs.map((t) => [t.tabId, t.split, t.panes.length, t.title, t.tabId === store.activeTabId]),
+        Object.values(store.cwdBySession).join('')
+      ],
       () => {
         if (restoring.value) return
         if (timer) clearTimeout(timer)
@@ -99,7 +104,7 @@ export const useLayoutStore = defineStore('layout', () => {
         const before = store.tabs.at(-1)?.tabId
 
         if (item.kind === 'local') {
-          await store.connectLocal()
+          await store.connectLocal(item.cwd)
         } else if (item.savedSessionId) {
           const saved = byId.get(item.savedSessionId)
           // 设备被删掉了：这个标签没有意义，跳过
@@ -121,6 +126,16 @@ export const useLayoutStore = defineStore('layout', () => {
         const tab = store.tabs.at(-1)
         if (!tab || tab.tabId === before) continue
         restored++
+
+        // 落回原目录：SSH 会话连上后注入 cd（local 已在 spawn 时落地）。
+        // 等半秒让 shell 就绪，否则输入可能被握手期丢掉
+        if (item.kind === 'ssh' && item.cwd) {
+          const sid = tab.panes[0]?.sessionId
+          if (sid) {
+            const quoted = `'${item.cwd.replace(/'/g, `'\\''`)}'`
+            setTimeout(() => window.api.input(sid, `cd ${quoted}\r`), 500)
+          }
+        }
 
         // 分屏：按原有方向再开一条同配置会话
         if (item.split !== 'none' && item.paneCount > 1) {

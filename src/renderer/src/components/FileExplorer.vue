@@ -207,15 +207,49 @@ async function init(): Promise<void> {
   }
 }
 
+// ---- 目录历史：主动导航才入栈（load() 无参刷新 / 后退前进本身不入栈）----
+const historyBack = ref<string[]>([])
+const historyFwd = ref<string[]>([])
+
+function nav(dir: string): void {
+  if (dir === cwd.value) return
+  historyBack.value.push(cwd.value)
+  historyFwd.value = []
+  void load(dir)
+}
+function historyGoBack(): void {
+  const dir = historyBack.value.pop()
+  if (dir === undefined) return
+  historyFwd.value.push(cwd.value)
+  void load(dir)
+}
+function historyGoForward(): void {
+  const dir = historyFwd.value.pop()
+  if (dir === undefined) return
+  historyBack.value.push(cwd.value)
+  void load(dir)
+}
+
+/** 鼠标侧键：Mouse4 = 后退，Mouse5 = 前进（面板挂载即生效，卸载摘掉） */
+function onMouseNav(e: MouseEvent): void {
+  if (e.button === 3) {
+    e.preventDefault()
+    historyGoBack()
+  } else if (e.button === 4) {
+    e.preventDefault()
+    historyGoForward()
+  }
+}
+
 function goUp(): void {
   const parts = cwd.value.split('/').filter(Boolean)
   parts.pop()
-  void load('/' + parts.join('/') || '/')
+  nav('/' + parts.join('/') || '/')
 }
 
 function openEntry(entry: FileEntry): void {
   // 目录进目录；文件交给内置编辑器（二进制/超限由主编解读取时判定并报错）
-  if (entry.isDir) void load(entry.path)
+  if (entry.isDir) nav(entry.path)
   else
     void editor.open(
       props.sessionId,
@@ -320,6 +354,16 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
     x: e.clientX,
     y: e.clientY,
     items: [
+      // SFTP⇥终端的显式入口：目录行 → 进那个目录；文件行 → 它所在的当前目录
+      ...(many
+        ? []
+        : [
+            {
+              id: 'open-terminal',
+              label: targets[0].isDir ? '在终端打开此文件夹' : '在终端打开此目录',
+              icon: 'terminal' as const
+            }
+          ]),
       {
         id: 'download',
         label: many ? `下载这 ${targets.length} 项` : '下载',
@@ -349,6 +393,17 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
           ]
         : [])
     ]
+  }
+}
+
+/** 空白处右键：当前目录的菜单（和资源管理器一致，先清掉选区） */
+function onBlankContextMenu(e: MouseEvent): void {
+  clearSelection()
+  menuTargets = []
+  menu.value = {
+    x: e.clientX,
+    y: e.clientY,
+    items: [{ id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' }]
   }
 }
 
@@ -385,6 +440,12 @@ async function runCompose(verb: ComposeVerb, file: FileEntry): Promise<void> {
 async function onMenuSelect(id: string): Promise<void> {
   const targets = menuTargets
   closeMenu()
+  if (id === 'open-terminal') {
+    // 目录行 → 进它；其余（文件行 / 空白处）→ 当前目录
+    const dir = targets.length === 1 && targets[0].isDir ? targets[0].path : cwd.value
+    openInTerminal(dir)
+    return
+  }
   if (!targets.length) return
   if (id === 'download') await downloadTargets(targets)
   else if (id === 'archive') await archiveTargets(targets)
@@ -451,9 +512,14 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
   }
 }
 
-/** 在终端中 cd 到当前目录（SFTP → 终端方向联动） */
-function openInTerminal(): void {
-  const quoted = `'${cwd.value.replace(/'/g, `'\\''`)}'`
+/**
+ * 在终端中 cd 到指定目录（默认当前目录）。
+ * 唯一改动终端 cwd 的入口 —— 面板里翻目录只是「找文件」，
+ * 主动导航永远不动终端（见 load/history，均无终端副作用）。
+ */
+function openInTerminal(dir?: string): void {
+  const target = dir ?? cwd.value
+  const quoted = `'${target.replace(/'/g, `'\\''`)}'`
   window.api.input(props.sessionId, `cd ${quoted}\r`)
   // cd 打过去还得让用户看见：聚焦到挂着这个会话的终端标签，
   // 否则点了像没反应（SFTP 面板开着时终端可能在别的标签）
@@ -545,15 +611,17 @@ watch(
 watch(
   () => (store.followTerminal ? store.cwdBySession[props.sessionId] : undefined),
   (dir) => {
-    if (dir && dir !== cwd.value) void load(dir)
+    if (dir && dir !== cwd.value) nav(dir)
   }
 )
 
 onMounted(() => {
+  window.addEventListener('mousedown', onMouseNav, true)
   watchTransfers()
   void init()
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('mousedown', onMouseNav, true)
   unsubscribeTransfers?.()
   if (refreshTimer !== null) window.clearTimeout(refreshTimer)
   // 只释放真的持有过的通道：版本过旧等路径从没 hold 过，
@@ -576,6 +644,12 @@ onBeforeUnmount(() => {
   >
     <!-- 工具栏 -->
     <div class="toolbar">
+      <button class="icon-btn" title="后退（鼠标侧键）" :disabled="!historyBack.length" @click="historyGoBack">
+        <Icon name="chevron-left" />
+      </button>
+      <button class="icon-btn" title="前进（鼠标侧键）" :disabled="!historyFwd.length" @click="historyGoForward">
+        <Icon name="chevron-right" />
+      </button>
       <button class="icon-btn" title="上一级" @click="goUp"><Icon name="arrow-up" /></button>
       <button class="icon-btn" title="刷新" @click="load()"><Icon name="refresh" /></button>
       <button class="icon-btn" title="新建文件夹" @click="creatingDir = true">
@@ -583,7 +657,7 @@ onBeforeUnmount(() => {
       </button>
       <button class="icon-btn" title="上传文件" @click="pickUpload"><Icon name="upload" /></button>
       <span class="spacer"></span>
-      <button class="icon-btn" title="在终端中打开此目录" @click="openInTerminal">
+      <button class="icon-btn" title="在终端中打开此目录" @click="openInTerminal()">
         <Icon name="terminal" />
       </button>
       <button
@@ -599,10 +673,10 @@ onBeforeUnmount(() => {
       <span v-if="props.container" class="ctr-badge" :title="`容器 ${props.container.containerName} 内的文件（经容器助手）`">
         <Icon name="box" :size="12" />{{ props.container.containerName }}
       </span>
-      <a class="crumb" title="/" @click="load('/')">/</a>
+      <a class="crumb" title="/" @click="nav('/')">/</a>
       <template v-for="(crumb, i) in breadcrumbs" :key="crumb.path">
         <span v-if="i > 0" class="sep">/</span>
-        <a class="crumb" @click="load(crumb.path)">{{ crumb.name }}</a>
+        <a class="crumb" @click="nav(crumb.path)">{{ crumb.name }}</a>
       </template>
       <!-- 打包期间的不确定进度：远端 tar 最长 5 分钟，没反馈就像卡死 -->
       <span v-if="archiving" class="archiving" title="正在远端打包…">
@@ -631,7 +705,7 @@ onBeforeUnmount(() => {
       v-else
       class="file-list"
       @click.self="clearSelection"
-      @contextmenu.self.prevent="clearSelection"
+      @contextmenu.self.prevent="onBlankContextMenu($event)"
     >
       <div v-if="creatingDir" class="row editing">
         <Icon class="file-icon" name="folder" :size="15" />
