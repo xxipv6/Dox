@@ -56,12 +56,28 @@ await remoteExec(`docker start ${INNER} 2>/dev/null || docker run -d --name ${IN
 console.log('  夹具就绪：inner 运行中')
 
 // 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try { (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
+try {
+  if (process.platform === 'win32') {
+    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
+    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    ], { stdio: 'ignore' })
+  } else {
+    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
+  }
+} catch { /* 没有正好 */ }
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(1200)
+// DOM 渲染器（读 .xterm-rows 需要）。设置存主进程、渲染层 store 只在启动时
+// load 一次，所以 ligatures 必须在 reload **之前**写，收尾恢复
+const origSettings = await win.evaluate(() => window.api.getSettings())
+if (origSettings && !origSettings.ligatures) {
+  await win.evaluate((s) => window.api.setSettings({ ...s, ligatures: true }), origSettings)
+  await win.waitForTimeout(300)
+}
 await win.evaluate(async () => {
   await window.api.setLayout({ tabs: [] })
   location.reload()
@@ -69,12 +85,7 @@ await win.evaluate(async () => {
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(2000)
 
-// DOM 渲染器（读 .xterm-rows 需要）；主机指纹对话框可能挡连接，并行点掉
-const origSettings = await win.evaluate(() => window.api.getSettings())
-if (origSettings && !origSettings.ligatures) {
-  await win.evaluate((s) => window.api.setSettings({ ...s, ligatures: true }), origSettings)
-  await win.waitForTimeout(600)
-}
+// 主机指纹对话框可能挡连接，并行点掉
 const hostKeyClicks = (async () => {
   for (let i = 0; i < 120; i++) {
     const hk = await win.evaluate(() =>
@@ -270,6 +281,7 @@ check('测试设备已删除', (await win.locator('.device').filter({ hasText: D
 hostKeyClicks.catch(() => {})
 ssh.end()
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+if (origSettings) await win.evaluate((s) => window.api.setSettings(s), origSettings)
 await app.close()
 
 console.log(failed ? '\n有失败项' : '\n全部通过')

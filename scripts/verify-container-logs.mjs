@@ -52,7 +52,16 @@ async function logsTabDot() {
 }
 
 // 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try { (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
+try {
+  if (process.platform === 'win32') {
+    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
+    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    ], { stdio: 'ignore' })
+  } else {
+    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
+  }
+} catch { /* 没有正好 */ }
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())

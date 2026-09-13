@@ -4,8 +4,8 @@
  *  工具栏「后退」逐层退回（浏览器式）→「前进」原路返回；
  *  未导航时两按钮均禁用。
  *
- * 用法：node scripts/verify-cwd-history.mjs
- * 前置：npm run build；dox-sshd-test 在跑
+ * 用法：node scripts/verify-cwd-history.mjs [host] [port] [user] [password]
+ * 前置：npm run build；dox-sshd-test 在跑（host 默认 localhost）
  */
 import { _electron as electron } from 'playwright'
 import { mkdirSync } from 'node:fs'
@@ -20,8 +20,23 @@ const check = (name, cond, extra = '') => {
 
 const crumbText = async () => (await win.locator('.explorer .breadcrumb').textContent()) ?? ''
 
+// dind 不一定在本机（这台 Windows 没有 docker，测试容器在 192.168.3.5 上）
+const host = process.argv[2] ?? 'localhost'
+const port = Number(process.argv[3] ?? 2222)
+const user = process.argv[4] ?? 'doxtest'
+const password = process.argv[5] ?? 'doxtest123'
+
 // 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try { (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
+try {
+  if (process.platform === 'win32') {
+    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
+    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    ], { stdio: 'ignore' })
+  } else {
+    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
+  }
+} catch { /* 没有正好 */ }
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
@@ -36,10 +51,10 @@ await win.waitForTimeout(2000)
 
 await win.locator('button[title="添加设备"]').click()
 await win.waitForTimeout(400)
-await win.locator('input[placeholder^="192.168"]').fill('localhost')
-await win.locator('input.port').fill('2222')
-await win.locator('input[placeholder="root"]').fill('doxtest')
-await win.locator('input[placeholder="登录密码"]').fill('doxtest123')
+await win.locator('input[placeholder^="192.168"]').fill(host)
+await win.locator('input.port').fill(String(port))
+await win.locator('input[placeholder="root"]').fill(user)
+await win.locator('input[placeholder="登录密码"]').fill(password)
 await win.locator('button:has-text("仅连接")').click()
 for (let i = 0; i < 8; i++) {
   await win.waitForTimeout(1000)

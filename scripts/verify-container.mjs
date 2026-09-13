@@ -32,7 +32,16 @@ const check = (label, ok, detail = '') => {
 const skip = (label) => console.log(`  · ${label}`)
 
 // 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try { (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
+try {
+  if (process.platform === 'win32') {
+    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
+    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    ], { stdio: 'ignore' })
+  } else {
+    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
+  }
+} catch { /* 没有正好 */ }
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => d.accept())
@@ -224,6 +233,17 @@ async function waitForContainerTab(name, { connected, timeoutMs = 16000 }) {
 // ---------- 阶段 0：起干净状态并连上设备 ----------
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(1200)
+/*
+ * 切到 DOM 渲染器，否则读不到 .xterm-rows（WebGL 把字符画在 canvas 上）。
+ * 设置存主进程 JSON、渲染层 store 只在启动时 load 一次（settings:set 不会
+ * 推回渲染层）—— 所以必须在 reload **之前**写，收尾再恢复。曾经放在 reload
+ * 之后，能跑通纯属上次崩溃把 ligatures:true 泄漏进了配置文件。
+ */
+const origSettings = await win.evaluate(() => window.api.getSettings())
+if (origSettings && !origSettings.ligatures) {
+  await win.evaluate((s) => window.api.setSettings({ ...s, ligatures: true }), origSettings)
+  await win.waitForTimeout(300)
+}
 // 清布局与 reload 放同一次 evaluate：布局 store 有 400ms 防抖自动保存，
 // 留出间隙它会立刻把当前标签写回快照
 await win.evaluate(async () => {
@@ -238,16 +258,6 @@ await win.waitForFunction(
 )
 await win.waitForTimeout(2500)
 
-/*
- * 切到 DOM 渲染器，否则读不到 .xterm-rows（WebGL 把字符画在 canvas 上）。
- * 必须赶在**任何** termRun 之前 —— 阶段 1 就要读终端，所以不能像原来那样
- * 等连上设备之后才切。
- */
-const origSettings = await win.evaluate(() => window.api.getSettings())
-if (origSettings && !origSettings.ligatures) {
-  await win.evaluate((s) => window.api.setSettings({ ...s, ligatures: true }), origSettings)
-  await win.waitForTimeout(600)
-}
 await win.waitForFunction(() => document.querySelectorAll('.xterm-rows').length > 0, undefined, {
   timeout: 15000
 })

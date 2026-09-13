@@ -11,6 +11,9 @@ import { _electron as electron } from 'playwright'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import { mkdirSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { createRequire } from 'node:module'
 
 mkdirSync('shots', { recursive: true })
 
@@ -21,10 +24,25 @@ const check = (name, cond, extra = '') => {
 }
 
 // 上次跑挂可能留下僵尸实例：共享锁（单实例 CLI）与布局文件都会污染本次运行。
-// 只能杀本仓库的 electron（别的 verify 脚本/ dev 同时跑本来就会互相踩）
-try { execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
+// 只能杀本仓库的 electron（别的 verify 脚本/ dev 同时跑本来就会互相踩）；
+// Windows 没有 pkill，按可执行路径匹配（taskkill /IM 会误杀别的 Electron 应用）
+try {
+  if (process.platform === 'win32') {
+    execFileSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    ], { stdio: 'ignore' })
+  } else {
+    execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
+  }
+} catch { /* 没有正好 */ }
 
-const ELECTRON = 'node_modules/.bin/electron'
+// require('electron') 返回 dist 二进制绝对路径：.bin/electron 在 Windows 是
+// electron.cmd 壳，execFile 不带 shell 起不来（ENOENT）
+const ELECTRON = createRequire(import.meta.url)('electron')
+// CLI 指定的 cwd：/tmp 在 Windows 不存在（会回退家目录），用系统临时目录下
+// 一个可辨认的标记目录，两边平台都真实存在
+const MARKER_DIR = path.join(os.tmpdir(), 'dox-cli-cwd-marker')
+mkdirSync(MARKER_DIR, { recursive: true })
 /** 第二个实例带 --cli 参数启动：应被单实例锁挡下并把参数转给第一个实例，自己秒退 */
 function fireCli(...args) {
   execFileSync(ELECTRON, ['.', ...args], { stdio: 'ignore', timeout: 20000 })
@@ -42,18 +60,18 @@ await win.evaluate(async () => {
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(2500)
 
-// ---- A. --cli local --cwd /tmp → 新标签落在 /tmp ----
-fireCli('--cli=local', '--cwd=/tmp')
+// ---- A. --cli local --cwd <标记目录> → 新标签落在该目录 ----
+fireCli('--cli=local', `--cwd=${MARKER_DIR}`)
 await win.waitForTimeout(2000)
 const tabCount = await win.locator('.tab').count()
 check('深链开出新标签', tabCount >= 2, `tabs=${tabCount}`)
 let fellIntoTmp = false
 for (let i = 0; i < 10; i++) {
   const active = (await win.locator('.tab.active').textContent()) ?? ''
-  if (active.includes('tmp')) { fellIntoTmp = true; break }
+  if (active.includes('dox-cli-cwd-marker')) { fellIntoTmp = true; break }
   await win.waitForTimeout(500)
 }
-check('新标签落在 CLI 指定目录（/tmp）', fellIntoTmp, (await win.locator('.tab.active').textContent()) ?? '')
+check('新标签落在 CLI 指定目录', fellIntoTmp, (await win.locator('.tab.active').textContent()) ?? '')
 
 // ---- B. --cli connect --target doxtest@localhost:2222 → 预填表单 ----
 fireCli('--cli=connect', '--target=doxtest@localhost:2222')
@@ -75,7 +93,12 @@ check('dox 命令安装成功', !!res?.path && fs.existsSync(res.path), JSON.str
 if (res?.path && fs.existsSync(res.path)) {
   const st = fs.statSync(res.path)
   const content = fs.readFileSync(res.path, 'utf8')
-  check('脚本可执行', (st.mode & 0o111) !== 0)
+  // Windows 没有 unix 执行位：.cmd 靠 PATHEXT 执行，断言扩展名即可
+  check(
+    '脚本可执行',
+    process.platform === 'win32' ? res.path.endsWith('.cmd') : (st.mode & 0o111) !== 0,
+    res.path
+  )
   check('脚本是 --cli 壳', content.includes('--cli=local') && content.includes('--cwd=') && content.includes('--cli=connect'))
   fs.rmSync(res.path, { force: true }) // 测试产物清理
 }

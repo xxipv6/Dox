@@ -22,12 +22,29 @@ const check = (name, cond, extra = '') => {
 }
 
 // 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try { (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
+try {
+  if (process.platform === 'win32') {
+    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
+    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    ], { stdio: 'ignore' })
+  } else {
+    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
+  }
+} catch { /* 没有正好 */ }
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(1200)
+// 读终端文本要走 DOM 渲染器（WebGL 把字画在 canvas 上，.xterm-rows 是空的）。
+// ligatures=true 时 TerminalPanel 不用 webgl；但设置存主进程 JSON、渲染层
+// store 只在启动时 load 一次 —— 所以必须在 reload **之前**写，收尾恢复
+const origSettings = await win.evaluate(() => window.api.getSettings())
+if (origSettings && !origSettings.ligatures) {
+  await win.evaluate((s) => window.api.setSettings({ ...s, ligatures: true }), origSettings)
+  await win.waitForTimeout(300)
+}
 await win.evaluate(async () => {
   await window.api.setLayout({ tabs: [] })
   location.reload()
@@ -80,7 +97,29 @@ const termVisible = await win.evaluate(
 check('点击后焦点落在终端标签', termVisible)
 await win.screenshot({ path: 'shots/99-sftp-open-terminal.png' })
 
+// ---- Windows 本机面板：cmd 的 cd /d 守卫 ----
+// cmd 里 cd "D:\…" 不带 /d 只改 D: 的记录目录、不切当前盘（跨盘符静默失败）。
+// 引号策略按 shell 种类分派（cmd 双引号 / PowerShell 双写单引号 / posix 单引号），
+// 这里锁 cmd 分支：Windows 默认 shell 就是 cmd，回显里必须见到 cd /d。
+if (process.platform === 'win32') {
+  await win.evaluate(async () => {
+    await window.api.setLayout({ tabs: [] })
+    location.reload()
+  })
+  await win.waitForLoadState('domcontentloaded')
+  await win.waitForTimeout(2500)
+  await win.locator('button.bar-btn:has-text("文件")').click()
+  await win.waitForTimeout(2500)
+  await win.locator('.explorer button[title="在终端中打开此目录"]').click()
+  await win.waitForTimeout(1500)
+  const localTermText = await win.evaluate(
+    () => document.querySelector('.tab-content:not([style*="display: none"]) .xterm-rows')?.textContent ?? ''
+  )
+  check('本机 cmd 收到 cd /d（跨盘符才切得动）', /cd \/d "/.test(localTermText), localTermText.slice(-120))
+}
+
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+if (origSettings) await win.evaluate((s) => window.api.setSettings(s), origSettings)
 await app.close()
 
 console.log(failed ? '\n有失败项' : '\n全部通过')

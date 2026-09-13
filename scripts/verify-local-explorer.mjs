@@ -33,13 +33,30 @@ fs.writeFileSync(path.join(base, 'sub', 'c.txt'), 'x')
 
 // 上次跑挂可能留下僵尸实例：共享锁（单实例 CLI）与布局文件都会污染本次运行。
 // 只能杀本仓库的 electron（别的 verify 脚本/ dev 同时跑本来就会互相踩）
-try { execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' }) } catch { /* 没有正好 */ }
+try {
+  if (process.platform === 'win32') {
+    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
+    execFileSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    ], { stdio: 'ignore' })
+  } else {
+    execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
+  }
+} catch { /* 没有正好 */ }
 
 const app = await electron.launch({ args: ['.'] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(1200)
+// 读终端文本要走 DOM 渲染器（WebGL 把字画在 canvas 上，.xterm-rows 是空的）。
+// 设置存主进程、渲染层 store 只在启动时 load 一次 —— ligatures 必须赶在
+// 第一次 reload 之前写，收尾恢复
+const origSettings = await win.evaluate(() => window.api.getSettings())
+if (origSettings && !origSettings.ligatures) {
+  await win.evaluate((s) => window.api.setSettings({ ...s, ligatures: true }), origSettings)
+  await win.waitForTimeout(300)
+}
 await win.evaluate(async () => {
   await window.api.setLayout({ tabs: [] })
   location.reload()
@@ -124,9 +141,11 @@ try {
   const cmText = (await win.locator('.cm-content').textContent()) ?? ''
   check('编辑器读出内容', cmText.includes('hello-local'), cmText.slice(0, 40))
   await win.locator('.cm-content').click()
-  await win.keyboard.press('Meta+a')
+  // CodeMirror 的 Mod 在 macOS 是 ⌘(Meta)、其余平台是 Ctrl；Windows 上 Meta 是 Win 键
+  const mod = process.platform === 'darwin' ? 'Meta' : 'Control'
+  await win.keyboard.press(`${mod}+a`)
   await win.keyboard.type('bye-local')
-  await win.keyboard.press('Meta+s')
+  await win.keyboard.press(`${mod}+s`)
   await win.waitForTimeout(800)
   check('编辑器保存落盘', fs.readFileSync(path.join(base, 'b.txt'), 'utf8') === 'bye-local')
 
@@ -185,9 +204,20 @@ try {
 
   await win.screenshot({ path: 'shots/97-local-explorer.png' })
 } finally {
-  fs.rmSync(base, { recursive: true, force: true })
+  // 先关应用再清目录：「在终端打开此目录」把本机终端的 cwd 落进了测试目录，
+  // Windows 不允许删除任何进程的 cwd（EPERM）；关应用后 pty 退出才解锁
   await win.evaluate(() => window.api.setLayout({ tabs: [] })).catch(() => undefined)
-  await app.close()
+  if (origSettings) await win.evaluate((s) => window.api.setSettings(s), origSettings).catch(() => undefined)
+  await app.close().catch(() => undefined)
+  for (let i = 0; i < 10; i++) {
+    try {
+      fs.rmSync(base, { recursive: true, force: true })
+      break
+    } catch (err) {
+      if (i === 9) throw err
+      await new Promise((r) => setTimeout(r, 500))
+    }
+  }
 }
 
 console.log(failed ? '\n有失败项' : '\n全部通过')
