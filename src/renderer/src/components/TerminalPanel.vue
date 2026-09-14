@@ -1051,7 +1051,7 @@ onMounted(() => {
     return true
   })
 
-  // Ctrl+F 打开搜索框；Ctrl+Shift+C/V 显式复制粘贴
+  // Ctrl+F 打开搜索框；Ctrl+Shift+C/V 显式复制粘贴；Ctrl+W 关掉这个终端所在的标签
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     if (e.type !== 'keydown') return true
     const key = e.key.toLowerCase()
@@ -1064,6 +1064,18 @@ onMounted(() => {
     const primary = e.ctrlKey || e.metaKey
     if (primary && !e.shiftKey && key === 'f') {
       toggleSearch()
+      return false
+    }
+    /*
+     * Ctrl+W：关掉**这个终端所在的**标签，而不是 store 的「当前标签」——
+     * 平铺时几格同屏，焦点可能在你点进来的第二格，当前标签却是第一个。
+     *
+     * 这里必须 return false 把键吃掉：终端里的 Ctrl+W 是 ^W（0x17），
+     * readline 拿它删前一个词，放行就等于「关标签的同时还删了 shell 里一个词」。
+     */
+    if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && key === 'w') {
+      const own = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
+      if (own) store.closeTab(own)
       return false
     }
     /*

@@ -153,17 +153,28 @@ check(
 )
 
 /*
- * Windows 那条线：默认应用菜单必须在非 darwin 上摘掉，且**不能是无条件的**。
- * 反过来（mac 上也置空）会把 Cmd+C/V/Q 一起废掉 —— 系统菜单栏是它们的唯一来源。
- * 这条守的不是样式，是「别哪天顺手把条件删了」。
+ * 应用菜单：两个平台两条路，静态守的是「别哪天顺手把条件删了」。
+ *
+ * - 非 macOS 必须**置空**：默认菜单里「关闭窗口」占着 CmdOrCtrl+W，用户按 Ctrl+W
+ *   想关标签结果整扇窗没了；还留着 F11 / DevTools 这些加速键。
+ * - macOS 必须**自建一份**（不能置空 —— 系统菜单栏是 ⌘C/⌘V/⌘Q 的唯一来源；
+ *   也不能留默认的 —— 那条「关闭窗口」的加速键正是 ⌘W）。
+ *   菜单内容对不对，由 verify-tabbar 在真 mac 上读 Menu.getApplicationMenu() 验。
  */
 const mainIndex = readFileSync('src/main/index.ts', 'utf8')
-const menuGuarded = /if \(process\.platform !== 'darwin'\) Menu\.setApplicationMenu\(null\)/.test(
-  mainIndex
+const menuNullOnOthers =
+  /if \(process\.platform !== 'darwin'\) \{\s*\n\s*Menu\.setApplicationMenu\(null\)/.test(mainIndex)
+const menuBuiltOnMac =
+  /else \{\s*\n\s*Menu\.setApplicationMenu\(\s*\n\s*Menu\.buildFromTemplate\(/.test(mainIndex)
+const menuUnguarded = /\n\s*Menu\.setApplicationMenu\(null\)/g
+check('非 macOS 上摘掉默认应用菜单（Ctrl+W 抢窗、F11、DevTools 一起消失）', menuNullOnOthers)
+check('macOS 上不是置空而是自建菜单（置空会废掉 Cmd+C/V/Q）', menuBuiltOnMac)
+// 置空只允许出现在上面那个 if 里一次；多出来的那处必然是无条件的
+check(
+  '摘菜单只有一处、且在平台分支里（不能无条件执行）',
+  (mainIndex.match(menuUnguarded) ?? []).length === 1,
+  String((mainIndex.match(menuUnguarded) ?? []).length)
 )
-const menuUnguarded = /^\s*Menu\.setApplicationMenu\(null\)/m.test(mainIndex)
-check('非 macOS 上摘掉默认应用菜单（F11/DevTools 加速键跟着消失）', menuGuarded)
-check('摘菜单这一步是有平台条件的（mac 上置空会废掉 Cmd+C/V/Q）', menuGuarded && !menuUnguarded)
 
 // ---------------------------------------------------------------- 阶段 2
 if (process.argv.includes('--e2e')) {

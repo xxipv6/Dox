@@ -136,6 +136,13 @@ export const IpcChannels = {
   windowGetMaximized: 'window:getMaximized',
   /** 主进程 → 渲染进程：最大化状态变了，图标要在 □ / ❐ 之间切 */
   windowState: 'window:state',
+  /**
+   * 主进程 → 渲染进程：macOS 菜单里的「关闭标签」(⌘W) 被按了。
+   *
+   * ⌘W 必须这么绕一圈：mac 上它是**应用菜单的加速键**，优先于网页，
+   * 渲染层根本收不到这个 keydown（Windows/Linux 没这问题，见 useCloseTabShortcut）。
+   */
+  menuCloseTab: 'menu:closeTab',
   /*
    * AI 容量（Kimi Code / DeepSeek / GLM 配额速览）。
    * 账号 key 走 safeStorage 加密落盘；查询结果由主进程缓存 + 定时轮询 + 事件广播。

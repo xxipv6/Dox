@@ -196,18 +196,52 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   /*
-   * Windows / Linux：把默认应用菜单整个摘掉。
+   * ---- 应用菜单：两个平台走两条完全不同的路 ----
    *
-   * autoHideMenuBar 只是「不画出来」，菜单还在，它的**加速键**照样生效：
-   * F11 能切全屏（全屏不触发 maximize/unmaximize，标题栏那枚自绘按钮就停在
-   * 旧图标上），打包版还留着默认的 DevTools 快捷键。这台窗口本来就是
-   * frame:false 自绘标题栏，菜单没有任何存在理由。
+   * Windows / Linux：**整个摘掉**。autoHideMenuBar 只是「不画出来」，菜单还在，
+   * 它的加速键照样生效：F11 能切全屏（全屏不触发 maximize/unmaximize，标题栏那枚
+   * 自绘按钮就停在旧图标上），打包版还留着默认的 DevTools 快捷键；更要紧的是
+   * 默认菜单里的「关闭窗口」绑的是 CmdOrCtrl+W —— 用户按 Ctrl+W 想关标签，
+   * 结果整扇窗没了。这台窗口本来就是 frame:false 自绘标题栏，菜单没有任何
+   * 存在理由（Ctrl+W 由渲染层接管，见 useCloseTabShortcut.ts）。
    *
-   * macOS 上**绝不能置空**：系统菜单栏是 Cmd+C/V/Q 这些编辑与退出快捷键的
-   * 唯一来源，置空会把它们一起废掉（Windows/Linux 的 Chromium 自带剪贴板
-   * 快捷键，不依赖菜单）。所以这条按平台分流，不是少写一个条件。
+   * macOS：**不能置空**（系统菜单栏是 ⌘C/⌘V/⌘Q 的唯一来源），也**不能留着默认的**
+   * ——默认那条「关闭窗口」的加速键正是 ⌘W。所以自建一份：编辑/应用/窗口这些
+   * 用 Electron 的角色菜单还原（⌘C/⌘V/⌘Q 照旧），只把 ⌘W 改成「关闭标签」、
+   * 关窗口挪到 ⌘⇧W。这也更合 mac 的习惯：终端、iTerm、Safari 里 ⌘W 都是关当前标签。
+   *
+   * ⌘W 只能这么绕：菜单加速键优先于网页，渲染层收不到那个 keydown，
+   * 所以菜单项点一下 → IPC → 渲染层关标签（menuCloseTab）。
    */
-  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null)
+  } else {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        { role: 'appMenu' },
+        {
+          label: '文件',
+          submenu: [
+            {
+              label: '关闭标签',
+              accelerator: 'Command+W',
+              click: () => {
+                const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+                win?.webContents.send(IpcChannels.menuCloseTab)
+              }
+            },
+            // 关窗口留在菜单里，但换到 ⌘⇧W —— 关掉整扇窗必须有明确的手指动作
+            { label: '关闭窗口', accelerator: 'Command+Shift+W', role: 'close' }
+          ]
+        },
+        // 编辑菜单是 ⌘C/⌘V/⌘A/⌘Z 的宿主，必需；窗口菜单给最小化/缩放
+        { role: 'editMenu' },
+        // 开发时才给视图菜单（⌘R 重载、⌘⌥I 开发者工具）—— 打包版不留这些快捷键
+        ...(process.env['ELECTRON_RENDERER_URL'] ? [{ role: 'viewMenu' as const }] : []),
+        { role: 'windowMenu' }
+      ])
+    )
+  }
 
   // 先把 nativeTheme 摆正：它决定 <select> 弹出层、滚动条与 confirm() 的外观，
   // 必须在建窗之前设好，否则第一帧的原生控件会是系统默认而不是用户的主题

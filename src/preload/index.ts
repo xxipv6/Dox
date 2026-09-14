@@ -219,6 +219,12 @@ const api: DoxApi = {
     ipcRenderer.on(IpcChannels.windowState, listener)
     return () => ipcRenderer.removeListener(IpcChannels.windowState, listener)
   },
+  /** macOS 菜单里的 ⌘W（关标签）—— 见 shared/ipc.ts 上那条注释 */
+  onMenuCloseTab: (cb: () => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on(IpcChannels.menuCloseTab, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.menuCloseTab, listener)
+  },
 
   // ---- AI 容量 ----
   aiAccountList: () => ipcRenderer.invoke(IpcChannels.aiAccountList),

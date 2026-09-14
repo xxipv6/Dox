@@ -12,6 +12,7 @@ import {
 import { useSessionStore, type SessionTab } from './stores/sessions'
 import { MIN_TILE_HEIGHT, tileGrid } from './utils/tileGrid'
 import { tabbarCompact } from './utils/tabbar'
+import { useCloseTabShortcut } from './composables/useCloseTabShortcut'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
 import SessionSidebar from './components/SessionSidebar.vue'
@@ -38,6 +39,15 @@ const FileEditor = defineAsyncComponent(() => import('./components/FileEditor.vu
 const store = useSessionStore()
 const editor = useEditorStore()
 const layout = useLayoutStore()
+
+/*
+ * Ctrl+W = 关掉当前标签（终端里按的那次由 TerminalPanel 自己处理，
+ * 见 composable 的注释：那样才知道该关哪一个标签）。关到最后一个标签时
+ * 与点标签上的 ✕ 完全一致 —— 复用 closeTab，不在这里造特例。
+ */
+useCloseTabShortcut(() => {
+  if (store.activeTab) store.closeTab(store.activeTab)
+})
 
 /**
  * 给一个元素挂尺寸/滚动监听，元素出现或消失时自动挂上、摘掉。

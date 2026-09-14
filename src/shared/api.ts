@@ -335,6 +335,11 @@ export interface DoxApi {
   windowIsMaximized(): Promise<boolean>
   /** 订阅最大化状态变化（图标在 □ / ❐ 之间切） */
   onWindowState(cb: (state: WindowState) => void): () => void
+  /**
+   * 订阅 mac 菜单里的 ⌘W（关闭标签）。
+   * Windows/Linux 用不到 —— 那边 Ctrl+W 由渲染层直接收（菜单已摘掉）。
+   */
+  onMenuCloseTab(cb: () => void): () => void
 
   // ---- AI 容量 ----
   /** 列出已配置的 AI 账号（不含 key —— key 不出主进程） */

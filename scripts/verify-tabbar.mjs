@@ -234,6 +234,151 @@ if (process.argv.includes('--e2e')) {
     // ---- 收窄是纯粹的「标签多」触发的，标签少时不该有 ----
     check('标签少时不再收窄', (await compact()) === false)
 
+    /*
+     * ---- Ctrl+W 关标签，而不是关整扇窗 ----
+     *
+     * 用户报的就是这个：以前 Ctrl+W 直接把窗口关了（Windows/Linux 上默认应用菜单
+     * 的 CmdOrCtrl+W 干的），而他只想关掉当前这一个标签。
+     *
+     * 焦点在终端里这一条还顺便守住另一件事：xterm 自己的按键处理和 window 上的
+     * 全局处理**不能各关一次** —— 所以断言是「正好 -1」，不是「-2」。
+     * （两者靠 `.xterm` 这个选择器分工，见 useCloseTabShortcut.ts 的注释。）
+     */
+    for (const _ of [1, 2]) {
+      await win.locator('.tab-new').click()
+      await win.waitForTimeout(1100)
+    }
+    await win.waitForFunction(() => document.querySelectorAll('.tab').length === 3, undefined, {
+      timeout: 20000
+    })
+    const beforeHotkey = await tabCount()
+    // 必须点**可见**的那一格：非当前标签的 .tab-content 是 v-show 隐藏的，
+    // Playwright 的 click 会一直等可见（点了也没意义，焦点进不去）
+    await win.locator('.tab-content:visible .terminal-container').first().click()
+    await win.waitForTimeout(300)
+    await win.keyboard.press('Control+w')
+    await win.waitForTimeout(1000)
+    check(
+      '终端里 Ctrl+W 关掉当前标签（正好一个）',
+      (await tabCount()) === beforeHotkey - 1,
+      `${beforeHotkey} → ${await tabCount()}`
+    )
+    check('按完 Ctrl+W 窗口还开着（不再关整扇窗）', !win.isClosed())
+
+    // 焦点不在终端里（侧栏分区头）时走全局那条，效果应当一样
+    const beforeGlobal = await tabCount()
+    await win.locator('.sidebar .section-head').first().click()
+    await win.waitForTimeout(300)
+    await win.keyboard.press('Control+w')
+    await win.waitForTimeout(1000)
+    check(
+      '焦点在侧栏时 Ctrl+W 也关标签',
+      (await tabCount()) === beforeGlobal - 1,
+      `${beforeGlobal} → ${await tabCount()}`
+    )
+
+    /*
+     * 例外的例外也要守：输入框里的 Ctrl+W 是「删掉前一个词」（原生编辑命令），
+     * 不许被这条快捷键抢走 —— 否则在文件名、命令片段里按一下就少一个词，
+     * 用户会以为是自己手滑。
+     */
+    await win.locator('.sidebar .section-head', { hasText: '快捷命令' }).click()
+    await win.waitForTimeout(400)
+    await win
+      .locator('.sidebar .section-head', { hasText: '快捷命令' })
+      .locator('.head-actions button')
+      .click()
+    await win.waitForTimeout(400)
+    const box = win.locator('.snippet-form textarea')
+    const hasBox = (await box.count()) > 0
+    const beforeTyping = await tabCount()
+    if (hasBox) {
+      await box.click()
+      await win.keyboard.type('echo foo bar')
+      await win.keyboard.press('Control+w')
+      await win.waitForTimeout(600)
+    }
+    check(
+      '输入框里按 Ctrl+W 不关标签（那是「删前一个词」）',
+      hasBox && (await tabCount()) === beforeTyping,
+      `${beforeTyping} → ${await tabCount()}`
+    )
+
+    /*
+     * ---- macOS 那条路：⌘W 归菜单管 ----
+     *
+     * mac 上 ⌘W 是**应用菜单的加速键**，优先于网页 —— 渲染层收不到那个 keydown，
+     * 所以拦不住，只能把菜单项本身换成「关闭标签」。这里守三件事：
+     * ⌘W 没留在「关闭窗口」上（用户报的就是这个）、编辑菜单还在（⌘C/⌘V 靠它）、
+     * 点那一项真的能关掉一个标签（主进程 → IPC → 渲染层整条链）。
+     *
+     * 注意：真正的 ⌘W 按键**没法在这里合成**（Playwright 走 CDP 发给渲染层，
+     * 不经过原生菜单），所以这里点的是菜单项本身，不是按键。
+     */
+    if (process.platform === 'darwin') {
+      const menu = await app.evaluate(({ Menu }) => {
+        const walk = (items, out = []) => {
+          for (const it of items) {
+            out.push({ label: it.label, role: it.role ?? null, acc: it.accelerator ?? null })
+            if (it.submenu) walk(it.submenu.items, out)
+          }
+          return out
+        }
+        const m = Menu.getApplicationMenu()
+        return m ? walk(m.items) : null
+      })
+      const flat = menu ?? []
+      const cmdW = flat.filter((i) => i.acc === 'Command+W')
+      check(
+        'mac 上 ⌘W 只绑在「关闭标签」上（不再关整扇窗）',
+        cmdW.length === 1 && cmdW[0].label === '关闭标签',
+        JSON.stringify(cmdW)
+      )
+      check(
+        '关窗口挪到了 ⌘⇧W',
+        flat.some((i) => i.acc === 'Command+Shift+W'),
+        JSON.stringify(flat.filter((i) => i.role === 'close'))
+      )
+      check(
+        '编辑菜单还在（⌘C/⌘V/⌘A 全靠它，不能把菜单整个换掉）',
+        flat.some((i) => i.role === 'copy') && flat.some((i) => i.role === 'paste'),
+        JSON.stringify(flat.filter((i) => i.acc === 'CommandOrControl+C'))
+      )
+
+      // 先凑到 3 个：只剩 1 个时关掉会自动补一个本地终端，数不出「少了几个」
+      for (const _ of [1, 2]) {
+        await win.locator('.tab-new').click()
+        await win.waitForTimeout(1100)
+      }
+      await win.waitForFunction(() => document.querySelectorAll('.tab').length === 3, undefined, {
+        timeout: 20000
+      })
+      const beforeMenu = await tabCount()
+      const clicked = await app.evaluate(({ Menu, BrowserWindow }) => {
+        const find = (items) => {
+          for (const it of items) {
+            if (it.accelerator === 'Command+W') return it
+            if (it.submenu) {
+              const r = find(it.submenu.items)
+              if (r) return r
+            }
+          }
+          return null
+        }
+        const item = find(Menu.getApplicationMenu().items)
+        if (!item) return 'no-item'
+        item.click(item, BrowserWindow.getFocusedWindow(), {})
+        return 'clicked'
+      })
+      await win.waitForTimeout(1000)
+      check(
+        '点菜单里的「关闭标签」关掉当前标签（主进程 → IPC → 渲染层）',
+        clicked === 'clicked' && (await tabCount()) === beforeMenu - 1,
+        `${clicked} ${beforeMenu} → ${await tabCount()}`
+      )
+      check('关完标签窗口还在', !win.isClosed())
+    }
+
     await win.screenshot({ path: 'shots/tabbar-e2e.png' })
     console.log('  截图：shots/tabbar-e2e.png')
   } catch (err) {
