@@ -1073,7 +1073,8 @@ onMounted(() => {
      * 这里必须 return false 把键吃掉：终端里的 Ctrl+W 是 ^W（0x17），
      * readline 拿它删前一个词，放行就等于「关标签的同时还删了 shell 里一个词」。
      */
-    if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && key === 'w') {
+    // macOS 的 Ctrl+W 保留给 readline「删前一个词」；macOS 关闭标签走菜单 ⌘W。
+    if (!isMac && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && key === 'w') {
       const own = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
       if (own) store.closeTab(own)
       return false

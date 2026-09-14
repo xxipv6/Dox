@@ -29,8 +29,9 @@ export function parentLocal(dir: string): string {
   if (isWinPath(dir)) {
     const trimmed = dir.replace(/[\\/]+$/, '')
     const i = trimmed.lastIndexOf('\\')
-    // `C:` 这一级再往上就是盘符列表
-    if (i <= 2) return WIN_DRIVES
+    // `C:` 这一级再往上就是盘符列表；`C:\\name` 的父目录仍是 `C:\\`。
+    if (trimmed.length <= 2) return WIN_DRIVES
+    if (i === 2) return `${trimmed.slice(0, 2)}\\`
     return trimmed.slice(0, i)
   }
   const trimmed = dir.replace(/\/+$/, '')
