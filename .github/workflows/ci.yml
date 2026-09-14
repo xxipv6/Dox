@@ -24,7 +24,6 @@ jobs:
     env:
       electron_config_cache: ${{ github.workspace }}/.cache/electron
       ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
-      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +42,6 @@ jobs:
         with:
           path: |
             .cache/electron
-            .cache/electron-builder
           key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-electron-
@@ -121,7 +119,6 @@ jobs:
     env:
       electron_config_cache: ${{ github.workspace }}/.cache/electron
       ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
-      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     permissions:
       contents: write # 建 Release / 传资产
     strategy:
@@ -145,7 +142,6 @@ jobs:
         with:
           path: |
             .cache/electron
-            .cache/electron-builder
           key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-electron-
