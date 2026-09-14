@@ -202,6 +202,12 @@ const api: DoxApi = {
   writeReceivedFile: (dir, name, data) =>
     ipcRenderer.invoke(IpcChannels.zmodemWriteFile, dir, name, data),
 
+  /* 终端里的 URL 交给系统浏览器打开；渲染层的 window.open 被主进程一律 deny */
+  openExternal: (url) => ipcRenderer.invoke(IpcChannels.shellOpenExternal, url),
+  /* 剪贴板走主进程：渲染层的 navigator.clipboard 在 Electron 里会静默失败 */
+  writeClipboardText: (text) => ipcRenderer.invoke(IpcChannels.clipboardWriteText, text),
+  readClipboardText: () => ipcRenderer.invoke(IpcChannels.clipboardReadText),
+
   // ---- 自绘标题栏 ----
   platform: process.platform,
   windowMinimize: () => ipcRenderer.send(IpcChannels.windowMinimize),

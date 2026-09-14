@@ -31,14 +31,15 @@ async function refresh(): Promise<void> {
 function run(s: CommandSnippet): void {
   const sessionId = store.activeSessionId
   if (!sessionId) return
-  api.input(sessionId, s.command.replace(/\r?\n/g, '\r') + '\r')
+  // 走 sendInput 而不是 api.input：广播开着时快捷命令也要一起下发
+  store.sendInput(sessionId, s.command.replace(/\r?\n/g, '\r') + '\r')
 }
 
 /** 仅粘贴到命令行，留给用户编辑后自行回车 */
 function pasteOnly(s: CommandSnippet): void {
   const sessionId = store.activeSessionId
   if (!sessionId) return
-  api.input(sessionId, s.command.replace(/\r?\n/g, '\r'))
+  store.sendInput(sessionId, s.command.replace(/\r?\n/g, '\r'))
 }
 
 // ---- 静默执行：不开终端，经 agent exec（argv 不经 shell）跑完拿回输出 ----
@@ -119,7 +120,9 @@ async function runSilent(s: CommandSnippet): Promise<void> {
 function copyExecResult(): void {
   const r = execResult.value
   if (!r) return
-  void navigator.clipboard.writeText([r.stdout, r.stderr].filter(Boolean).join('\n'))
+  // 走主进程的 Electron clipboard（渲染层的 navigator.clipboard 在 Electron 里
+  // 会因文档失焦静默失败 —— 同样的坑在终端那四条复制路径上踩过）
+  void window.api.writeClipboardText([r.stdout, r.stderr].filter(Boolean).join('\n'))
 }
 
 function edit(s: CommandSnippet): void {

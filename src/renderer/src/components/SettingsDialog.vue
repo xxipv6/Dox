@@ -200,6 +200,17 @@ onMounted(async () => {
       </div>
 
       <div class="field">
+        <label class="checkbox">
+          <input v-model="settings.outputHighlight" type="checkbox" />
+          输出高亮：IP / 日志级别 / error 关键字
+        </label>
+        <p class="sub-note">
+          给输出里匹配到的片段上色（内置规则，配色跟随终端主题）。只影响显示、不改写输出字节；
+          vim / tmux 这类全屏程序走备用屏，自动不生效，不会跟它们自己的重绘打架。
+        </p>
+      </div>
+
+      <div class="field">
         <label>终端字号：{{ settings.fontSize }}px</label>
         <input v-model.number="settings.fontSize" type="range" min="10" max="24" step="1" />
       </div>

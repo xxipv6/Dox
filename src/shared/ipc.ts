@@ -114,6 +114,15 @@ export const IpcChannels = {
   dialogPickDirectory: 'dialog:pickDirectory',
   zmodemPickReadFiles: 'zmodem:pickReadFiles',
   zmodemWriteFile: 'zmodem:writeFile',
+  /** 用系统浏览器打开外部链接（终端里的 URL；主进程侧只放行 http/https） */
+  shellOpenExternal: 'shell:openExternal',
+  /*
+   * 剪贴板读写走主进程的 Electron clipboard 模块，不用渲染层的
+   * navigator.clipboard：后者在 Electron 里要求文档处于焦点，失败是 reject 到
+   * 一个没人接的 promise 上 —— 表现为「点了复制没反应」，且无从排查。
+   */
+  clipboardWriteText: 'clipboard:writeText',
+  clipboardReadText: 'clipboard:readText',
   /*
    * 自绘标题栏的窗口控制。
    *

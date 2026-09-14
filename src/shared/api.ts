@@ -277,6 +277,30 @@ export interface DoxApi {
   // ---- rz/sz（ZMODEM） ----
   pickDirectory(title: string): Promise<string | null>
 
+  /**
+   * 用系统默认浏览器打开一个外部链接。
+   *
+   * 终端里的 URL 走这条通道，而不是渲染层的 window.open：WebLinksAddon 的默认
+   * handler 是「先 window.open() 再往返回的窗口写 location.href」，而主进程的
+   * setWindowOpenHandler 对一切 window.open 都是 deny —— 那条路的结果只有一条
+   * console.warn，链接永远打不开。
+   *
+   * 入参来自终端输出（远端可控），所以主进程侧只放行 http/https。
+   */
+  openExternal(url: string): Promise<void>
+
+  /**
+   * 写系统剪贴板。
+   *
+   * 走主进程的 Electron clipboard 模块，不用渲染层的 navigator.clipboard：
+   * 后者在 Electron 里要求文档处于焦点，失败时只是 reject 一个没人接的 promise，
+   * 用户看到的就是「点了复制没反应」而且无从排查。终端里选中即复制、右键复制、
+   * 快捷键复制都走这条通道。
+   */
+  writeClipboardText(text: string): Promise<void>
+  /** 读系统剪贴板（终端粘贴用，理由同上） */
+  readClipboardText(): Promise<string>
+
   /** CLI 伴侣：安装 dox 命令到 PATH（返回安装位置与 PATH 提示） */
   cliInstall(): Promise<{ path: string; note?: string }>
   /** CLI 伴侣：查询安装状态（设置页回显）；null = 没装 */

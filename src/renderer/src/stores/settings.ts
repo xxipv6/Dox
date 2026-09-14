@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   localShellId: '',
   suggestPortForward: true,
   portSentinel: true,
+  outputHighlight: true,
   // 536 是算出来的：网络页极限 `192.168.233.233:23244`（21 等宽字符 ≈139px）
   // 在默认宽度下不省略号（列账见 MonitorPanel 的 .conn-grid 注释）
   monitorWidth: 536,
@@ -72,6 +73,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const localShellId = ref(DEFAULT_SETTINGS.localShellId)
   const suggestPortForward = ref(DEFAULT_SETTINGS.suggestPortForward)
   const portSentinel = ref(DEFAULT_SETTINGS.portSentinel)
+  const outputHighlight = ref(DEFAULT_SETTINGS.outputHighlight)
   const monitorWidth = ref(DEFAULT_SETTINGS.monitorWidth)
   const localDefaultDir = ref(DEFAULT_SETTINGS.localDefaultDir)
   const dialogVisible = ref(false)
@@ -138,6 +140,7 @@ export const useSettingsStore = defineStore('settings', () => {
     localShellId.value = persisted?.localShellId ?? DEFAULT_SETTINGS.localShellId
     suggestPortForward.value = persisted?.suggestPortForward ?? DEFAULT_SETTINGS.suggestPortForward
     portSentinel.value = persisted?.portSentinel ?? DEFAULT_SETTINGS.portSentinel
+    outputHighlight.value = persisted?.outputHighlight ?? DEFAULT_SETTINGS.outputHighlight
     monitorWidth.value = persisted?.monitorWidth ?? DEFAULT_SETTINGS.monitorWidth
     /*
      * 一次性迁移：440 是加宽前的旧默认值。440 下网络页地址列必然省略号
@@ -180,6 +183,7 @@ export const useSettingsStore = defineStore('settings', () => {
         localShellId: localShellId.value,
         suggestPortForward: suggestPortForward.value,
         portSentinel: portSentinel.value,
+        outputHighlight: outputHighlight.value,
         monitorWidth: monitorWidth.value,
         localDefaultDir: localDefaultDir.value
       })
@@ -200,7 +204,7 @@ export const useSettingsStore = defineStore('settings', () => {
   watch(
     [
       themeId, uiTheme, fontSize, fontId, ligatures, localShellId,
-      suggestPortForward, portSentinel, monitorWidth, localDefaultDir
+      suggestPortForward, portSentinel, outputHighlight, monitorWidth, localDefaultDir
     ],
     persist
   )
@@ -223,6 +227,7 @@ export const useSettingsStore = defineStore('settings', () => {
     localShellId,
     suggestPortForward,
     portSentinel,
+    outputHighlight,
     monitorWidth,
     localDefaultDir,
     dialogVisible,

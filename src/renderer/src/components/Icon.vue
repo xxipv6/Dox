@@ -17,7 +17,7 @@ export type IconName =
   | 'upload' | 'download' | 'follow' | 'paste' | 'copy' | 'terminal' | 'server'
   | 'split-right' | 'split-down' | 'panel-left'
   | 'key' | 'alert' | 'settings' | 'sun' | 'moon' | 'box' | 'zap'
-  | 'monitor'
+  | 'monitor' | 'broadcast' | 'grid' | 'expand'
   // 自绘标题栏的窗口按钮（macOS 用系统红绿灯，不会用到这两个）
   | 'square' | 'restore'
   | 'search'
@@ -111,7 +111,15 @@ const PATHS: Record<IconName, string[]> = {
   restore: ['M8.5 8.5V6a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-2.5', 'M5.5 8.5h9.5v9.5h-9.5z'],
 
   // 搜索：放大镜
-  search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'M21 21l-4.35-4.35']
+  search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'M21 21l-4.35-4.35'],
+
+  // 广播：一路进、三路出（告诉用户「这条会发给好几个会话」）
+  broadcast: ['M3 12h5', 'M8 12 18 5', 'M8 12h10', 'M8 12l10 7'],
+
+  // 平铺：四宫格
+  grid: ['M4.5 4.5h6v6h-6z', 'M13.5 4.5h6v6h-6z', 'M4.5 13.5h6v6h-6z', 'M13.5 13.5h6v6h-6z'],
+  // 放大：斜向双箭头（只看这一个）
+  expand: ['M4 10V4h6', 'M20 14v6h-6', 'M4 4l6 6', 'M20 20l-6-6']
 }
 
 const paths = computed(() => PATHS[props.name] ?? [])

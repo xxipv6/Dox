@@ -13,6 +13,9 @@ import { useSettingsStore } from '../stores/settings'
 import { useEditorStore } from '../stores/editor'
 import { createZmodemBridge, type ZmodemBridge } from '../zmodem/zmodemService'
 import { detectListenPorts } from '../utils/portSuggest'
+import { rememberTermSize } from '../utils/termSize'
+import { cdArgOf, createCwdTracker, resolveCdTarget } from '../utils/cwdFollow'
+import { OutputHighlighter } from '../utils/outputHighlight'
 import { pushToast } from '../stores/toast'
 import Icon from './Icon.vue'
 
@@ -20,6 +23,31 @@ const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
 const settings = useSettingsStore()
 const editor = useEditorStore()
+/** mac 上 ⌘C 才算复制；Win/Linux 上 Ctrl+C 得留给前台进程的 SIGINT */
+const isMac = window.api.platform === 'darwin'
+
+/**
+ * 写系统剪贴板。
+ *
+ * 这里原先（以及其余两处复制入口）是 `void navigator.clipboard.writeText(...)` ——
+ * 失败是彻底静默的：没有提示，菜单也不会关（copySelection 的 closeMenu 在 await
+ * 之后，异常直接把它跳过），用户看到的只有「点了复制没反应」，无从区分是没选中
+ * 还是写剪贴板被拒。改走主进程的 Electron clipboard（见 IPC 通道注释），
+ * 但仍留这一层 catch：IPC 本身也会失败，而沉默的失败没法排查。
+ *
+ * notify：只有**显式复制**（右键菜单 / 快捷键）才回一条成功提示 ——
+ * 「选中即复制」每次拖拽都会触发，给它弹提示就是把界面变成噪声。
+ * 失败一律提示，那是用户必须知道的事。
+ */
+async function copyToClipboard(text: string, notify = false): Promise<void> {
+  if (!text) return
+  try {
+    await window.api.writeClipboardText(text)
+    if (notify) pushToast(`已复制 ${text.length} 个字符`, 'success', 1600)
+  } catch (err) {
+    pushToast(`复制到剪贴板失败：${err instanceof Error ? err.message : String(err)}`)
+  }
+}
 
 const container = ref<HTMLDivElement>()
 const searchInput = ref<HTMLInputElement>()
@@ -37,6 +65,7 @@ let unsubscribeData: (() => void) | null = null
 let unsubscribeStatus: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
 let zmodem: ZmodemBridge | null = null
+let highlighter: OutputHighlighter | null = null
 /** 卸载后禁止再往已销毁的终端写入（ZMODEM 看门狗可能在卸载后触发） */
 let disposed = false
 
@@ -473,26 +502,25 @@ const MIN_CONTAINER_HEIGHT = 60
 const MIN_COLUMNS = 20
 const MIN_ROWS = 5
 
+/** OSC 52 的尺寸上限：与主流终端一致（解码后 75KB / 原始 128KB） */
+const OSC52_MAX_BYTES = 75 * 1024
+const OSC52_MAX_RAW = 128 * 1024
+
 function safeFit(): void {
   const el = container.value
   if (!el || el.clientWidth < MIN_CONTAINER_WIDTH || el.clientHeight < MIN_CONTAINER_HEIGHT) return
   fitAddon?.fit()
+  // 只有这一条路径的尺寸是可信的：容器真占了地方才 fit。记下来给下一个
+  // 建会话的当种子（见 utils/termSize）—— 隐藏标签的退化尺寸不能记
+  if (term && term.cols > MIN_COLUMNS && term.rows > MIN_ROWS) {
+    rememberTermSize(term.cols, term.rows)
+  }
 }
 
 // ---- 终端 cwd 跟踪 ----
 // 优先用 shell integration 上报（OSC 7，精确）；没有的 shell 退回解析 cd 命令
 let lineBuf = ''
 let cwdFromIntegration = false
-
-function normalizePosix(p: string): string {
-  const out: string[] = []
-  for (const part of p.split('/')) {
-    if (!part || part === '.') continue
-    if (part === '..') out.pop()
-    else out.push(part)
-  }
-  return '/' + out.join('/')
-}
 
 /** shell 侧不做 URI 编码，路径里的裸 % 会让 decodeURIComponent 抛错，这里兜住 */
 function safeDecode(value: string): string {
@@ -521,24 +549,32 @@ function pathFromOsc7(uri: string): string | null {
 /** cd 目标验证的代际：连敲几条 cd 时，只认最后一条的 stat 结果 */
 let cdVerifySeq = 0
 
-/** 从命令行里取出 cd/pushd 的参数（不是 cd 命令则 null） */
-function cdArgOf(line: string): string | null {
-  const m = /^\s*(?:cd|pushd)\s*(.*)$/.exec(line)
-  if (!m) return null
-  const arg = (m[1] ?? '').trim().split(/\s*(?:&&|\|\||[;|])\s*/)[0]?.trim() ?? ''
-  return arg.replace(/^["']|["']$/g, '')
+/**
+ * 期望 cwd 链（见 utils/cwdFollow 的模块注释）：解析基准同步推进，
+ * 面板显示值仍然只在 stat 确认后才写 —— 两者分开才不会「只跟一级」。
+ */
+const cwdTracker = createCwdTracker()
+
+/** 当前解析基准：期望值优先，拿不到就是 null（不跟随，别拿 '/' 猜） */
+function cwdBase(): string | null {
+  return cwdTracker.base(props.sessionId, store.cwdBySession[props.sessionId])
 }
 
-/** 把 cd 参数解析成绝对路径（解析不出来返回 null） */
-function resolveCdTarget(arg: string): string | null {
-  if (arg === '-') return null
-  const home = store.homeBySession[props.sessionId]
-  const cur = store.cwdBySession[props.sessionId] ?? home ?? '/'
-  if (!arg || arg === '~') return home ?? null
-  if (arg.startsWith('/')) return normalizePosix(arg)
-  if (arg.startsWith('~/')) return home ? normalizePosix(home + arg.slice(1)) : null
-  return normalizePosix(cur + '/' + arg)
+function cwdHome(): string | null {
+  return store.homeBySession[props.sessionId] ?? null
 }
+
+/*
+ * 别的权威来源改了 cwd（OSC 7 上报、SFTP 面板里点进目录、终端里 Ctrl+点路径），
+ * 基准要立刻跟上 —— 否则链上还留着一条早就过期的期望值，下一条相对 cd 就按它算。
+ * 我们自己 stat 成功写 store 时也会走到这里，此时值是同一个，等于空操作。
+ */
+watch(
+  () => store.cwdBySession[props.sessionId],
+  (confirmed) => {
+    if (confirmed) cwdTracker.sync(props.sessionId, confirmed)
+  }
+)
 
 /**
  * 算出目标目录后先落一次地（sftpStat）再更新面板 ——
@@ -546,26 +582,33 @@ function resolveCdTarget(arg: string): string | null {
  * 仅 SSH 会话：本地/容器没有对应的 SFTP 通道，维持原来的直接信任。
  */
 function applyCwd(next: string): void {
-  if (!isPlainSshId(props.sessionId)) {
-    store.setCwd(props.sessionId, next)
+  const sid = props.sessionId
+  // 基准先同步推进：下一条 cd 不等这次 stat 回来（这正是「只跟一级」的病根）
+  cwdTracker.advance(sid, next)
+  if (!isPlainSshId(sid)) {
+    store.setCwd(sid, next)
     return
   }
   const seq = ++cdVerifySeq
   window.api
-    .sftpStat(props.sessionId, next)
+    .sftpStat(sid, next)
     .then((stat) => {
       if (seq !== cdVerifySeq) return // 期间又敲了别的 cd，这趟结果作废
-      if (stat?.isDir) store.setCwd(props.sessionId, next)
+      if (stat?.isDir) store.setCwd(sid, next)
+      // 远端明确说「不存在/不是目录」：这条 cd 没生效，基准退回最后一个确认值，
+      // 免得后面每条相对 cd 都挂在一条不存在的路径上继续错
+      else cwdTracker.rollback(sid, store.cwdBySession[sid])
     })
     .catch(() => {
-      /* 会话断开等：不更新也不打扰 */
+      // 会话断开这类**结果未知**的情况不回滚：cd 多半已经生效了，
+      // 退回确认值反而会让下一条相对 cd 算错
     })
 }
 
 function handleCommand(line: string): void {
   const arg = cdArgOf(line)
   if (arg === null) return
-  const next = resolveCdTarget(arg)
+  const next = resolveCdTarget(arg, cwdBase(), cwdHome())
   if (next) applyCwd(next)
 }
 
@@ -579,8 +622,8 @@ function followCompletedCd(line: string): void {
   if (!isPlainSshId(props.sessionId)) return
   const arg = cdArgOf(line)
   if (!arg || arg === '-' || arg === '~') return
-  const home = store.homeBySession[props.sessionId]
-  const cur = store.cwdBySession[props.sessionId] ?? home ?? '/'
+  const home = cwdHome()
+  const base = cwdBase()
   let full: string
   if (arg.startsWith('~/')) {
     if (!home) return
@@ -588,7 +631,8 @@ function followCompletedCd(line: string): void {
   } else if (arg.startsWith('/')) {
     full = arg
   } else {
-    full = `${cur}/${arg}`
+    if (!base) return // 基准未知就别拿去列目录（同 resolveCdTarget）
+    full = `${base}/${arg}`
   }
   const idx = full.lastIndexOf('/')
   const parent = idx <= 0 ? '/' : full.slice(0, idx)
@@ -702,15 +746,25 @@ useEscapeToClose(
 )
 
 async function copySelection(): Promise<void> {
-  const sel = term?.getSelection()
-  if (sel) await navigator.clipboard.writeText(sel)
+  // 菜单项是亮的（右键那一刻 hasSelection 为真）却取不到文字 —— 这种情况必须说出来，
+  // 否则又是「点了没反应」：无从判断是没选中、还是选区在两次点击之间被终端输出冲掉了
+  const sel = term?.getSelection() ?? ''
   closeMenu()
+  if (!sel) {
+    pushToast('当前没有选中的文本')
+    return
+  }
+  await copyToClipboard(sel, true)
 }
 
 async function pasteClipboard(): Promise<void> {
   closeMenu()
-  const text = await navigator.clipboard.readText()
-  if (text) window.api.input(props.sessionId, text)
+  try {
+    const text = await window.api.readClipboardText()
+    if (text) store.sendInput(props.sessionId, text)
+  } catch (err) {
+    pushToast(`读取剪贴板失败：${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 function clearTerminal(): void {
@@ -870,7 +924,19 @@ onMounted(() => {
   searchAddon = new SearchAddon()
   term.loadAddon(fitAddon)
   term.loadAddon(searchAddon)
-  term.loadAddon(new WebLinksAddon())
+  /*
+   * URL 链接交给系统浏览器，且与路径链接同口径（见 registerPathLinks）：
+   * 只有按住 Ctrl/Cmd 才激活，单击留给文本选择。
+   *
+   * 必须自己传 handler：WebLinksAddon 的默认实现是「先 window.open() 再往
+   * 返回的窗口写 location.href」，而主进程的 setWindowOpenHandler 一律 deny ——
+   * 那条路的结果只有一条 console.warn，URL 永远打不开。
+   */
+  term.loadAddon(
+    new WebLinksAddon((event, uri) => {
+      if (event.ctrlKey || event.metaKey) void window.api.openExternal(uri)
+    })
+  )
   /*
    * 绝对路径链接：SSH 会话（远端面板）与 POSIX 本地终端（本机面板）都有
    * 对应的文件视图。Windows 本地终端不注册 —— PATH_RE 只认 posix 形态，
@@ -912,6 +978,15 @@ onMounted(() => {
     if (!disposed) term?.write(data)
   })
 
+  /*
+   * 输出高亮（IP / 日志级别 / error 关键字…）。挂在这里而不是数据通路上：
+   * 它扫的是 term.buffer 的行，不是字节流 —— 见 utils/outputHighlight 的模块注释。
+   */
+  highlighter = new OutputHighlighter()
+  highlighter.setTheme(settings.currentPreset.theme)
+  highlighter.attach(term)
+  highlighter.setEnabled(settings.outputHighlight)
+
   // ---- shell integration：cwd（OSC 7）----
   term.parser.registerOscHandler(7, (payload) => {
     // 必须包 try/catch：本回调在 xterm 的解析循环里同步执行，抛异常会让
@@ -925,6 +1000,45 @@ onMounted(() => {
     } catch (err) {
       console.warn('[terminal] 解析 OSC 7 失败', err)
     }
+    return true
+  })
+
+  /*
+   * ---- 远端设置剪贴板（OSC 52）----
+   *
+   * 这是 tmux/vim 里选字能真正进系统剪贴板的唯一通路：tmux 的 `set-clipboard`
+   * 默认是 external —— 在它自己那边选中（mouse on 时拖选、或 copy-mode）之后，
+   * 它把选中的内容用 `ESC ] 52 ; c ; <base64>` 发给**外层终端**，由终端负责写
+   * 系统剪贴板。终端不实现这条，tmux 里选中就永远是"看着选上了、粘出来是空的"
+   * —— 因为鼠标被 tmux 拿走后，xterm 自己那个选区根本不是用户看到的那个。
+   *
+   * 安全取舍：这条等于把「远端可以写本机剪贴板」做成能力，恶意程序能用它覆盖
+   * 剪贴板做投毒。业界（iTerm2 / Windows Terminal / kitty / Wave）都默认支持，
+   * 所以随大流；但**不支持查询**（`?`）—— 那才是剪贴板被读走的口子，本机内容
+   * 不该让远端按需索取。另外加长度上限，避免远端拿超大 base64 拖住渲染进程。
+   */
+  term.parser.registerOscHandler(52, (payload) => {
+    try {
+      // payload 形如 "c;<base64>"，选择器可能是 c/p/空
+      const sep = payload.indexOf(';')
+      if (sep < 0 || sep > 10) return true
+      const b64 = payload.slice(sep + 1)
+      // 查询（"?"）与空内容都不处理
+      if (!b64 || b64 === '?') return true
+      if (payload.length > OSC52_MAX_RAW) return true
+      // tmux 分块发送时会带换行（RFC 4648 允许）
+      const clean = b64.replace(/\s+/g, '')
+      if (Math.ceil(clean.length * 0.75) > OSC52_MAX_BYTES) return true
+      const bin = atob(clean)
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0))
+      const text = new TextDecoder().decode(bytes)
+      // 真实字节数再校一次：base64 长度的估算对多字节 UTF-8 不准
+      if (bytes.length > OSC52_MAX_BYTES) return true
+      if (text) void window.api.writeClipboardText(text)
+    } catch (err) {
+      console.warn('[terminal] 解析 OSC 52 失败', err)
+    }
+    // 认领这条序列（xterm 本身不实现 52，声明所有权避免落到别的处理者）
     return true
   })
 
@@ -951,9 +1065,21 @@ onMounted(() => {
       toggleSearch()
       return false
     }
+    /*
+     * macOS 上 ⌘C 就是「复制」——这是肌肉记忆，不该逼人多按一个 Shift。
+     * 有选区才吃这个键：没选区时放行，免得把用户想送进终端的按键吞掉
+     * （mac 上给前台进程发 SIGINT 也是 Ctrl+C，不冲突）。
+     * Windows/Linux 不这么干：那边 Ctrl+C 必须是 SIGINT，复制一律 Ctrl+Shift+C。
+     */
+    if (isMac && e.metaKey && !e.ctrlKey && !e.shiftKey && key === 'c') {
+      const sel = term?.getSelection()
+      if (!sel) return true
+      void copyToClipboard(sel, true)
+      return false
+    }
     if (primary && e.shiftKey && key === 'c') {
       const sel = term?.getSelection()
-      if (sel) void navigator.clipboard.writeText(sel)
+      if (sel) void copyToClipboard(sel, true)
       return false
     }
     if (primary && e.shiftKey && key === 'v') {
@@ -966,7 +1092,7 @@ onMounted(() => {
   // 选中即复制
   term.onSelectionChange(() => {
     const sel = term?.getSelection()
-    if (sel) void navigator.clipboard.writeText(sel)
+    if (sel) void copyToClipboard(sel)
   })
 
   // 远端输出 → ZMODEM Sentry → xterm（ZMODEM 会话期间数据被协议接管）
@@ -1024,7 +1150,7 @@ onMounted(() => {
   // 键盘输入 → 远端；ZMODEM 会话期间屏蔽输入（Esc 中断由上面的 key handler 处理）
   term.onData((data) => {
     if (zmodem?.isActive()) return
-    window.api.input(props.sessionId, data)
+    store.sendInput(props.sessionId, data)
     if (!cwdFromIntegration) trackInput(data)
   })
 
@@ -1071,6 +1197,10 @@ onBeforeUnmount(() => {
   unsubscribeStatus?.()
   resizeObserver?.disconnect()
   term?.dispose()
+  // 面板没了，链上的期望值也一起丢掉（会话若还在，store 里的确认值仍然有效）
+  cwdTracker.forget(props.sessionId)
+  highlighter?.dispose()
+  highlighter = null
 })
 
 /*
@@ -1087,17 +1217,35 @@ watch(
     term.options.theme = settings.currentPreset.theme
     term.options.fontSize = settings.fontSize
     term.options.fontFamily = settings.fontFamily
+    // 高亮的颜色取自主题，配色一变已挂上的装饰就是旧色，让它自己重挂
+    highlighter?.setTheme(settings.currentPreset.theme)
     safeFit()
   }
 )
 
-/** 标签页重新激活时父组件调用：隐藏期间尺寸可能已变化 */
-function refitAndFocus(): void {
+/** 输出高亮开关：关掉时把已经挂上的颜色立刻摘掉（不必等重开标签） */
+watch(
+  () => settings.outputHighlight,
+  (on) => highlighter?.setEnabled(on)
+)
+
+/** 隐藏期间尺寸可能已变化：只重量尺寸，不碰键盘焦点 */
+function refit(): void {
   safeFit()
+}
+
+/** 标签页重新激活时父组件调用：重量尺寸 + 把键盘交给它 */
+function refitAndFocus(): void {
+  refit()
   term?.focus()
 }
 
-defineExpose({ refitAndFocus })
+/*
+ * refit 与 refitAndFocus 分开暴露，是给平铺模式用的：铺开/收起时所有面板都要
+ * 重量尺寸，但只有当前那一格该抢焦点 —— 挨个调 refitAndFocus 会把焦点甩到最后
+ * 一个格子上，接着敲的字就进错会话了。
+ */
+defineExpose({ refit, refitAndFocus })
 </script>
 
 <template>

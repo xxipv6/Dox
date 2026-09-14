@@ -136,6 +136,9 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
       </div>
 
       <div class="grid">
+        <label>名称</label>
+        <input v-model="form.name" placeholder="留空则用 用户名@主机" />
+
         <label>主机地址</label>
         <div class="row">
           <input v-model="form.host" placeholder="192.168.1.10 或 example.com" class="grow" />
@@ -151,9 +154,6 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
 
         <label>用户名</label>
         <input v-model="form.username" placeholder="root" />
-
-        <label>名称</label>
-        <input v-model="form.name" placeholder="留空则用 用户名@主机" />
 
         <label>认证方式</label>
         <div class="segmented">

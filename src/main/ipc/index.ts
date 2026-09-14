@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
 import { sanitizeWinName } from '../fsSafe'
 import { existsSync } from 'node:fs'
 import fs from 'node:fs/promises'
@@ -537,6 +537,41 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.windowGetMaximized, (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false
   })
+
+  /*
+   * 用系统浏览器打开终端里的 URL。
+   *
+   * 渲染层不能自己干这件事：WebLinksAddon 的默认 handler 走 window.open，
+   * 而 index.ts 的 setWindowOpenHandler 对一切 window.open 都是 deny ——
+   * 结果是 addon 里一条 console.warn，链接永远打不开。
+   *
+   * 入参来自终端输出（远端可控），所以只放行 http/https：把任意 scheme 递给
+   * shell.openExternal，等于让远端能唤起本机任意协议处理器。
+   */
+  ipcMain.handle(IpcChannels.shellOpenExternal, async (_event, url: unknown) => {
+    if (typeof url !== 'string') return
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      return
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
+    await shell.openExternal(parsed.toString())
+  })
+
+  /*
+   * 剪贴板：走 Electron 的 clipboard 模块，不用渲染层的 navigator.clipboard。
+   *
+   * 后者在 Electron 里要求文档处于焦点，失败时只是 reject 一个没人接的 promise ——
+   * 用户看到「点了复制没反应」，而且既没有提示也无从排查（终端里的选中即复制、
+   * 右键复制、⌘C/Ctrl+Shift+C 三条路都撞这一个坑）。主进程的 clipboard 是原生
+   * 实现，没有这些约束。
+   */
+  ipcMain.handle(IpcChannels.clipboardWriteText, (_event, text: unknown) => {
+    if (typeof text === 'string' && text) clipboard.writeText(text)
+  })
+  ipcMain.handle(IpcChannels.clipboardReadText, () => clipboard.readText())
 
   /*
    * ---- AI 容量 ----

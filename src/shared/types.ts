@@ -153,6 +153,11 @@ export interface AppSettings {
   suggestPortForward: boolean
   /** 端口哨兵：agent 差分发现**新出现**的监听端口时弹警告（谁开的、什么进程） */
   portSentinel: boolean
+  /**
+   * 输出高亮：把 IP、日志级别、error/warn 这类片段标上颜色。
+   * 走的是 xterm decoration（只影响渲染，不改输出字节），全屏程序里自动不生效。
+   */
+  outputHighlight: boolean
   /** 性能监控面板宽度（拖左缘调整，像素） */
   monitorWidth: number
   /**

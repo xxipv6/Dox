@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { AUTH_DECRYPT_FAILED } from '@shared/types'
 import type {
   ContainerInfo,
@@ -11,6 +11,7 @@ import type {
 } from '@shared/types'
 import { useSettingsStore } from './settings'
 import { errorText } from '../utils/errors'
+import { seedTermSize } from '../utils/termSize'
 
 export interface PaneState {
   paneId: string
@@ -382,8 +383,9 @@ export const useSessionStore = defineStore('sessions', () => {
   async function connectPane(tab: SessionTab, pane: PaneState, cwd?: string): Promise<void> {
     pane.status = 'connecting'
     try {
-      // shell 建立前先用 80x24，建立后 xterm 的 onResize 会立即修正
-      const size = { cols: 80, rows: 24 }
+      // 用上一个终端的真实尺寸（见 utils/termSize）：写死 80x24 会让 pty
+      // 出生即错尺寸，而 tmux 这类程序会把出生尺寸读进自己的状态
+      const size = seedTermSize()
       const sessionId =
         tab.kind === 'local'
           ? await window.api.connectLocal(size, useSettingsStore().localShellId || undefined, cwd)
@@ -674,6 +676,8 @@ export const useSessionStore = defineStore('sessions', () => {
     }
     const idx = tabs.value.indexOf(tab)
     tabs.value = tabs.value.filter((t) => t.tabId !== tab.tabId)
+    // 标签 id 不复用，但广播清单里留着它会一直算进「勾了几个」的计数里
+    broadcastTabIds.value.delete(tab.tabId)
     // 直连容器标签关掉后，承载它的传输会话若已无人使用（侧栏也没展开）顺手断掉
     if (tab.kind === 'container' && tab.container) {
       // 监控面板的目标是这个容器也一起收（它的 sessionId 是父会话，clearSessionState 管不到）
@@ -692,6 +696,73 @@ export const useSessionStore = defineStore('sessions', () => {
     // 关到一空就自动开一个本地终端 —— 全空的界面没有「下一步去哪」，
     // 与启动时无标签默认开本地终端（App.vue）是同一个取舍
     if (tabs.value.length === 0) void connectLocal()
+  }
+
+  /*
+   * ---- 标签的显示派生 ----
+   *
+   * 这两个原本是 App.vue 里的局部函数。挪进 store 是因为标签**溢出清单**
+   * （TabListMenu）也要用：清单里那一行必须和标签栏上那个标签是同一个字符串，
+   * 不然用户没法把「清单第 7 行」和「标签栏最右边那个」对起来。复制一份出来
+   * 迟早会漂。
+   */
+
+  /**
+   * 状态点取**所有** pane 中最差的状态：
+   * 后台 pane（没聚焦的那半个）死了不能无声无息 —— 原来状态点只读
+   * activePane，后台 pane 挂了要等用户切过去才发现屏幕早就冻住了。
+   */
+  const STATUS_RANK: Record<SessionStatus, number> = {
+    error: 0,
+    reconnecting: 1,
+    connecting: 2,
+    connected: 3,
+    closed: 4
+  }
+  function tabStatus(tab: SessionTab): SessionStatus {
+    let worst: SessionStatus = 'closed'
+    for (const p of tab.panes) {
+      if (STATUS_RANK[p.status] < STATUS_RANK[worst]) worst = p.status
+    }
+    return worst
+  }
+
+  /** 标签标题：本地终端显示当前目录（shell integration 上报），其余用 tab.title */
+  function tabLabel(tab: SessionTab): string {
+    const sessionId = tab.panes.find((p) => p.paneId === tab.activePaneId)?.sessionId
+    const cwd = sessionId ? cwdBySession[sessionId] : undefined
+    if (tab.kind === 'local' && cwd) {
+      const name = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
+      return name ? `本地 · ${name}` : '本地终端'
+    }
+    return tab.title
+  }
+
+  /*
+   * ---- 批量关闭 ----
+   *
+   * 全部走 closeTab 这条路，而不是自己写一遍「断开会话 + 清状态 + 挪标签」：
+   * 那段收尾里还挂着广播清单、容器标签的传输会话回收、监控面板收拾 ——
+   * 复制一遍必然漏掉其中一条（漏了就是「关掉了但连接还在」这种静默错误）。
+   *
+   * 遍历的是快照：closeTab 每次都会把 tabs 换成新数组，边遍历边改会漏掉元素。
+   */
+  function closeOtherTabs(keep: SessionTab): void {
+    for (const tab of [...tabs.value]) {
+      if (tab.tabId !== keep.tabId) closeTab(tab)
+    }
+    activeTabId.value = keep.tabId
+  }
+
+  function closeTabsToRight(from: SessionTab): void {
+    const idx = tabs.value.indexOf(from)
+    if (idx < 0) return
+    for (const tab of tabs.value.slice(idx + 1)) closeTab(tab)
+    activeTabId.value = from.tabId
+  }
+
+  function closeAllTabs(): void {
+    for (const tab of [...tabs.value]) closeTab(tab)
   }
 
   async function refreshSaved(): Promise<void> {
@@ -719,6 +790,102 @@ export const useSessionStore = defineStore('sessions', () => {
 
   function toggleSftp(): void {
     sftpVisible.value = !sftpVisible.value
+  }
+
+  // ---- 广播下发（一处敲键，多处同时执行）----
+
+  /**
+   * 广播开关。**不持久化**（不进 AppSettings）：勾选的标签本身就随进程消失，
+   * 重启后一个目标都不剩，此时开关还亮着只是撒谎 —— 每次开工重新开一次更直白。
+   */
+  const broadcastEnabled = ref(false)
+  /**
+   * 勾选了「接收下发」的标签。**存标签 id 而不是 sessionId**：断线重连、容器标签
+   * 重建承载会话都会换 sessionId，标签 id 是稳定的那个。用 Set 是因为模板里
+   * 要按标签 id 做 O(1) 判断（`:class` 每个标签每帧都会求值）。
+   */
+  const broadcastTabIds = ref(new Set<string>())
+
+  /**
+   * 真正接收下发的会话清单：只认**当前连着**的会话。
+   * 连不上的目标（connecting / reconnecting / error / 已关闭）直接跳过 ——
+   * 往一个还没建好的 pty 里塞字节没有意义，主进程那边也只是丢掉。
+   */
+  const broadcastTargets = computed<{ tabId: string; title: string; sessionId: string }[]>(() => {
+    if (!broadcastEnabled.value) return []
+    const out: { tabId: string; title: string; sessionId: string }[] = []
+    for (const tab of tabs.value) {
+      if (!broadcastTabIds.value.has(tab.tabId)) continue
+      for (const pane of tab.panes) {
+        if (pane.sessionId && pane.status === 'connected') {
+          // 分屏的两个 pane 是两个会话，各自都算一个目标
+          out.push({ tabId: tab.tabId, title: tab.title, sessionId: pane.sessionId })
+        }
+      }
+    }
+    return out
+  })
+
+  /** 全部标签都在清单里（决定那个批量按钮写「全选」还是「全不选」） */
+  const broadcastAllChecked = computed(
+    () => tabs.value.length > 0 && tabs.value.every((t) => broadcastTabIds.value.has(t.tabId))
+  )
+
+  /**
+   * 开关广播。**开就是从「全部标签」起步** —— 用户的典型场景是「手上这几个
+   * 页签一起跑」，挨个勾一遍是最烦的一步；要缩小范围就取消勾选（想全砍掉
+   * 也有旁边的「全不选」一键）。
+   */
+  function toggleBroadcast(): void {
+    broadcastEnabled.value = !broadcastEnabled.value
+    if (!broadcastEnabled.value) return
+    for (const tab of tabs.value) broadcastTabIds.value.add(tab.tabId)
+  }
+
+  function toggleBroadcastTab(tabId: string): void {
+    if (broadcastTabIds.value.has(tabId)) broadcastTabIds.value.delete(tabId)
+    else broadcastTabIds.value.add(tabId)
+  }
+
+  /** 批量：全不选 / 全选（按当前是不是已经全选来切换） */
+  function toggleBroadcastAll(): void {
+    if (broadcastAllChecked.value) {
+      broadcastTabIds.value.clear()
+      return
+    }
+    for (const tab of tabs.value) broadcastTabIds.value.add(tab.tabId)
+  }
+
+  /*
+   * 广播开着时新开的标签自动入列。
+   * 默认既然是「全部」，后开的标签掉队就会跟按钮上那个数字自相矛盾
+   * （写着 广播 3，其实已经 4 个页签了）。不想要就取消那一个勾。
+   */
+  watch(
+    () => tabs.value.map((t) => t.tabId),
+    (ids, prev) => {
+      if (!broadcastEnabled.value) return
+      for (const id of ids) if (!prev?.includes(id)) broadcastTabIds.value.add(id)
+    }
+  )
+
+  /**
+   * 终端输入的统一出口：永远写当前会话；广播开着时再扇出给其余勾选中的会话。
+   *
+   * 只给**键盘输入、粘贴、快捷命令**走这里。以下四类刻意不广播，它们描述的是
+   * 某一个会话自己的状态，不是「用户敲下去的命令」：
+   *   - 布局恢复 / 断线重连后自动注入的 `cd`（每个会话各自的 cwd）
+   *   - 文件面板「在终端打开」的 `cd`（同上，且目标路径在别的会话里多半不存在）
+   *   - 拖文件粘路径（本地路径只对发起的那台机器有意义）
+   *   - ZMODEM 上传的数据帧（会话私有的传输协议流，混进别的会话就是乱码）
+   */
+  function sendInput(sessionId: string, data: string | Uint8Array): void {
+    window.api.input(sessionId, data)
+    if (!broadcastEnabled.value) return
+    for (const target of broadcastTargets.value) {
+      if (target.sessionId === sessionId) continue
+      window.api.input(target.sessionId, data)
+    }
   }
 
   // ---- 性能监控面板 ----
@@ -780,6 +947,14 @@ export const useSessionStore = defineStore('sessions', () => {
     clearEditSessionRequest,
     sftpVisible,
     toggleSftp,
+    broadcastEnabled,
+    broadcastTabIds,
+    broadcastTargets,
+    broadcastAllChecked,
+    toggleBroadcast,
+    toggleBroadcastTab,
+    toggleBroadcastAll,
+    sendInput,
     monitorTarget,
     openMonitor,
     closeMonitor,
@@ -789,6 +964,8 @@ export const useSessionStore = defineStore('sessions', () => {
     homeBySession,
     exitCodeBySession,
     setCwd,
+    tabStatus,
+    tabLabel,
     setHome,
     setLastExitCode,
     connect,
@@ -808,6 +985,9 @@ export const useSessionStore = defineStore('sessions', () => {
     setActivePane,
     closePane,
     closeTab,
+    closeOtherTabs,
+    closeTabsToRight,
+    closeAllTabs,
     refreshSaved,
     deleteSaved,
     saveSession
