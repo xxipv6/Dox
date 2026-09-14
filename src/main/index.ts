@@ -28,6 +28,23 @@ import { setupAutoUpdater } from './updater'
 const mainDir = dirname(fileURLToPath(import.meta.url))
 
 /*
+ * 良性流写错误兜底：关 pty / 断连接时打到已死管道的在途写，会在写完成回调里
+ * 异步冒出 EAGAIN/EPIPE（node-pty 1.1.0 的 ConPTY 管道没挂 error 监听，
+ * postinstall 已补，见 scripts/fix-node-pty-perms.mjs；这里再兜一层别的残余
+ * 写路径）。Electron 对 uncaughtException 的默认反应是弹原生模态框 ——
+ * 主进程整个冻住、界面全无响应，比错误本身严重得多。
+ * 只吞 write EAGAIN/EPIPE 这一类；其余照常上抛（维持默认语义）。
+ */
+process.on('uncaughtException', (err) => {
+  const code = (err as NodeJS.ErrnoException).code
+  if (code === 'EAGAIN' || code === 'EPIPE') {
+    console.warn(`[main] 忽略良性的流写错误（${code}）：${err.message}`)
+    return
+  }
+  throw err
+})
+
+/*
  * 单实例（CLI 伴侣）：必须在 ready 之前注册。
  * 没拿到锁 = 已有一个实例在跑，本进程的 --cli 参数会经 second-instance
  * 交给它。这里用 app.exit 而不是 app.quit：ready 之前调 quit 不阻止
