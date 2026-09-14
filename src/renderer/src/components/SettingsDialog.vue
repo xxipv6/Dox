@@ -3,6 +3,7 @@ import { onMounted, ref, watch } from 'vue'
 import { FONT_PRESETS, UI_THEME_OPTIONS, useSettingsStore } from '../stores/settings'
 import { AUTO_THEME_ID, TERMINAL_THEMES } from '../utils/themes'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
+import { errorText } from '../utils/errors'
 import type { AiProvider, LocalShellInfo } from '@shared/types'
 
 const settings = useSettingsStore()
@@ -28,7 +29,9 @@ async function installCli(): Promise<void> {
   try {
     cliInstallResult.value = await window.api.cliInstall()
   } catch (err) {
-    cliInstallError.value = err instanceof Error ? err.message : String(err)
+    // errorText 剥掉 Electron 的 IPC 包装（「Error invoking remote method ...」），
+    // 用户看到的是安装器自己那句话
+    cliInstallError.value = errorText(err)
   }
 }
 
@@ -100,250 +103,222 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div v-if="settings.dialogVisible" class="overlay" @click.self="settings.dialogVisible = false">
-    <div class="dialog">
-      <div class="dialog-header">
-        <span>设置</span>
-        <button class="close-btn" @click="settings.dialogVisible = false">×</button>
-      </div>
-
-      <div class="field">
-        <label>界面主题</label>
-        <div class="segmented">
-          <button
-            v-for="opt in UI_THEME_OPTIONS"
-            :key="opt.id"
-            :class="{ active: settings.uiTheme === opt.id }"
-            @click="settings.uiTheme = opt.id"
-          >
-            {{ opt.name }}
-          </button>
+  <Transition name="pop">
+    <div
+      v-if="settings.dialogVisible"
+      class="overlay"
+      @click.self="settings.dialogVisible = false"
+    >
+      <div class="dialog pop-surface">
+        <div class="dialog-header">
+          <span>设置</span>
+          <button class="close-btn" @click="settings.dialogVisible = false">×</button>
         </div>
-        <p class="sub-note">
-          跟随系统时，切换操作系统的深浅色设置会实时生效。侧栏顶部的按钮可以随时一键切换。
-        </p>
-      </div>
 
-      <div class="field">
-        <label>终端配色方案</label>
-        <div class="theme-list">
-          <div
-            class="theme-item"
-            :class="{ active: settings.themeId === AUTO_THEME_ID }"
-            @click="settings.themeId = AUTO_THEME_ID"
-          >
-            <!--
-              用 currentPreset 取色：themeId 是 auto 时它已经解析成了当前界面主题
-              对应的那套，所以这一格显示的正是「选它会得到什么」。
-            -->
-            <span
-              class="swatch"
-              :style="{
-                background: settings.currentPreset.theme.background,
-                color: settings.currentPreset.theme.foreground,
-                borderColor: settings.currentPreset.theme.selectionBackground
-              }"
-              >A$</span
+        <div class="field">
+          <label>界面主题</label>
+          <div class="segmented">
+            <button
+              v-for="opt in UI_THEME_OPTIONS"
+              :key="opt.id"
+              :class="{ active: settings.uiTheme === opt.id }"
+              @click="settings.uiTheme = opt.id"
             >
-            <span>跟随界面主题</span>
+              {{ opt.name }}
+            </button>
           </div>
+          <p class="sub-note">
+            跟随系统时，切换操作系统的深浅色设置会实时生效。侧栏顶部的按钮可以随时一键切换。
+          </p>
+        </div>
 
-          <div class="divider"></div>
-
-          <div
-            v-for="preset in TERMINAL_THEMES"
-            :key="preset.id"
-            class="theme-item"
-            :class="{ active: settings.themeId === preset.id }"
-            @click="settings.themeId = preset.id"
-          >
-            <span
-              class="swatch"
-              :style="{
-                background: preset.theme.background,
-                color: preset.theme.foreground,
-                borderColor: preset.theme.selectionBackground
-              }"
-              >A$</span
+        <div class="field">
+          <label>终端配色方案</label>
+          <div class="theme-list">
+            <div
+              class="theme-item"
+              :class="{ active: settings.themeId === AUTO_THEME_ID }"
+              @click="settings.themeId = AUTO_THEME_ID"
             >
-            <span>{{ preset.name }}</span>
+              <!--
+                用 currentPreset 取色：themeId 是 auto 时它已经解析成了当前界面主题
+                对应的那套，所以这一格显示的正是「选它会得到什么」。
+              -->
+              <span
+                class="swatch"
+                :style="{
+                  background: settings.currentPreset.theme.background,
+                  color: settings.currentPreset.theme.foreground,
+                  borderColor: settings.currentPreset.theme.selectionBackground
+                }"
+                >A$</span
+              >
+              <span>跟随界面主题</span>
+            </div>
+
+            <div class="divider"></div>
+
+            <div
+              v-for="preset in TERMINAL_THEMES"
+              :key="preset.id"
+              class="theme-item"
+              :class="{ active: settings.themeId === preset.id }"
+              @click="settings.themeId = preset.id"
+            >
+              <span
+                class="swatch"
+                :style="{
+                  background: preset.theme.background,
+                  color: preset.theme.foreground,
+                  borderColor: preset.theme.selectionBackground
+                }"
+                >A$</span
+              >
+              <span>{{ preset.name }}</span>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="field">
-        <label>终端字体</label>
-        <select v-model="settings.fontId">
-          <option v-for="f in FONT_PRESETS" :key="f.id" :value="f.id">{{ f.name }}</option>
-        </select>
-        <label class="checkbox">
-          <input v-model="settings.ligatures" type="checkbox" />
-          启用字体连字（<code>-&gt;</code> <code>=&gt;</code> 等合字）
-        </label>
-        <p class="sub-note">
-          连字需要切换到 DOM 渲染器，大数据量输出时性能低于 WebGL；切换后需重开标签页生效。
-        </p>
-        <label class="checkbox">
-          <input v-model="settings.suggestPortForward" type="checkbox" />
-          检测到服务监听时建议端口转发
-        </label>
-        <p class="sub-note">
-          终端输出里出现 localhost:端口号 这类服务横幅时，右下角弹出「转发到本机」一键建议。
-        </p>
-        <label class="checkbox">
-          <input v-model="settings.portSentinel" type="checkbox" />
-          端口哨兵：新出现的监听端口弹警告
-        </label>
-        <p class="sub-note">
-          需要安装远程助手。连接建立后**新出现**的监听端口会弹警告并反查进程名，点击直达性能监控的连接表；已有服务不打扰。
-        </p>
-      </div>
-
-      <div class="field">
-        <label class="checkbox">
-          <input v-model="settings.outputHighlight" type="checkbox" />
-          输出高亮：IP / 日志级别 / error 关键字
-        </label>
-        <p class="sub-note">
-          给输出里匹配到的片段上色（内置规则，配色跟随终端主题）。只影响显示、不改写输出字节；
-          vim / tmux 这类全屏程序走备用屏，自动不生效，不会跟它们自己的重绘打架。
-        </p>
-      </div>
-
-      <div class="field">
-        <label>终端字号：{{ settings.fontSize }}px</label>
-        <input v-model.number="settings.fontSize" type="range" min="10" max="24" step="1" />
-      </div>
-
-      <div class="field">
-        <label>本地终端 Shell</label>
-        <select v-model="settings.localShellId">
-          <option value="">自动（Windows 优先 cmd，macOS/Linux 跟随 $SHELL）</option>
-          <option v-for="s in shells" :key="s.id" :value="s.id">{{ s.name }}</option>
-        </select>
-        <p class="sub-note">
-          新开的本地终端生效。支持 shell integration 的 shell 会实时上报工作目录与命令退出码；
-          cmd 只能上报目录（无退出码），WSL 暂不支持。
-        </p>
-      </div>
-
-      <div class="field">
-        <label>本地终端默认目录</label>
-        <div class="dir-pick-row">
-          <span class="dir-pick-value" :title="settings.localDefaultDir || '跟随系统（家目录）'">
-            {{ settings.localDefaultDir || '跟随系统（家目录）' }}
-          </span>
-          <button class="dir-pick-btn" @click="pickDefaultDir">选择目录…</button>
-          <button
-            v-if="settings.localDefaultDir"
-            class="dir-pick-clear"
-            title="清除（回到家目录）"
-            @click="settings.localDefaultDir = ''"
-          >×</button>
-        </div>
-        <p class="sub-note">
-          设置后新开本地终端一律从这个目录启动；不设置则回家目录。
-          目录后来被删了会自动落回家目录。
-        </p>
-      </div>
-
-      <div class="field">
-        <label>命令行工具（dox 命令）</label>
-        <div class="dir-pick-row">
-          <span class="dir-pick-value">
-            {{ cliInstallResult ? `已装到 ${cliInstallResult.path}` : 'dox . 当前目录开标签 · dox root@1.2.3.4 直连' }}
-          </span>
-          <button class="dir-pick-btn" @click="installCli">
-            {{ cliInstallResult ? '重新安装' : '安装' }}
-          </button>
-        </div>
-        <p v-if="cliInstallResult?.note" class="sub-note">{{ cliInstallResult.note }}</p>
-        <p v-else-if="cliInstallError" class="sub-note" style="color: var(--danger-text, #c00)">
-          安装失败：{{ cliInstallError }}
-        </p>
-        <p v-else class="sub-note">
-          在任意终端里敲 <code>dox .</code> 让 Dox 在当前目录开标签，<code>dox user@host</code> 直接连设备
-          （已保存的设备用库存凭证直连，没存过会预填表单）。
-        </p>
-      </div>
-
-      <div class="field">
-        <label>AI 容量（标题栏速览）</label>
-        <div v-if="aiAccounts.length" class="ai-acc-list">
-          <div v-for="a in aiAccounts" :key="a.id" class="ai-acc-row">
-            <span class="ai-acc-name">{{ a.name }}</span>
-            <span class="ai-acc-provider">{{ AI_PROVIDERS.find((p) => p.id === a.provider)?.name ?? a.provider }}</span>
-            <button class="ai-del" title="删除账号" @click="removeAiAccount(a.id)">×</button>
-          </div>
-        </div>
-        <div class="ai-add">
-          <select v-model="aiProvider" class="ai-provider-select">
-            <option v-for="p in AI_PROVIDERS" :key="p.id" :value="p.id">{{ p.name }}</option>
+        <div class="field">
+          <label>终端字体</label>
+          <select v-model="settings.fontId">
+            <option v-for="f in FONT_PRESETS" :key="f.id" :value="f.id">{{ f.name }}</option>
           </select>
-          <input v-model="aiName" class="ai-name-input" placeholder="备注名（可空）" spellcheck="false" />
-          <input
-            v-model="aiKey"
-            class="ai-key-input"
-            type="password"
-            placeholder="API Key"
-            spellcheck="false"
-            @keydown.enter="addAiAccount"
-          />
-          <button class="ai-add-btn" :disabled="!aiKey.trim() || aiBusy" @click="addAiAccount">
-            添加
-          </button>
+          <label class="checkbox">
+            <input v-model="settings.ligatures" type="checkbox" />
+            启用字体连字（<code>-&gt;</code> <code>=&gt;</code> 等合字）
+          </label>
+          <p class="sub-note">
+            连字需要切换到 DOM 渲染器，大数据量输出时性能低于 WebGL；切换后需重开标签页生效。
+          </p>
+          <label class="checkbox">
+            <input v-model="settings.suggestPortForward" type="checkbox" />
+            检测到服务监听时建议端口转发
+          </label>
+          <p class="sub-note">
+            终端输出里出现 localhost:端口号 这类服务横幅时，右下角弹出「转发到本机」一键建议。
+          </p>
+          <label class="checkbox">
+            <input v-model="settings.portSentinel" type="checkbox" />
+            端口哨兵：新出现的监听端口弹警告
+          </label>
+          <p class="sub-note">
+            需要安装远程助手。连接建立后**新出现**的监听端口会弹警告并反查进程名，点击直达性能监控的连接表；已有服务不打扰。
+          </p>
         </div>
-        <p class="sub-note">
-          配置后标题栏显示已用容量（Kimi/GLM 看 5 小时滚动窗与每周窗，DeepSeek 看余额），
-          每 5 分钟自动刷新；Key 经系统钥匙串加密存储，只用于配额查询。
-          有多个同平台账号时，用「备注名」区分（标题栏显示的是备注名）。
-        </p>
-      </div>
 
-      <p class="note">快捷键自定义在后续版本提供。</p>
+        <div class="field">
+          <label class="checkbox">
+            <input v-model="settings.outputHighlight" type="checkbox" />
+            输出高亮：IP / 日志级别 / error 关键字
+          </label>
+          <p class="sub-note">
+            给输出里匹配到的片段上色（内置规则，配色跟随终端主题）。只影响显示、不改写输出字节；
+            vim / tmux 这类全屏程序走备用屏，自动不生效，不会跟它们自己的重绘打架。
+          </p>
+        </div>
+
+        <div class="field">
+          <label>终端字号：{{ settings.fontSize }}px</label>
+          <input v-model.number="settings.fontSize" type="range" min="10" max="24" step="1" />
+        </div>
+
+        <div class="field">
+          <label>本地终端 Shell</label>
+          <select v-model="settings.localShellId">
+            <option value="">自动（Windows 优先 cmd，macOS/Linux 跟随 $SHELL）</option>
+            <option v-for="s in shells" :key="s.id" :value="s.id">{{ s.name }}</option>
+          </select>
+          <p class="sub-note">
+            新开的本地终端生效。支持 shell integration 的 shell 会实时上报工作目录与命令退出码；
+            cmd 只能上报目录（无退出码），WSL 暂不支持。
+          </p>
+        </div>
+
+        <div class="field">
+          <label>本地终端默认目录</label>
+          <div class="dir-pick-row">
+            <span class="dir-pick-value" :title="settings.localDefaultDir || '跟随系统（家目录）'">
+              {{ settings.localDefaultDir || '跟随系统（家目录）' }}
+            </span>
+            <button class="dir-pick-btn" @click="pickDefaultDir">选择目录…</button>
+            <button
+              v-if="settings.localDefaultDir"
+              class="dir-pick-clear"
+              title="清除（回到家目录）"
+              @click="settings.localDefaultDir = ''"
+            >×</button>
+          </div>
+          <p class="sub-note">
+            设置后新开本地终端一律从这个目录启动；不设置则回家目录。
+            目录后来被删了会自动落回家目录。
+          </p>
+        </div>
+
+        <div class="field">
+          <label>命令行工具（dox 命令）</label>
+          <div class="dir-pick-row">
+            <span class="dir-pick-value">
+              {{ cliInstallResult ? `已装到 ${cliInstallResult.path}` : 'dox . 当前目录开标签 · dox root@1.2.3.4 直连' }}
+            </span>
+            <button class="dir-pick-btn" @click="installCli">
+              {{ cliInstallResult ? '重新安装' : '安装' }}
+            </button>
+          </div>
+          <p v-if="cliInstallResult?.note" class="sub-note">{{ cliInstallResult.note }}</p>
+          <p v-else-if="cliInstallError" class="sub-note error">安装失败：{{ cliInstallError }}</p>
+          <p v-else class="sub-note">
+            在任意终端里敲 <code>dox .</code> 让 Dox 在当前目录开标签，<code>dox user@host</code> 直接连设备
+            （已保存的设备用库存凭证直连，没存过会预填表单）。
+          </p>
+        </div>
+
+        <div class="field">
+          <label>AI 容量（标题栏速览）</label>
+          <div v-if="aiAccounts.length" class="ai-acc-list">
+            <div v-for="a in aiAccounts" :key="a.id" class="ai-acc-row">
+              <span class="ai-acc-name">{{ a.name }}</span>
+              <span class="ai-acc-provider">{{ AI_PROVIDERS.find((p) => p.id === a.provider)?.name ?? a.provider }}</span>
+              <button class="ai-del" title="删除账号" @click="removeAiAccount(a.id)">×</button>
+            </div>
+          </div>
+          <div class="ai-add">
+            <select v-model="aiProvider" class="ai-provider-select">
+              <option v-for="p in AI_PROVIDERS" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+            <input v-model="aiName" class="ai-name-input" placeholder="备注名（可空）" spellcheck="false" />
+            <input
+              v-model="aiKey"
+              class="ai-key-input"
+              type="password"
+              placeholder="API Key"
+              spellcheck="false"
+              @keydown.enter="addAiAccount"
+            />
+            <button class="ai-add-btn" :disabled="!aiKey.trim() || aiBusy" @click="addAiAccount">
+              添加
+            </button>
+          </div>
+          <p class="sub-note">
+            配置后标题栏显示已用容量（Kimi/GLM 看 5 小时滚动窗与每周窗，DeepSeek 看余额），
+            每 5 分钟自动刷新；Key 经系统钥匙串加密存储，只用于配额查询。
+            有多个同平台账号时，用「备注名」区分（标题栏显示的是备注名）。
+          </p>
+        </div>
+
+        <p class="note">快捷键自定义在后续版本提供。</p>
+      </div>
     </div>
-  </div>
+  </Transition>
 </template>
 
 <style scoped>
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
+/*
+ * 只留差异：遮罩/弹窗/关闭键的基础长相在 styles.css 的控件词汇表里
+ * （.overlay / .dialog / .pop-surface / .close-btn）。
+ */
 .dialog {
   width: 380px;
-  max-height: 88vh;
-  overflow-y: auto;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  padding: var(--sp-4);
-  box-shadow: var(--shadow-lg);
-}
-.dialog-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: var(--fs-lg);
-  font-weight: var(--fw-semibold);
-  margin-bottom: var(--sp-4);
-  color: var(--fg);
-}
-.close-btn {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  font-size: var(--fs-xl);
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease-out);
-}
-.close-btn:hover {
-  color: var(--fg);
 }
 .field {
   margin-bottom: var(--sp-4);
@@ -367,7 +342,7 @@ onMounted(async () => {
 }
 .segmented button {
   flex: 1;
-  padding: 5px 0;
+  padding: var(--sp-1) 0;
   border: none;
   background: none;
   border-radius: var(--r-sm);
@@ -376,10 +351,14 @@ onMounted(async () => {
   cursor: pointer;
   transition:
     background-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .segmented button:hover {
   color: var(--fg);
+}
+.segmented button:active {
+  transform: translateY(0.5px);
 }
 .segmented button.active {
   background: var(--bg-panel);
@@ -402,7 +381,7 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 6px var(--sp-2);
+  padding: var(--sp-2);
   border-radius: var(--r-md);
   border: 1px solid transparent;
   font-size: var(--fs-md);
@@ -414,6 +393,9 @@ onMounted(async () => {
 }
 .theme-item:hover {
   background: var(--bg-hover);
+}
+.theme-item:active {
+  background: var(--bg-active);
 }
 .theme-item.active {
   border-color: var(--accent);
@@ -428,7 +410,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: center;
   font-size: var(--fs-xs);
-  font-family: monospace;
+  font-family: var(--font-mono);
   flex-shrink: 0;
 }
 /*
@@ -465,7 +447,7 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   color: var(--fg);
-  padding: 7px 10px;
+  padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-md);
   outline: none;
   transition: border-color var(--dur-fast) var(--ease-out);
@@ -485,25 +467,25 @@ select:focus {
 /* 用 -text 那一档：白色对勾压在 --accent（#0ea5e9）上只有 2.8:1，看不清 */
 .checkbox input {
   accent-color: var(--accent-text);
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   cursor: pointer;
 }
 .checkbox code {
-  font-family: Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--accent-text);
 }
 .sub-note {
   font-size: var(--fs-xs);
   color: var(--fg-muted);
   margin: var(--sp-2) 0 0;
-  line-height: 1.6;
+  line-height: var(--lh-base);
 }
 /* 默认目录：只读展示 + 选择按钮（路径手输容易错，只给目录框） */
 .dir-pick-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 .dir-pick-value {
   flex: 1;
@@ -515,45 +497,57 @@ select:focus {
   color: var(--fg-secondary);
   background: var(--bg-inset, var(--bg-hover));
   border-radius: var(--r-sm);
-  padding: 5px 8px;
+  padding: var(--sp-1) var(--sp-2);
 }
 .dir-pick-btn {
   flex-shrink: 0;
   font-size: var(--fs-sm);
-  padding: 5px 10px;
+  padding: var(--sp-1) var(--sp-3);
   border-radius: var(--r-sm);
   background: var(--accent-soft);
   color: var(--accent-text);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .dir-pick-btn:hover {
   filter: brightness(1.05);
 }
+.dir-pick-btn:active {
+  transform: translateY(0.5px);
+}
 .dir-pick-clear {
   flex-shrink: 0;
   font-size: var(--fs-sm);
-  padding: 5px 9px;
+  padding: var(--sp-1) var(--sp-3);
   border-radius: var(--r-sm);
   color: var(--fg-muted);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 .dir-pick-clear:hover {
   background: var(--bg-hover);
   color: var(--fg);
+}
+.dir-pick-clear:active {
+  background: var(--bg-active);
 }
 
 /* AI 容量账号管理 */
 .ai-acc-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--sp-1);
   margin-bottom: var(--sp-2);
 }
 .ai-acc-row {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 5px var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   border-radius: var(--r-sm);
   font-size: var(--fs-sm);
 }
@@ -579,12 +573,20 @@ select:focus {
   color: var(--fg-muted);
   font-size: var(--fs-md);
   cursor: pointer;
-  padding: 0 4px;
-  border-radius: var(--r-xs);
+  /* 命中区：13px 的字 + 1px 上下内边距才够到 24px 那一档 */
+  padding: var(--sp-1) 6px;
+  border-radius: var(--r-sm);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .ai-del:hover {
   color: var(--danger-text);
   background: var(--danger-soft);
+}
+.ai-del:active {
+  transform: translateY(0.5px);
 }
 .ai-add {
   display: flex;
@@ -600,7 +602,7 @@ select:focus {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   color: var(--fg);
-  padding: 6px 8px;
+  padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-sm);
   outline: none;
   min-width: 0;
@@ -621,16 +623,29 @@ select:focus {
   border-radius: var(--r-md);
   color: var(--fg-on-accent);
   font-size: var(--fs-sm);
-  padding: 6px 12px;
+  padding: var(--sp-1) var(--sp-3);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.ai-add-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.ai-add-btn:active:not(:disabled) {
+  transform: translateY(0.5px);
 }
 .ai-add-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.45;
   cursor: default;
 }
 .note {
   font-size: var(--fs-sm);
   color: var(--fg-muted);
   margin: 0;
+}
+/* 说明句里的错误态：比普通 --fg-muted 更重，但不喧宾夺主 */
+.sub-note.error {
+  color: var(--danger-text);
 }
 </style>

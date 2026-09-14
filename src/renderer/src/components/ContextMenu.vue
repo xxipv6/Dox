@@ -71,61 +71,50 @@ useEscapeToClose(
       @contextmenu.prevent="emit('close')"
       @wheel="emit('close')"
     ></div>
-    <div ref="el" class="context-menu" :style="{ left: pos.left + 'px', top: pos.top + 'px' }">
-      <button
-        v-for="item in items"
-        :key="item.id"
-        class="menu-item"
-        :class="{ danger: item.danger }"
-        :disabled="item.disabled"
-        @click="emit('select', item.id)"
+    <!--
+      appear 是必须的：这个组件的挂载/卸载由父组件的 v-if 决定（存在即打开），
+      而 <Transition> 默认不在首次渲染时播放进场动画。代价是**退场是瞬时的** ——
+      要有退场动画得把 v-if 挪进组件内部，那是另一件事。
+    -->
+    <Transition name="pop" appear>
+      <div
+        ref="el"
+        class="context-menu pop-surface"
+        :style="{ left: pos.left + 'px', top: pos.top + 'px' }"
       >
-        <Icon v-if="item.icon" :name="item.icon" :size="14" />
-        <span>{{ item.label }}</span>
-      </button>
-    </div>
+        <button
+          v-for="item in items"
+          :key="item.id"
+          class="menu-item"
+          :class="{ danger: item.danger }"
+          :disabled="item.disabled"
+          @click="emit('select', item.id)"
+        >
+          <Icon v-if="item.icon" :name="item.icon" :size="14" />
+          <span>{{ item.label }}</span>
+        </button>
+      </div>
+    </Transition>
   </Teleport>
 </template>
 
 <style scoped>
+/*
+ * 菜单项本身（含悬停/按下/禁用）是 styles.css 里的全局 .menu-item ——
+ * 终端里的右键菜单、溢出清单将来都该长成这一个样子。
+ * 这里只留「菜单这一层」的差异：位置、宽度、内衬。
+ */
 .menu-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 200;
+  z-index: var(--z-menu);
 }
 .context-menu {
   position: fixed;
-  z-index: 201;
+  /* +1：内容必须压在它自己那层透明背板之上 */
+  z-index: calc(var(--z-menu) + 1);
   min-width: 168px;
-  padding: 4px;
-  background: var(--bg-hover);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  box-shadow: var(--shadow-lg);
-}
-.menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 10px;
-  background: none;
-  border: none;
-  border-radius: var(--r-xs);
-  color: var(--fg);
-  font-size: var(--fs-md);
-  text-align: left;
-  cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease-out);
-}
-.menu-item:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-.menu-item.danger {
-  color: var(--danger-text);
-}
-.menu-item:disabled {
-  color: var(--fg-muted);
-  cursor: default;
+  padding: var(--sp-1);
+  border-radius: var(--r-md);
 }
 </style>

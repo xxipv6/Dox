@@ -2,6 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { AiUsageResult, AiUsageSnapshot } from '@shared/types'
 import { useSettingsStore } from '../stores/settings'
+import { useEscapeToClose } from '../composables/useEscapeToClose'
+import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
 
 /**
@@ -83,8 +85,9 @@ async function refresh(): Promise<void> {
     snapshot.value = await api.aiUsageRefresh()
     refreshError.value = ''
   } catch (err) {
-    // 主进程 handler 异常：不能静默吞成「转了一圈什么都没发生」
-    refreshError.value = err instanceof Error ? err.message : String(err)
+    // 主进程 handler 异常：不能静默吞成「转了一圈什么都没发生」。
+    // 文案过 errorText 剥掉 IPC 包装，和别处的错误出口保持一致
+    refreshError.value = errorText(err)
   } finally {
     refreshing.value = false
   }
@@ -94,6 +97,15 @@ function openSettings(): void {
   open.value = false
   settings.dialogVisible = true
 }
+
+/*
+ * Esc 关浮层。这是全应用浮层的统一约定（其余浮层都走这个 composable），
+ * 这里原先漏了 —— 一个能点开的浮层按 Esc 没反应，用户会以为它卡住。
+ */
+useEscapeToClose(
+  () => open.value,
+  () => (open.value = false)
+)
 </script>
 
 <template>
@@ -126,65 +138,73 @@ function openSettings(): void {
 
     <!-- 明细浮层：点击其他区域关闭 -->
     <div v-if="open" class="ai-backdrop" @click="open = false"></div>
-    <div v-if="open" class="ai-pop">
-      <div class="ai-pop-head">
-        <span>AI 容量</span>
-        <span class="ai-pop-actions">
-          <button class="ai-icon-btn" :class="{ spin: refreshing }" title="刷新" @click="refresh">
-            <Icon name="refresh" :size="13" />
-          </button>
-          <button class="ai-icon-btn" title="管理账号" @click="openSettings">
-            <Icon name="settings" :size="13" />
-          </button>
-        </span>
-      </div>
-
-      <div v-for="a in accounts" :key="a.id" class="ai-card">
-        <div class="ai-card-head">
-          <span class="ai-name">{{ a.name }}</span>
-          <span class="ai-provider">{{ PROVIDER_LABEL[a.provider] ?? a.provider }}<template v-if="a.membership"> · {{ a.membership }}</template></span>
+    <!-- 这个组件常驻挂载（v-if 在内部），所以进出场都能播 -->
+    <Transition name="pop" appear>
+      <div v-if="open" class="ai-pop pop-surface">
+        <div class="ai-pop-head">
+          <span>AI 容量</span>
+          <span class="ai-pop-actions">
+            <button
+              class="icon-btn"
+              :class="{ spin: refreshing }"
+              title="刷新"
+              @click="refresh"
+            >
+              <Icon name="refresh" :size="13" />
+            </button>
+            <button class="icon-btn" title="管理账号" @click="openSettings">
+              <Icon name="settings" :size="13" />
+            </button>
+          </span>
         </div>
-        <div v-if="!a.ok" class="ai-err">{{ a.error }}</div>
-        <template v-else>
-          <div v-if="a.fiveHourUsed !== undefined" class="ai-bar-row">
-            <span class="ai-bar-label">5 小时窗</span>
-            <span class="ai-bar">
-              <span
-                class="ai-bar-fill"
-                :class="level(a)"
-                :style="{ width: `${Math.min(100, a.fiveHourUsed)}%` }"
-              ></span>
-            </span>
-            <span class="ai-bar-val">{{ Math.round(a.fiveHourUsed) }}%</span>
-          </div>
-          <div v-if="a.weeklyUsed !== undefined" class="ai-bar-row">
-            <span class="ai-bar-label">每周</span>
-            <span class="ai-bar">
-              <span
-                class="ai-bar-fill"
-                :class="(a.weeklyUsed ?? 0) >= 90 ? 'danger' : (a.weeklyUsed ?? 0) >= 70 ? 'warn' : 'ok'"
-                :style="{ width: `${Math.min(100, a.weeklyUsed)}%` }"
-              ></span>
-            </span>
-            <span class="ai-bar-val">{{ Math.round(a.weeklyUsed) }}%</span>
-          </div>
-          <div v-if="a.totalBalance !== undefined" class="ai-line">
-            余额 {{ a.currency ?? '' }}{{ a.totalBalance.toFixed(2) }}
-            <template v-if="a.grantedBalance">（含赠送 {{ a.grantedBalance.toFixed(2) }}）</template>
-          </div>
-          <div v-if="a.mcpRemaining !== undefined" class="ai-line">MCP 本月剩余 {{ a.mcpRemaining }} 次</div>
-          <div class="ai-line dim">
-            <template v-if="a.fiveHourReset">5h 窗 {{ fmtTime(a.fiveHourReset) }} 重置</template>
-            <template v-if="a.weeklyReset"> · 每周 {{ fmtTime(a.weeklyReset) }} 重置</template>
-          </div>
-        </template>
-      </div>
 
-      <div v-if="refreshError" class="ai-foot" style="color: var(--danger-text)">{{ refreshError }}</div>
-      <div v-else-if="snapshot" class="ai-foot">
-        更新于 {{ fmtTime(snapshot.fetchedAt) }} · 每 5 分钟自动刷新
+        <div v-for="a in accounts" :key="a.id" class="ai-card">
+          <div class="ai-card-head">
+            <span class="ai-name">{{ a.name }}</span>
+            <span class="ai-provider">{{ PROVIDER_LABEL[a.provider] ?? a.provider }}<template v-if="a.membership"> · {{ a.membership }}</template></span>
+          </div>
+          <div v-if="!a.ok" class="ai-err">{{ a.error }}</div>
+          <template v-else>
+            <div v-if="a.fiveHourUsed !== undefined" class="ai-bar-row">
+              <span class="ai-bar-label">5 小时窗</span>
+              <span class="ai-bar">
+                <span
+                  class="ai-bar-fill"
+                  :class="level(a)"
+                  :style="{ width: `${Math.min(100, a.fiveHourUsed)}%` }"
+                ></span>
+              </span>
+              <span class="ai-bar-val">{{ Math.round(a.fiveHourUsed) }}%</span>
+            </div>
+            <div v-if="a.weeklyUsed !== undefined" class="ai-bar-row">
+              <span class="ai-bar-label">每周</span>
+              <span class="ai-bar">
+                <span
+                  class="ai-bar-fill"
+                  :class="(a.weeklyUsed ?? 0) >= 90 ? 'danger' : (a.weeklyUsed ?? 0) >= 70 ? 'warn' : 'ok'"
+                  :style="{ width: `${Math.min(100, a.weeklyUsed)}%` }"
+                ></span>
+              </span>
+              <span class="ai-bar-val">{{ Math.round(a.weeklyUsed) }}%</span>
+            </div>
+            <div v-if="a.totalBalance !== undefined" class="ai-line">
+              余额 {{ a.currency ?? '' }}{{ a.totalBalance.toFixed(2) }}
+              <template v-if="a.grantedBalance">（含赠送 {{ a.grantedBalance.toFixed(2) }}）</template>
+            </div>
+            <div v-if="a.mcpRemaining !== undefined" class="ai-line">MCP 本月剩余 {{ a.mcpRemaining }} 次</div>
+            <div class="ai-line dim">
+              <template v-if="a.fiveHourReset">5h 窗 {{ fmtTime(a.fiveHourReset) }} 重置</template>
+              <template v-if="a.weeklyReset"> · 每周 {{ fmtTime(a.weeklyReset) }} 重置</template>
+            </div>
+          </template>
+        </div>
+
+        <div v-if="refreshError" class="ai-foot error">{{ refreshError }}</div>
+        <div v-else-if="snapshot" class="ai-foot">
+          更新于 {{ fmtTime(snapshot.fetchedAt) }} · 每 5 分钟自动刷新
+        </div>
       </div>
-    </div>
+    </Transition>
   </span>
 </template>
 
@@ -197,33 +217,38 @@ function openSettings(): void {
 }
 .ai-pill {
   display: inline-flex;
-  gap: 8px;
+  gap: var(--sp-2);
   align-items: center;
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: none;
   max-width: min(560px, 42vw);
   overflow: hidden;
-  padding: 3px 9px;
+  padding: var(--sp-1) var(--sp-3);
   cursor: pointer;
   font-size: var(--fs-xs);
-  transition: border-color var(--dur-fast) var(--ease-out);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .ai-pill:hover,
 .ai-pill.open {
   border-color: var(--accent-text);
 }
+.ai-pill:active {
+  transform: translateY(0.5px);
+}
 .ai-acc {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--sp-1);
   color: var(--fg-secondary);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   min-width: 0;
 }
 .ai-acc + .ai-acc {
-  padding-left: 8px;
+  padding-left: var(--sp-2);
   border-left: 1px solid var(--border);
 }
 .ai-acc-name {
@@ -240,7 +265,7 @@ function openSettings(): void {
 }
 .ai-window-label {
   color: var(--fg-muted);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 .ai-window.warn { color: var(--warning-text); }
 .ai-window.danger,
@@ -260,18 +285,16 @@ function openSettings(): void {
 .ai-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: var(--z-pill);
 }
 .ai-pop {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
-  z-index: 91;
+  /* +1：浮层压在它自己那层透明背板之上 */
+  z-index: calc(var(--z-pill) + 1);
   width: 280px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  box-shadow: var(--shadow-lg);
   padding: var(--sp-3);
 }
 .ai-pop-head {
@@ -287,20 +310,8 @@ function openSettings(): void {
   display: inline-flex;
   gap: 2px;
 }
-.ai-icon-btn {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  padding: 3px;
-  border-radius: var(--r-xs);
-  display: inline-flex;
-}
-.ai-icon-btn:hover {
-  color: var(--fg);
-  background: var(--bg-hover);
-}
-.ai-icon-btn.spin {
+/* 刷新中的自转：加载指示是「必要反馈」，所以它在减弱动效下也照转 */
+.icon-btn.spin {
   animation: ai-spin 0.9s linear infinite;
 }
 @keyframes ai-spin {
@@ -386,5 +397,9 @@ function openSettings(): void {
   padding-top: var(--sp-2);
   font-size: var(--fs-xs);
   color: var(--fg-muted);
+}
+/* 刷新失败：同样一行字，换成危险档（原来靠内联 style 写死） */
+.ai-foot.error {
+  color: var(--danger-text);
 }
 </style>

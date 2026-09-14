@@ -36,40 +36,45 @@ function closeTab(tab: SessionTab): void {
   <Teleport to="body">
     <!-- 点别处关掉（清单自己在 body 上，所以这一层只负责「点外面」） -->
     <div class="list-backdrop" @mousedown="emit('close')" @contextmenu.prevent="emit('close')"></div>
-    <div class="tab-list" @mousedown.stop>
-      <div class="tab-list-head">
-        <span>全部标签（{{ store.tabs.length }}）</span>
-        <span class="tab-list-tip">点一行跳过去，✕ 直接关</span>
-      </div>
-      <div class="tab-list-body">
-        <div
-          v-for="tab in store.tabs"
-          :key="tab.tabId"
-          class="tab-list-row"
-          :class="{ current: tab.tabId === store.activeTabId }"
-          @click="emit('select', tab)"
-        >
-          <span class="status-dot" :class="store.tabStatus(tab)"></span>
-          <!-- 标题必须与标签栏上那个是同一个串（store.tabLabel），否则对不上号 -->
-          <span class="row-title" :title="store.tabLabel(tab)">{{ store.tabLabel(tab) }}</span>
-          <button class="row-close" title="关闭这个标签" @click.stop="closeTab(tab)">
-            <Icon name="x" :size="12" />
-          </button>
+    <!-- appear：清单的挂载由父组件的 v-if 决定，进场动画得显式要 -->
+    <Transition name="pop" appear>
+      <div class="tab-list pop-surface" @mousedown.stop>
+        <div class="tab-list-head">
+          <span>全部标签（{{ store.tabs.length }}）</span>
+          <span class="tab-list-tip">点一行跳过去，✕ 直接关</span>
+        </div>
+        <div class="tab-list-body">
+          <div
+            v-for="tab in store.tabs"
+            :key="tab.tabId"
+            class="tab-list-row"
+            :class="{ current: tab.tabId === store.activeTabId }"
+            @click="emit('select', tab)"
+          >
+            <span class="status-dot" :class="store.tabStatus(tab)"></span>
+            <!-- 标题必须与标签栏上那个是同一个串（store.tabLabel），否则对不上号 -->
+            <span class="row-title" :title="store.tabLabel(tab)">{{ store.tabLabel(tab) }}</span>
+            <button class="row-close" title="关闭这个标签" @click.stop="closeTab(tab)">
+              <Icon name="x" :size="12" />
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </Transition>
   </Teleport>
 </template>
 
 <style scoped>
+/* 浮层的基础长相（材质、描边、阴影）在 styles.css 的 .pop-surface 里 */
 .list-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 200;
+  z-index: var(--z-menu);
 }
 .tab-list {
   position: fixed;
-  z-index: 201;
+  /* +1：清单压在它自己那层透明背板之上 */
+  z-index: calc(var(--z-menu) + 1);
   /*
    * 贴在标签栏右下角：清单是标签栏的一部分，从标签栏长出来最自然。
    * 用 fixed + top/right 而不是跟着 ▾ 按钮定位 —— 标签栏高度固定 44px，
@@ -81,17 +86,14 @@ function closeTab(tab: SessionTab): void {
   max-height: 70vh;
   display: flex;
   flex-direction: column;
-  background: var(--bg-hover);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  box-shadow: var(--shadow-lg);
+  border-radius: var(--r-md);
 }
 .tab-list-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--sp-2);
-  padding: 8px 10px;
+  padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border);
   color: var(--fg-secondary);
   font-size: var(--fs-sm);
@@ -101,20 +103,26 @@ function closeTab(tab: SessionTab): void {
 }
 .tab-list-body {
   overflow-y: auto;
-  padding: 4px;
+  padding: var(--sp-1);
 }
 .tab-list-row {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 6px 8px;
-  border-radius: var(--r-xs);
+  padding: var(--sp-2);
+  border-radius: var(--r-sm);
   color: var(--fg);
   font-size: var(--fs-md);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 .tab-list-row:hover {
   background: var(--bg-hover);
+}
+.tab-list-row:active {
+  background: var(--bg-active);
 }
 .tab-list-row.current {
   color: var(--accent-text);
@@ -132,17 +140,25 @@ function closeTab(tab: SessionTab): void {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 20px;
-  height: 20px;
+  /* 24px 命中区：一行里最容易误点的就是这枚 ✕，而它原来只有 20px */
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: none;
   color: var(--fg-muted);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .row-close:hover {
   color: var(--fg-on-accent);
   background: var(--danger-text);
+}
+.row-close:active {
+  transform: translateY(0.5px);
 }
 </style>

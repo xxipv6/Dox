@@ -305,6 +305,37 @@ if (process.argv.includes('--e2e')) {
     await win.waitForTimeout(900)
     check('能重新铺开（幂等）', (await visibleCells()) === 3)
 
+    /*
+     * ---- 标题条右上角是**关闭**，不是放大 ----
+     *
+     * 平铺时最常做的动作是「这一格看完了，关掉」；放大（只看这一个）留在双击标题条上。
+     * 这里先多开一个标签凑到 4 格，关掉一格之后仍是 3 个 —— 后面的暗色阶段按布局
+     * 快照恢复，标签数得跟前面一致，否则那一段的断言会连带失效。
+     */
+    await win.locator('.tab-new').click()
+    await win.waitForFunction(() => document.querySelectorAll('.tile').length === 4, undefined, {
+      timeout: 20000
+    })
+    await win.waitForTimeout(800)
+    const headBtns = await win.evaluate(() => ({
+      close: document.querySelectorAll('.tile-close').length,
+      zoom: document.querySelectorAll('.tile-zoom').length,
+      title: document.querySelector('.tile-close')?.getAttribute('title') ?? null
+    }))
+    check('每格标题条都有关闭键', headBtns.close === 4, JSON.stringify(headBtns))
+    check('放大按钮不再占着标题条（放大改为双击）', headBtns.zoom === 0, JSON.stringify(headBtns))
+    check('关闭键提示文案是「关闭」', (headBtns.title ?? '').includes('关闭'), String(headBtns.title))
+
+    const tabsBeforeClose = await win.locator('.tab').count()
+    await win.locator('.tile-close').first().click()
+    await win.waitForTimeout(1400)
+    check(
+      '点关闭键真的关掉了一个标签',
+      (await win.locator('.tab').count()) === tabsBeforeClose - 1,
+      `${tabsBeforeClose} → ${await win.locator('.tab').count()}`
+    )
+    check('关掉一格后仍在平铺（三格可见）', (await visibleCells()) === 3)
+
     await win.screenshot({ path: 'shots/tile-e2e.png' })
     console.log('  截图：shots/tile-e2e.png')
 

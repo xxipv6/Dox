@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, powerMonitor, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, nativeTheme, powerMonitor, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { applyNativeTheme, backgroundColorFor } from './theme'
 import { dirname, join } from 'node:path'
@@ -195,6 +195,20 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  /*
+   * Windows / Linux：把默认应用菜单整个摘掉。
+   *
+   * autoHideMenuBar 只是「不画出来」，菜单还在，它的**加速键**照样生效：
+   * F11 能切全屏（全屏不触发 maximize/unmaximize，标题栏那枚自绘按钮就停在
+   * 旧图标上），打包版还留着默认的 DevTools 快捷键。这台窗口本来就是
+   * frame:false 自绘标题栏，菜单没有任何存在理由。
+   *
+   * macOS 上**绝不能置空**：系统菜单栏是 Cmd+C/V/Q 这些编辑与退出快捷键的
+   * 唯一来源，置空会把它们一起废掉（Windows/Linux 的 Chromium 自带剪贴板
+   * 快捷键，不依赖菜单）。所以这条按平台分流，不是少写一个条件。
+   */
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+
   // 先把 nativeTheme 摆正：它决定 <select> 弹出层、滚动条与 confirm() 的外观，
   // 必须在建窗之前设好，否则第一帧的原生控件会是系统默认而不是用户的主题
   applyNativeTheme(settingsStore.get())

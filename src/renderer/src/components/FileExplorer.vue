@@ -51,6 +51,8 @@ const entries = ref<FileEntry[]>([])
 const loading = ref(false)
 let loadSeq = 0
 const errorMsg = ref('')
+/** 上次失败的那个动作本身（横幅上的「重试」重跑它，而不是刷新目录） */
+const retryAction = ref<(() => Promise<unknown>) | null>(null)
 const dragOver = ref(false)
 /** 容器标签但还没装容器助手：文件面板无米下锅，指路去装 */
 const agentMissing = ref(false)
@@ -316,6 +318,8 @@ async function load(dir?: string): Promise<void> {
     // 行却是旧目录的，用户会以为自己在删/改另一个目录的东西
     cwd.value = prev
     errorMsg.value = (dir ? '无法进入目录：' : '') + errorText(err)
+    // 进不去多半是掉的连接或临时权限问题，重试就是把这次导航再做一遍
+    retryAction.value = () => load(dir)
   } finally {
     if (seq === loadSeq) loading.value = false
   }
@@ -419,12 +423,11 @@ function openEntry(entry: FileEntry): void {
 async function submitNewDir(): Promise<void> {
   const name = newDirName.value.trim()
   if (name) {
-    try {
+    // 「新建」失败多半是权限或重名：把这一段交给 guard，重试才有东西可重跑
+    await guard(async () => {
       await window.api.sftpMkdir(fsSessionId.value, joinInCwd(name), ctrName.value)
       await load()
-    } catch (err) {
-      errorMsg.value = `新建文件夹失败：${errorText(err)}`
-    }
+    })
   }
   creatingDir.value = false
   newDirName.value = ''
@@ -439,44 +442,77 @@ function startRename(entry: FileEntry): void {
 async function submitRename(entry: FileEntry): Promise<void> {
   const name = renameValue.value.trim()
   if (name && name !== entry.name) {
-    try {
+    await guard(async () => {
       await window.api.sftpRename(fsSessionId.value, entry.path, joinInCwd(name), ctrName.value)
       await load()
-    } catch (err) {
-      errorMsg.value = `重命名失败：${errorText(err)}`
-    }
+    })
   }
   renamingPath.value = null
 }
 
 // ---- 删除 / 下载 / 上传 ----
+/** 删一次（不含确认）。拆出来是为了让「重试」复用同一段，不必再问一遍 */
+async function deleteNow(entry: FileEntry): Promise<void> {
+  await window.api.sftpDelete(fsSessionId.value, entry.path, entry.isDir, ctrName.value)
+  await load()
+}
+
 async function removeEntry(entry: FileEntry): Promise<void> {
   const hint = entry.isDir ? `目录 ${entry.name} 及其全部内容（递归删除，不可恢复）` : `文件 ${entry.name}`
   if (!confirm(`确认删除${hint}？`)) return
-  try {
-    await window.api.sftpDelete(fsSessionId.value, entry.path, entry.isDir, ctrName.value)
-    await load()
-  } catch (err) {
-    errorMsg.value = `删除失败：${errorText(err)}`
-  }
+  await guard(() => deleteNow(entry))
 }
 
-/** 统一收口：之前这些调用是 fire-and-forget，出错时界面上完全没反应 */
+/**
+ * 统一收口：之前这些调用是 fire-and-forget，出错时界面上完全没反应。
+ *
+ * 失败时除了写错误文案，还把**这次动作本身**记下来给横幅上的「重试」——
+ * 重试必须是「重做刚才那件事」，不是「刷新目录」（后者看起来像重试，
+ * 实际什么也没重做，用户会以为问题解决了）。
+ */
 async function guard(action: () => Promise<unknown>): Promise<void> {
   try {
     await action()
     errorMsg.value = ''
+    retryAction.value = null
   } catch (err) {
     errorMsg.value = errorText(err)
+    retryAction.value = action
   }
 }
 
+/** 重跑上次失败的动作（确认过的那次删除不再二次确认） */
+async function retryLast(): Promise<void> {
+  const action = retryAction.value
+  if (action) await guard(action)
+}
+
+/** 手动关掉错误横幅（有些错误用户看完就够了，不需要占着地方） */
+function dismissError(): void {
+  errorMsg.value = ''
+  retryAction.value = null
+}
+
+/**
+ * 正在等「保存到哪」这一行的路径。
+ *
+ * 单文件下载会先弹系统保存框，再开始传输 —— 弹框之前浏览器/Electron 不给任何
+ * 信号，用户点了「下载」以后界面一动不动，很容易以为没点中而再点一次。
+ * 这里把那颗按钮换成转圈，等框弹出来为止（后面的进度归传输队列管）。
+ */
+const pendingDownload = ref<string | null>(null)
+
 async function downloadEntry(entry: FileEntry): Promise<void> {
-  await guard(() =>
-    entry.isDir
-      ? window.api.downloadDir(fsSessionId.value, entry.path, ctrName.value)
-      : window.api.download(fsSessionId.value, entry.path, entry.name, ctrName.value)
-  )
+  pendingDownload.value = entry.path
+  try {
+    await guard(() =>
+      entry.isDir
+        ? window.api.downloadDir(fsSessionId.value, entry.path, ctrName.value)
+        : window.api.download(fsSessionId.value, entry.path, entry.name, ctrName.value)
+    )
+  } finally {
+    pendingDownload.value = null
+  }
 }
 
 async function pickUpload(): Promise<void> {
@@ -684,6 +720,13 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
     )
   } catch (err) {
     errorMsg.value = `删除过程中出错：${errorText(err)}`
+    // 重试整批（每一项独立成败，重跑一遍不会重复删已删掉的：rm 对不存在的路径只报错）
+    retryAction.value = () =>
+      window.api.sftpDeleteMany(
+        fsSessionId.value,
+        targets.map((t) => ({ path: t.path, isDir: t.isDir })),
+        ctrName.value
+      )
   } finally {
     clearSelection()
     await load()
@@ -917,7 +960,13 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
-    <div v-if="errorMsg" class="error-banner">{{ errorMsg }}</div>
+    <div v-if="errorMsg" class="error-banner">
+      <span class="banner-text">{{ errorMsg }}</span>
+      <button v-if="retryAction" class="retry" @click="retryLast">重试</button>
+      <button class="icon-btn" title="关闭" @click="dismissError">
+        <Icon name="x" :size="12" />
+      </button>
+    </div>
 
     <!-- 容器标签但没装容器助手：指路比报错好 -->
     <div v-if="agentMissing" class="hint">
@@ -986,8 +1035,12 @@ onBeforeUnmount(() => {
           <button
             class="icon-btn"
             :title="isLocal ? '复制到…' : entry.isDir ? '下载文件夹（递归）' : '下载'"
+            :disabled="pendingDownload === entry.path"
             @click.stop="downloadEntry(entry)"
-          ><Icon name="download" /></button>
+          >
+            <Spinner v-if="pendingDownload === entry.path" :size="13" />
+            <Icon v-else name="download" />
+          </button>
           <button class="icon-btn" title="重命名" @click.stop="startRename(entry)">
             <Icon name="pencil" />
           </button>
@@ -1107,25 +1160,37 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
-  margin-right: 8px;
-  padding: 1px 8px;
+  margin-right: var(--sp-2);
+  padding: 1px var(--sp-2);
   border-radius: var(--r-pill);
   background: var(--accent-soft);
   color: var(--accent-text);
   font-size: var(--fs-xs);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
 }
 .archiving {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  margin-left: 10px;
+  gap: var(--sp-1);
+  margin-left: var(--sp-2);
   color: var(--accent-text);
   font-size: var(--fs-xs);
 }
 .crumb {
   color: var(--accent-text);
   cursor: pointer;
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-xs);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.crumb:hover {
+  background: var(--bg-hover);
+}
+.crumb:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 .sep {
   margin: 0 2px;
@@ -1139,16 +1204,24 @@ onBeforeUnmount(() => {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   /* 左侧留出选中条的宽度，选中时内容不会整体右移 */
-  padding: 4px 10px 4px 12px;
+  padding: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-3);
   font-size: var(--fs-md);
   cursor: default;
-  border-radius: var(--r-xs);
-  transition: background-color var(--dur-fast) var(--ease-out);
+  border-radius: var(--r-sm);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .row:hover {
   background: var(--bg-hover);
+}
+/* 按下：和全局控件同一套（深一档 + 半像素下沉）。原来是 scale(0.995)，
+   在同一行里点会连带把文字一起缩放，看着发虚 */
+.row:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 /* 选中：块状高亮 + 左侧竖条，跟本地文件管理器一个读法 */
 .row.selected {
@@ -1168,10 +1241,7 @@ onBeforeUnmount(() => {
   border-radius: 1px;
   background: var(--accent-text);
 }
-/* 按下时轻微回弹，给「点到了」一个触感 */
-.row:active {
-  transform: scale(0.995);
-}
+/* 按下态统一在上面的 .row:active 里（深一档 + 半像素下沉） */
 .file-name {
   flex: 1;
   min-width: 0;
@@ -1232,11 +1302,11 @@ onBeforeUnmount(() => {
 .spacer {
   flex: 1;
 }
-.error-banner {
-  padding: 8px 10px;
-  color: var(--danger-text);
-  font-size: var(--fs-sm);
-  border-bottom: 1px solid var(--border);
+/* 横幅的长相在 styles.css 的全局 .error-banner（两边面板共用一个） */
+.banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .hint {
   padding: 16px;
@@ -1248,8 +1318,9 @@ onBeforeUnmount(() => {
 .usage-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 10px;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  transition: background-color var(--dur-fast) var(--ease-out);
   border-top: 1px solid var(--border);
   font-size: var(--fs-xs);
   color: var(--fg-muted);
@@ -1295,8 +1366,9 @@ onBeforeUnmount(() => {
 .du-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 3px 10px;
+  gap: var(--sp-2);
+  padding: 3px var(--sp-3);
+  transition: background-color var(--dur-fast) var(--ease-out);
   font-size: var(--fs-xs);
 }
 .du-row.clickable {
@@ -1304,6 +1376,9 @@ onBeforeUnmount(() => {
 }
 .du-row.clickable:hover {
   background: var(--bg-hover);
+}
+.du-row.clickable:active {
+  background: var(--bg-active);
 }
 .du-name {
   width: 40%;

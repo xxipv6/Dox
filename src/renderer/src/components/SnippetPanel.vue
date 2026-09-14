@@ -18,6 +18,14 @@ const badge = computed(() => (snippets.value.length ? String(snippets.value.leng
 const formVisible = ref(false)
 const editingId = ref<string | null>(null)
 const form = reactive({ name: '', command: '' })
+/** 分区头的 + 按钮：开表单时顺带把分区展开（收起状态下点 + 会「什么都没发生」） */
+const section = ref<InstanceType<typeof SidebarSection> | null>(null)
+
+function toggleForm(): void {
+  formVisible.value = !formVisible.value
+  if (formVisible.value) section.value?.expand()
+  else resetForm()
+}
 
 onMounted(async () => {
   snippets.value = await api.listSnippets()
@@ -154,15 +162,12 @@ async function remove(s: CommandSnippet): Promise<void> {
 </script>
 
 <template>
-  <SidebarSection title="快捷命令" icon="zap" :badge="badge">
+  <SidebarSection ref="section" title="快捷命令" icon="zap" :badge="badge">
     <template #actions>
       <button
         class="icon-btn"
         :title="formVisible ? '收起' : '新建片段'"
-        @click="
-          formVisible = !formVisible;
-          if (!formVisible) resetForm()
-        "
+        @click="toggleForm"
       ><Icon :name="formVisible ? 'minus' : 'plus'" :size="15" /></button>
     </template>
 
@@ -232,8 +237,8 @@ async function remove(s: CommandSnippet): Promise<void> {
 .snippet-form {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
 }
 .snippet-form input,
 .snippet-form textarea {
@@ -241,45 +246,22 @@ async function remove(s: CommandSnippet): Promise<void> {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   color: var(--fg);
-  padding: 7px 10px;
+  padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm);
   outline: none;
-  font-family: Consolas, monospace;
+  font-family: var(--font-mono);
   resize: vertical;
 }
 .snippet-form input:focus,
 .snippet-form textarea:focus {
   border-color: var(--accent-text);
 }
-.btn {
-  padding: 6px 0;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-hover);
-  color: var(--fg);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-.btn.primary {
-  background: var(--accent-text);
-  border-color: var(--accent-text);
-  color: var(--bg-panel);
-  font-weight: 600;
-}
-.btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.empty-hint {
-  font-size: var(--fs-sm);
-  color: var(--fg-muted);
-  padding: 4px 2px;
-}
+/* 按钮与空态文案的基础长相在 styles.css（全局 .btn / .empty-hint） */
 .snippet {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   border-radius: var(--r-sm);
   font-size: var(--fs-sm);
 }
@@ -298,8 +280,8 @@ async function remove(s: CommandSnippet): Promise<void> {
 }
 /* 静默执行结果块 */
 .exec-result {
-  margin-top: 6px;
-  padding: 6px 8px;
+  margin-top: var(--sp-2);
+  padding: var(--sp-2);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--bg-hover);
@@ -321,15 +303,15 @@ async function remove(s: CommandSnippet): Promise<void> {
   color: var(--danger-text);
 }
 .exec-out {
-  margin: 4px 0 0;
-  padding: 4px 6px;
+  margin: var(--sp-1) 0 0;
+  padding: var(--sp-1) var(--sp-2);
   background: var(--bg-panel);
   border-radius: var(--r-xs);
   max-height: 140px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   user-select: text;
 }
 .exec-out.err {

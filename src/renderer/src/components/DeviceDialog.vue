@@ -4,6 +4,7 @@ import type { SavedSession } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
 import { errorText } from '../utils/errors'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
+import Spinner from './Spinner.vue'
 
 const store = useSessionStore()
 
@@ -18,6 +19,14 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const busy = ref(false)
+/*
+ * 哪个动作在跑。
+ *
+ * 之前连接/保存期间只有「按钮变灰」——用户分不清是在等还是卡死了，
+ * 尤其是连一台连不通的机器（SSH 握手要等到超时，几十秒里界面一动不动）。
+ * 现在按钮里会长出转圈并把文案换成「正在连接…」，动作本身也就能看出是哪一条。
+ */
+const running = ref<null | 'save' | 'connect' | 'saveAndConnect'>(null)
 const errorMsg = ref('')
 
 /** 连接/保存进行中时保留弹窗，避免用户误以为请求已取消。 */
@@ -94,6 +103,7 @@ function payload(): Parameters<typeof store.saveSession>[0] {
 async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void> {
   if (!valid.value) return
   busy.value = true
+  running.value = action
   errorMsg.value = ''
   try {
     if (action === 'connect') {
@@ -123,137 +133,120 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
     errorMsg.value = errorText(err)
   } finally {
     busy.value = false
+    running.value = null
   }
 }
 </script>
 
 <template>
-  <div v-if="visible" class="overlay" @click.self="requestClose">
-    <div class="dialog">
-      <div class="dialog-header">
-        <span>{{ isEdit ? '编辑设备' : '添加设备' }}</span>
-        <button class="close-btn" :disabled="busy" @click="requestClose">×</button>
-      </div>
-
-      <div class="grid">
-        <label>名称</label>
-        <input v-model="form.name" placeholder="留空则用 用户名@主机" />
-
-        <label>主机地址</label>
-        <div class="row">
-          <input v-model="form.host" placeholder="192.168.1.10 或 example.com" class="grow" />
-          <input
-            v-model.number="form.port"
-            type="number"
-            min="1"
-            max="65535"
-            class="port"
-            :class="{ invalid: !validPort }"
-          />
+  <!-- Transition 包在遮罩这一层：淡出时里面的弹窗跟着一起淡，不用各自写一份 -->
+  <Transition name="pop">
+    <div v-if="visible" class="overlay" @click.self="requestClose">
+      <div class="dialog pop-surface">
+        <div class="dialog-header">
+          <span>{{ isEdit ? '编辑设备' : '添加设备' }}</span>
+          <button class="close-btn" :disabled="busy" @click="requestClose">×</button>
         </div>
 
-        <label>用户名</label>
-        <input v-model="form.username" placeholder="root" />
+        <div class="grid">
+          <label>名称</label>
+          <input v-model="form.name" placeholder="留空则用 用户名@主机" />
 
-        <label>认证方式</label>
-        <div class="segmented">
-          <label :class="{ active: form.authType === 'password' }">
-            <input v-model="form.authType" type="radio" value="password" /> 密码
-          </label>
-          <label :class="{ active: form.authType === 'key' }">
-            <input v-model="form.authType" type="radio" value="key" /> 私钥
-          </label>
+          <label>主机地址</label>
+          <div class="row">
+            <input v-model="form.host" placeholder="192.168.1.10 或 example.com" class="grow" />
+            <input
+              v-model.number="form.port"
+              type="number"
+              min="1"
+              max="65535"
+              class="port"
+              :class="{ invalid: !validPort }"
+            />
+          </div>
+
+          <label>用户名</label>
+          <input v-model="form.username" placeholder="root" />
+
+          <label>认证方式</label>
+          <div class="segmented">
+            <label :class="{ active: form.authType === 'password' }">
+              <input v-model="form.authType" type="radio" value="password" /> 密码
+            </label>
+            <label :class="{ active: form.authType === 'key' }">
+              <input v-model="form.authType" type="radio" value="key" /> 私钥
+            </label>
+          </div>
+
+          <template v-if="form.authType === 'password'">
+            <label>密码</label>
+            <input
+              v-model="form.password"
+              type="password"
+              :placeholder="isEdit ? '留空表示不修改' : '登录密码'"
+            />
+          </template>
+          <template v-else>
+            <label>私钥路径</label>
+            <input v-model="form.privateKeyPath" placeholder="~/.ssh/id_rsa" />
+            <label>密码短语</label>
+            <input
+              v-model="form.passphrase"
+              type="password"
+              :placeholder="isEdit ? '留空表示不修改' : '可选'"
+            />
+          </template>
+
+          <template v-if="store.savedSessions.length">
+            <label>跳板机</label>
+            <select v-model="form.jumpHostId">
+              <option value="">直连（不使用跳板机）</option>
+              <option
+                v-for="s in store.savedSessions.filter((x) => !isJumpTarget(x))"
+                :key="s.id"
+                :value="s.id"
+              >
+                经 {{ s.name }} 跳转
+              </option>
+            </select>
+          </template>
         </div>
 
-        <template v-if="form.authType === 'password'">
-          <label>密码</label>
-          <input
-            v-model="form.password"
-            type="password"
-            :placeholder="isEdit ? '留空表示不修改' : '登录密码'"
-          />
-        </template>
-        <template v-else>
-          <label>私钥路径</label>
-          <input v-model="form.privateKeyPath" placeholder="~/.ssh/id_rsa" />
-          <label>密码短语</label>
-          <input
-            v-model="form.passphrase"
-            type="password"
-            :placeholder="isEdit ? '留空表示不修改' : '可选'"
-          />
-        </template>
+        <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
 
-        <template v-if="store.savedSessions.length">
-          <label>跳板机</label>
-          <select v-model="form.jumpHostId">
-            <option value="">直连（不使用跳板机）</option>
-            <option
-              v-for="s in store.savedSessions.filter((x) => !isJumpTarget(x))"
-              :key="s.id"
-              :value="s.id"
-            >
-              经 {{ s.name }} 跳转
-            </option>
-          </select>
-        </template>
-      </div>
-
-      <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
-
-      <div class="actions">
-        <button class="btn" :disabled="busy" @click="requestClose">取消</button>
-        <button v-if="!isEdit" class="btn" :disabled="!valid || busy" @click="run('connect')">
-          仅连接
-        </button>
-        <button class="btn" :disabled="!valid || busy" @click="run('save')">保存</button>
-        <button class="btn primary" :disabled="!valid || busy" @click="run('saveAndConnect')">
-          保存并连接
-        </button>
+        <div class="actions">
+          <button class="btn" :disabled="busy" @click="requestClose">取消</button>
+          <button v-if="!isEdit" class="btn" :disabled="!valid || busy" @click="run('connect')">
+            <Spinner v-if="running === 'connect'" :size="12" />
+            {{ running === 'connect' ? '正在连接…' : '仅连接' }}
+          </button>
+          <button class="btn" :disabled="!valid || busy" @click="run('save')">
+            <Spinner v-if="running === 'save'" :size="12" />
+            {{ running === 'save' ? '正在保存…' : '保存' }}
+          </button>
+          <button class="btn primary" :disabled="!valid || busy" @click="run('saveAndConnect')">
+            <Spinner v-if="running === 'saveAndConnect'" :size="12" />
+            {{ running === 'saveAndConnect' ? '正在连接…' : '保存并连接' }}
+          </button>
+        </div>
       </div>
     </div>
-  </div>
+  </Transition>
 </template>
 
 <style scoped>
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
+/*
+ * 只留差异。弹窗/按钮/关闭键的基础长相在 styles.css 的控件词汇表里
+ * （.overlay / .dialog / .pop-surface / .btn / .close-btn）——
+ * 这几个类曾经在 3~5 个组件里各抄一份，于是内边距和 hover 态慢慢漂开。
+ */
 .dialog {
   width: 460px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  padding: 18px;
-}
-.dialog-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: var(--fs-lg);
-  font-weight: 600;
-  margin-bottom: 16px;
-}
-.close-btn {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  font-size: var(--fs-xl);
-  cursor: pointer;
-}
-.close-btn:hover {
-  color: var(--fg);
 }
 .grid {
   display: grid;
   grid-template-columns: 76px 1fr;
-  gap: 10px 12px;
+  gap: var(--sp-3);
   align-items: center;
 }
 .grid > label {
@@ -262,7 +255,7 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
 }
 .row {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .grow {
   flex: 1;
@@ -278,11 +271,12 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   color: var(--fg);
-  padding: 7px 10px;
+  padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-md);
   outline: none;
   width: 100%;
   box-sizing: border-box;
+  transition: border-color var(--dur-fast) var(--ease-out);
 }
 input:focus,
 select:focus {
@@ -293,21 +287,29 @@ input.invalid {
 }
 .segmented {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .segmented label {
   flex: 1;
   text-align: center;
-  padding: 6px 0;
+  padding: var(--sp-2) 0;
   border-radius: var(--r-sm);
   font-size: var(--fs-sm);
   color: var(--fg-muted);
   cursor: pointer;
   border: 1px solid var(--border);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.segmented label:hover {
+  color: var(--fg);
 }
 .segmented label.active {
   color: var(--accent-text);
   border-color: var(--accent-text);
+  background: var(--accent-soft);
 }
 .segmented input {
   display: none;
@@ -315,34 +317,12 @@ input.invalid {
 .error {
   color: var(--danger-text);
   font-size: var(--fs-sm);
-  margin: 12px 0 0;
+  margin: var(--sp-3) 0 0;
 }
 .actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  margin-top: 18px;
-}
-.btn {
-  padding: 7px 16px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-hover);
-  color: var(--fg);
-  font-size: var(--fs-md);
-  cursor: pointer;
-}
-.btn:hover:not(:disabled) {
-  border-color: var(--focus-ring);
-}
-.btn.primary {
-  background: var(--accent-text);
-  border-color: var(--accent-text);
-  color: var(--bg-panel);
-  font-weight: 600;
-}
-.btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+  gap: var(--sp-2);
+  margin-top: var(--sp-5);
 }
 </style>

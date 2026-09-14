@@ -199,6 +199,34 @@ SFTP 往返** —— N × RTT 在高延迟链路上是分钟~小时级。一律�
 
 新增一类远端批量操作时按这个套路上，别再写逐条 await 的递归。
 
+### 3.7 动效、圆角、间距、层级的单一出处
+
+HIG 那一轮（`scripts/verify-hig.mjs`）立的规矩，改界面时照着走：
+
+- 一切「看起来像界面」的数值都在 `styles.css`：`--dur-*`（`--dur-gauge` 是数值条
+  追值用的那一档，CPU/内存条每几秒来一个新值，200ms 会追得发颤）、`--ease-*`、
+  `--r-*`、`--sp-*`、`--fs-*`、`--lh-*`、`--z-*`、`--material*`。
+  **组件里写死时长等于这块令牌当场失效**，而且「减弱动效」的降级（把时长令牌清零）
+  也盖不住它 —— 静态守卫会扫组件里的字面量时长 / `cubic-bezier(` / `blur(`。
+  周期动画（转圈、呼吸）不受这条约束：它们不是交互动效。
+- 浮层的材质只有 `.pop-surface` 一处定义（半透明 + 模糊 + 阴影 + 描边），
+  进退场只有一套 `.pop-*` 过渡类。**半透明只给最外层容器**，里面承载内容的
+  面仍用不透明的 `--bg-panel` —— 文字压在模糊背景上会糊。
+  浮层挂载由父组件 `v-if` 决定的那几处（右键菜单、溢出清单）用 `<Transition appear>`：
+  进场播得了，退场是瞬时的（要退场动画得把 `v-if` 挪进组件里）。
+- 全局控件词汇表：`.icon-btn`、`.btn`（`.primary` / `.danger`）、`.close-btn`、
+  `.menu-item`、`.empty-hint`、`.retry`、`.error-banner`、`.overlay`、`.dialog`。
+  组件里**只留差异**（宽度、`flex`），不要再抄一份基础规则：scoped 样式带 `[data-v-*]`，
+  抄的那份会盖掉全局那份，然后两处慢慢漂开（`.btn` 曾在 5 个组件里分别是
+  6/7/8px 的内边距，`.empty-hint` 有五份）。
+- 按下态统一是「底色深一档 + 下沉 0.5px」，所有可点控件都要有；
+  加 `transform` 时记得把它加进那个类已有的 `transition` 属性列表。
+- **绝不对终端容器做尺寸动画**（`width/height/left/top` 的 transition）：容器一变就
+  触发 `ResizeObserver` → `fit()` → pty resize，动画期间会连打几十次 resize ——
+  那是「xterm 停在 80x24」那类故障的温床。终端容器只允许 `opacity`/`transform`。
+- 减弱动效跟随系统（Chromium 直接读），不设开关。降级 = 清零四个时长令牌 +
+  停掉「呼吸」类脉冲，**加载转圈留着**（那是必要反馈，停了就变成「没反应」）。
+
 ---
 
 ## 4. 验证脚本
@@ -210,6 +238,7 @@ node scripts/verify-theme.mjs        # 界面主题：漏改检测、切换、�
 node scripts/verify-titlebar.mjs     # 自绘标题栏：拖拽区、三枚按钮真的作用到窗口
 node scripts/verify-container.mjs    # 容器终端：本机与 SSH 两条路，含远端零改动静态守卫
 node scripts/verify-ui-polish.mjs    # 界面走查回归
+node scripts/verify-hig.mjs          # 视觉与交互：令牌单一出处、浮层材质与进退场、按下态、终端内边距、减弱动效
 node scripts/verify-layout.mjs       # 布局持久化与重启恢复
 node scripts/verify-render.mjs       # 终端渲染（@xterm/headless，14 种场景）
 node scripts/verify-ssh.mjs          # SSH 握手链路

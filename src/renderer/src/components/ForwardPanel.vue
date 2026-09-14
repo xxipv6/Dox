@@ -14,6 +14,13 @@ const rules = ref<ForwardRule[]>([])
 /** 收起状态下也能一眼看出有几条规则在跑，不用展开去数 */
 const badge = computed(() => (rules.value.length ? String(rules.value.length) : undefined))
 const formVisible = ref(false)
+/** 分区头的 + 按钮：开表单时顺带把分区展开（收起状态下点 + 会「什么都没发生」） */
+const section = ref<InstanceType<typeof SidebarSection> | null>(null)
+
+function toggleForm(): void {
+  formVisible.value = !formVisible.value
+  if (formVisible.value) section.value?.expand()
+}
 const form = reactive({
   type: 'local' as 'local' | 'remote' | 'socks',
   listenPort: 8080,
@@ -92,13 +99,13 @@ const statusText: Record<ForwardRule['status'], string> = {
 </script>
 
 <template>
-  <SidebarSection title="端口转发" icon="link" :badge="badge">
+  <SidebarSection ref="section" title="端口转发" icon="link" :badge="badge">
     <template #actions>
       <button
         v-if="store.activeSessionId"
         class="icon-btn"
         :title="formVisible ? '收起' : '添加转发'"
-        @click="formVisible = !formVisible"
+        @click="toggleForm"
       ><Icon :name="formVisible ? 'minus' : 'plus'" :size="15" /></button>
     </template>
 
@@ -154,12 +161,12 @@ const statusText: Record<ForwardRule['status'], string> = {
 .forward-form {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
 }
 .form-row {
   display: flex;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 .form-row input {
   flex: 1;
@@ -168,7 +175,7 @@ const statusText: Record<ForwardRule['status'], string> = {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   color: var(--fg);
-  padding: 6px 8px;
+  padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-sm);
   outline: none;
 }
@@ -203,31 +210,12 @@ const statusText: Record<ForwardRule['status'], string> = {
   margin: 0;
   word-break: break-all;
 }
-.btn {
-  padding: 6px 0;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-hover);
-  color: var(--fg);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-.btn.primary {
-  background: var(--accent-text);
-  border-color: var(--accent-text);
-  color: var(--bg-panel);
-  font-weight: 600;
-}
-.empty-hint {
-  font-size: var(--fs-sm);
-  color: var(--fg-muted);
-  padding: 4px 2px;
-}
+/* 按钮与空态文案的基础长相在 styles.css（全局 .btn / .empty-hint） */
 .rule {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   border-radius: var(--r-sm);
   font-size: var(--fs-sm);
 }
@@ -245,7 +233,7 @@ const statusText: Record<ForwardRule['status'], string> = {
   align-items: center;
   justify-content: center;
   font-size: var(--fs-xs);
-  font-weight: 700;
+  font-weight: var(--fw-semibold);
   flex-shrink: 0;
 }
 .rule-type.local {
@@ -265,7 +253,7 @@ const statusText: Record<ForwardRule['status'], string> = {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .rule-status {
   font-size: var(--fs-xs);

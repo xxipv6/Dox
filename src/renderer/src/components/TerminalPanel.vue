@@ -16,6 +16,7 @@ import { detectListenPorts } from '../utils/portSuggest'
 import { rememberTermSize } from '../utils/termSize'
 import { cdArgOf, createCwdTracker, resolveCdTarget } from '../utils/cwdFollow'
 import { OutputHighlighter } from '../utils/outputHighlight'
+import { errorText } from '../utils/errors'
 import { pushToast } from '../stores/toast'
 import Icon from './Icon.vue'
 
@@ -45,7 +46,7 @@ async function copyToClipboard(text: string, notify = false): Promise<void> {
     await window.api.writeClipboardText(text)
     if (notify) pushToast(`已复制 ${text.length} 个字符`, 'success', 1600)
   } catch (err) {
-    pushToast(`复制到剪贴板失败：${err instanceof Error ? err.message : String(err)}`)
+    pushToast(`复制到剪贴板失败：${errorText(err)}`)
   }
 }
 
@@ -414,7 +415,7 @@ async function confirmForward(s: PortSuggestion): Promise<void> {
     }
   } catch (err) {
     s.state = 'error'
-    s.error = err instanceof Error ? err.message : String(err)
+    s.error = errorText(err)
   }
   // 成败都短暂停留后自己收掉
   setTimeout(() => dismissForward(s), 3500)
@@ -763,7 +764,7 @@ async function pasteClipboard(): Promise<void> {
     const text = await window.api.readClipboardText()
     if (text) store.sendInput(props.sessionId, text)
   } catch (err) {
-    pushToast(`读取剪贴板失败：${err instanceof Error ? err.message : String(err)}`)
+    pushToast(`读取剪贴板失败：${errorText(err)}`)
   }
 }
 
@@ -899,7 +900,7 @@ function onDropFiles(e: DragEvent): void {
     return
   }
   window.api.enqueueDropped(t.sessionId, t.dir, files, t.containerName).catch((err) => {
-    pushToast(`上传启动失败：${err instanceof Error ? err.message : String(err)}`)
+    pushToast(`上传启动失败：${errorText(err)}`)
   })
 }
 
@@ -1326,18 +1327,20 @@ defineExpose({ refit, refitAndFocus })
     </div>
 
     <!-- 右键菜单 -->
-    <div
-      v-if="menu"
-      class="context-menu"
-      :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
-      @click.stop
-    >
-      <button :disabled="!hasSelection" @click="copySelection">复制<span class="hint">Ctrl+Shift+C</span></button>
-      <button @click="pasteClipboard">粘贴<span class="hint">Ctrl+Shift+V</span></button>
-      <button @click="clearTerminal">清屏<span class="hint">Ctrl+L</span></button>
-      <button @click="focusTerminal">聚焦终端</button>
-      <button v-if="procTarget" @click="openProcesses">性能监控</button>
-    </div>
+    <Transition name="pop">
+      <div
+        v-if="menu"
+        class="context-menu pop-surface"
+        :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
+        @click.stop
+      >
+        <button :disabled="!hasSelection" @click="copySelection">复制<span class="hint">Ctrl+Shift+C</span></button>
+        <button @click="pasteClipboard">粘贴<span class="hint">Ctrl+Shift+V</span></button>
+        <button @click="clearTerminal">清屏<span class="hint">Ctrl+L</span></button>
+        <button @click="focusTerminal">聚焦终端</button>
+        <button v-if="procTarget" @click="openProcesses">性能监控</button>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1358,7 +1361,7 @@ defineExpose({ refit, refitAndFocus })
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   border: 2px dashed var(--accent-text);
   border-radius: var(--r-md);
-  z-index: 5;
+  z-index: var(--z-sticky);
 }
 .drop-veil span {
   background: var(--bg-panel);
@@ -1368,10 +1371,18 @@ defineExpose({ refit, refitAndFocus })
   color: var(--accent-text);
   box-shadow: var(--shadow-sm);
 }
+/*
+ * 终端内容的四周内边距。
+ *
+ * 之前是 `4px 0 0 8px`：文字贴着上边和下边，窗口边缘和提示符之间没有呼吸。
+ * 注意这层 padding 是加在**容器**上而不是 `.xterm` 上 —— FitAddon 量的是
+ * `.xterm` 的父元素尺寸减去 `.xterm` 自己的 padding（@xterm/addon-fit
+ * FitAddon.ts:76-84），加在容器上它自然就少算这些像素，行列数不会错。
+ */
 .terminal-container {
   width: 100%;
   height: 100%;
-  padding: 4px 0 0 8px;
+  padding: var(--sp-2);
   box-sizing: border-box;
 }
 .reconnect-bar {
@@ -1379,6 +1390,7 @@ defineExpose({ refit, refitAndFocus })
   top: 0;
   left: 0;
   right: 0;
+  /* 面板内部的相对次序：必须低于 drop-veil（同层 sticky 那一档） */
   z-index: 4;
   display: flex;
   align-items: center;
@@ -1437,7 +1449,7 @@ defineExpose({ refit, refitAndFocus })
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   box-shadow: var(--shadow-md);
-  z-index: 5;
+  z-index: var(--z-sticky);
 }
 .search-bar input {
   background: var(--bg-panel);
@@ -1468,13 +1480,11 @@ defineExpose({ refit, refitAndFocus })
 }
 .context-menu {
   position: fixed;
-  z-index: 50;
+  /* 终端里的右键菜单：跟标签栏那个一样，属于「面板间的浮层」这一档 */
+  z-index: var(--z-panel);
   min-width: 180px;
-  padding: 4px;
-  background: var(--bg-hover);
-  border: 1px solid var(--border);
+  padding: var(--sp-1);
   border-radius: var(--r-md);
-  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
 }
@@ -1482,21 +1492,28 @@ defineExpose({ refit, refitAndFocus })
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: var(--sp-4);
   background: none;
   border: none;
   border-radius: var(--r-sm);
   color: var(--fg);
   font-size: var(--fs-md);
   text-align: left;
-  padding: 6px 10px;
+  padding: var(--sp-2);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .context-menu button:hover:not(:disabled) {
-  background: var(--border);
+  background: var(--bg-hover);
+}
+.context-menu button:active:not(:disabled) {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 .context-menu button:disabled {
-  opacity: 0.35;
+  opacity: 0.45;
   cursor: default;
 }
 .hint {
@@ -1509,7 +1526,7 @@ defineExpose({ refit, refitAndFocus })
   position: absolute;
   right: 16px;
   bottom: 12px;
-  z-index: 5;
+  z-index: var(--z-sticky);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1518,8 +1535,8 @@ defineExpose({ refit, refitAndFocus })
 .port-toast {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
   border-radius: var(--r-md);
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -1538,25 +1555,54 @@ defineExpose({ refit, refitAndFocus })
   color: var(--warning-text);
   border-color: var(--warning-text);
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.port-toast.sentinel:hover {
+  background: var(--warning-soft);
+}
+.port-toast.sentinel:active {
+  filter: brightness(0.97);
 }
 .port-toast .act {
-  padding: 2px 10px;
+  padding: var(--sp-1) var(--sp-3);
   border: none;
   border-radius: var(--r-sm);
   /* 约定：带白字的实底按钮用 --accent-text 而不是 --accent（见 styles.css） */
   background: var(--accent-text);
-  color: var(--bg-panel);
-  font-weight: 600;
+  color: var(--fg-on-accent);
+  font-weight: var(--fw-semibold);
   font-size: var(--fs-sm);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.port-toast .act:hover {
+  background: var(--accent-hover);
+}
+.port-toast .act:active {
+  transform: translateY(0.5px);
 }
 .port-toast .x {
   display: flex;
-  padding: 2px;
+  align-items: center;
+  justify-content: center;
+  /* 命中区放大到 24px：这条提示本身很小，✕ 再小就点不中了 */
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border: none;
+  border-radius: var(--r-sm);
   background: none;
   color: var(--fg-muted);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.port-toast .x:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
 }
 
 </style>

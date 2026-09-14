@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import type { LayoutSnapshot, LayoutTabSnapshot } from '@shared/types'
 import { useSessionStore, type SessionTab } from './sessions'
+import { errorText } from '../utils/errors'
+import { pushToastOnce } from './toast'
 
 /** 布局变动很频繁（分屏、开关标签），攒一下再写 */
 const SAVE_DEBOUNCE_MS = 400
@@ -59,9 +61,17 @@ export const useLayoutStore = defineStore('layout', () => {
   }
 
   function saveNow(): void {
-    // 落盘失败不该打断使用，但要让它在控制台可见
+    /*
+     * 落盘失败不该打断使用，但也不能只在控制台可见：布局是「下次打开还在不在」
+     * 的承诺，静默失败时用户直到重启才会发现标签全没了。
+     * 提示条里给一个「重试」，冷却期见 pushToastOnce（标签变化会连着触发保存）。
+     */
     window.api.setLayout(snapshot()).catch((err) => {
       console.warn('[layout] 保存布局失败', err)
+      pushToastOnce('layout-persist', `标签布局没能保存：${errorText(err)}`, 'error', {
+        label: '重试',
+        run: () => saveNow()
+      })
     })
   }
 

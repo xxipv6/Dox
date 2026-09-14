@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import type { AppSettings, UiTheme } from '@shared/types'
 import { AUTO_THEME_ID, resolveThemePreset, type TerminalThemePreset } from '../utils/themes'
+import { errorText } from '../utils/errors'
+import { pushToastOnce } from './toast'
 
 /** 旧版把设置放在 localStorage；打包后那个源不落盘，dev 模式下则确实存过东西 */
 const LEGACY_STORAGE_KEY = 'dox-settings'
@@ -187,7 +189,23 @@ export const useSettingsStore = defineStore('settings', () => {
         monitorWidth: monitorWidth.value,
         localDefaultDir: localDefaultDir.value
       })
-      .catch((err) => console.warn('[settings] 保存设置失败', err))
+      /*
+       * 落盘失败必须让用户看见。
+       *
+       * 原来只写 console：用户以为设置保存了（界面也确实变了），重启后回到旧值 ——
+       * 这正是这个项目反复强调的「显示的是假的」那一类。提示里给一个「重试」，
+       * 因为失败原因往往是磁盘/权限这类一下过不去的，用户点一下比改一个值再改回来省事。
+       * 高频触发（拖监控面板宽度）用 pushToastOnce 去重，避免刷屏。
+       */
+      .catch((err) => {
+        console.warn('[settings] 保存设置失败', err)
+        pushToastOnce(
+          'settings-persist',
+          `设置没能保存：${errorText(err)}`,
+          'error',
+          { label: '重试', run: () => persist() }
+        )
+      })
   }
 
   /*

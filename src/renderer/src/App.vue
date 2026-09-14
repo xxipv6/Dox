@@ -666,11 +666,17 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
                 >
                   <Icon v-if="store.broadcastTabIds.has(tab.tabId)" name="check" :size="10" />
                 </button>
+                <!--
+                  标题条右上角是**关闭**：平铺时每个格子都有自己的标题条，
+                  最常做的动作是「这一格看完了，关掉」——而关标签得回标签栏、
+                  还要在 20 个标签里找到它。放大（只看这一个）留在双击标题条上，
+                  两个动作各有各的入口，互不挤占。
+                -->
                 <button
-                  class="tile-zoom"
-                  title="只看这一个（退出平铺）"
-                  @click.stop="zoomTile(tab)"
-                ><Icon name="expand" :size="12" /></button>
+                  class="tile-close"
+                  title="关闭这个标签"
+                  @click.stop="store.closeTab(tab)"
+                ><Icon name="x" :size="12" /></button>
               </div>
               <div
                 v-show="tileMode || tab.tabId === store.activeTabId"
@@ -880,7 +886,8 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   flex-shrink: 0;
   transition:
     background-color var(--dur-base) var(--ease-out),
-    color var(--dur-base) var(--ease-out);
+    color var(--dur-base) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 /*
  * 活动标签。
@@ -906,6 +913,14 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 .tab:not(.active):hover {
   background: var(--bg-hover);
   color: var(--fg-secondary);
+}
+/* 按下：再深一档 + 半个像素的下沉。整条标签都是点击目标，
+   没有反馈时「点中了没」只能靠切换结果去猜 */
+.tab:not(.active):active {
+  background: var(--bg-active);
+}
+.tab.active:active {
+  transform: translateY(0.5px);
 }
 /*
  * 标签宽度封顶 + 标题截断。
@@ -956,7 +971,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 /* 溢出清单按钮上的数字是次要信息，压小一档别抢标签的位置 */
 .tab-overflow {
   font-size: var(--fs-sm);
-  padding: 0 6px;
+  padding: 0 var(--sp-2);
 }
 /*
  * 右侧那排动作按钮（分屏 / SFTP）。
@@ -966,17 +981,18 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 .bar-btn {
   transition:
     background-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-1);
   height: 30px;
   border: none;
   border-radius: var(--r-sm);
   background: none;
   color: var(--fg-muted);
   font-size: var(--fs-md);
-  padding: 0 9px;
+  padding: 0 var(--sp-2);
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
@@ -984,6 +1000,10 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 .bar-btn:hover {
   color: var(--fg);
   background: var(--bg-hover);
+}
+.bar-btn:active:not(:disabled) {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 .bar-btn.on {
   color: var(--accent-text);
@@ -1031,29 +1051,34 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   }
 }
 /*
- * 广播勾选框：14px 的方框，勾上时填 --accent。
- * 尺寸刻意比 tab-close（22px）小 —— 它是个「状态标记 + 小开关」，
- * 不是并列的动作按钮，太大反而会跟关闭键抢点击。
+ * 广播勾选框：勾上时填 --accent。
+ * 尺寸刻意比 tab-close 小 —— 它是个「状态标记 + 小开关」，不是并列的动作按钮，
+ * 太大反而会跟关闭键抢点击。但也不能小到点不中：18px 是这套界面里
+ * 「最小但还点得着」的那一档（标签高 30px，上下各留 6px 不挤）。
  */
 .tab-bc {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
   padding: 0;
   border: 1.5px solid var(--border-strong);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   background: none;
   color: var(--fg-on-accent);
   cursor: pointer;
   flex-shrink: 0;
   transition:
     background-color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .tab-bc:hover {
   border-color: var(--accent);
+}
+.tab-bc:active {
+  transform: translateY(0.5px);
 }
 .tab-bc.on {
   background: var(--accent);
@@ -1069,16 +1094,20 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   cursor: pointer;
   /* 24×24 的点击区：原来只有 2px padding（约 16px），比 Fitts 定律允许的
      最小值还小，误点成「切标签」的概率很高 */
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: var(--r-sm);
   transition:
     background-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .tab-close:hover {
   color: var(--fg-on-accent);
   background: var(--danger-text);
+}
+.tab-close:active {
+  transform: translateY(0.5px);
 }
 .tab-new {
   display: inline-flex;
@@ -1090,23 +1119,28 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   color: var(--fg-muted);
   width: 28px;
   height: 28px;
-  margin-left: 3px;
+  margin-left: var(--sp-1);
   cursor: pointer;
   flex-shrink: 0;
   transition:
     background-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .tab-new:hover {
   color: var(--accent-text);
   background: var(--bg-hover);
+}
+.tab-new:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 .exit-badge {
   font-size: var(--fs-xs);
   color: var(--danger-text);
   background: var(--danger-soft);
   border-radius: var(--r-xs);
-  padding: 0 4px;
+  padding: 0 var(--sp-1);
   line-height: 15px;
 }
 /* 纵向：上面是工作区（终端 + SFTP + 编辑器），下面是传输队列停靠条 */
@@ -1197,23 +1231,32 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.tile-zoom {
+.tile-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
+  /* 24px 命中区：格子的标题条不高，这枚按钮要是点不中，就只能在 20 个标签里找它 */
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
   border-radius: var(--r-sm);
   background: none;
   color: var(--fg-muted);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
-.tile-zoom:hover {
-  color: var(--accent-text);
-  background: var(--bg-hover);
+/* 关闭是破坏性动作：悬停用危险色，跟标签栏上的关闭键同一套读法 */
+.tile-close:hover {
+  color: var(--fg-on-accent);
+  background: var(--danger-text);
+}
+.tile-close:active {
+  transform: translateY(0.5px);
 }
 /* 编辑器打开时重新分配宽度：文件列表退成窄导航条，编辑器拿到能写代码的宽度。
    列表收窄必须同时把固定宽度的「时间」列藏掉 —— 否则尺寸+时间就占满整行，
@@ -1261,19 +1304,30 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 }
 .pane-close {
   position: absolute;
-  top: 4px;
-  right: 6px;
-  z-index: 6;
+  top: var(--sp-1);
+  right: var(--sp-2);
+  /* 压在终端画面之上，所以比面板内的 sticky 层高一档 */
+  z-index: calc(var(--z-sticky) + 1);
   background: color-mix(in srgb, var(--bg-panel) 80%, transparent);
   border: 1px solid var(--border);
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   color: var(--fg-muted);
   cursor: pointer;
   font-size: var(--fs-md);
-  padding: 0 6px;
+  /* 命中区到 24px 那一档（原来上下没有内边距，只有 18 左右） */
+  padding: var(--sp-1) var(--sp-2);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .pane-close:hover {
   color: var(--danger-text);
+  border-color: var(--danger-text);
+}
+.pane-close:active {
+  transform: translateY(0.5px);
 }
 .welcome {
   position: absolute;
@@ -1296,17 +1350,17 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   color: var(--accent-text);
   background: var(--accent-soft);
   border: 1px solid var(--border-strong);
-  border-radius: 20px;
+  border-radius: var(--r-lg);
   box-shadow: var(--shadow-md);
 }
 .welcome h2 {
   margin: 0;
-  font-size: 24px;
+  font-size: var(--fs-2xl);
   font-weight: var(--fw-semibold);
   letter-spacing: -0.02em;
 }
 .welcome-subtitle {
-  margin: 8px 0 20px;
+  margin: var(--sp-2) 0 var(--sp-5);
   color: var(--fg-secondary);
   font-size: var(--fs-lg);
 }
@@ -1335,6 +1389,9 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   background: var(--bg-hover);
   border-color: var(--border-strong);
   transform: translateY(-1px);
+}
+.welcome-card:active {
+  transform: translateY(0.5px);
 }
 .welcome-card.primary {
   color: var(--fg-on-accent);
@@ -1375,8 +1432,8 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 20px;
+  gap: var(--sp-3);
+  padding: var(--sp-5);
   text-align: center;
 }
 .resume-hint p {
@@ -1390,11 +1447,18 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   color: var(--accent-text);
   cursor: pointer;
   font-size: var(--fs-md);
-  padding: 6px 14px;
+  padding: var(--sp-2) var(--sp-4);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .resume-btn:hover {
   border-color: var(--accent-text);
   background: var(--bg-hover);
+}
+.resume-btn:active {
+  transform: translateY(0.5px);
 }
 /*
  * 死 pane 的原地复活覆盖层：居中浮在冻住的终端上。
@@ -1403,14 +1467,14 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 .pane-revive {
   position: absolute;
   inset: 0;
-  z-index: 5;
+  z-index: var(--z-sticky);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: var(--sp-4);
   background: color-mix(in srgb, var(--bg) 62%, transparent);
-  backdrop-filter: blur(2px);
+  backdrop-filter: var(--blur-veil);
 }
 .revive-text {
   margin: 0;
@@ -1427,32 +1491,12 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   display: flex;
   gap: var(--sp-2);
 }
-.pane-revive .btn,
-.placeholder-error .btn {
-  border: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--fg);
-  border-radius: var(--r-sm);
-  padding: 6px 16px;
-  font-size: var(--fs-md);
-  cursor: pointer;
-}
-.pane-revive .btn:hover,
-.placeholder-error .btn:hover {
-  background: var(--bg-hover);
-}
-.pane-revive .btn.primary,
-.placeholder-error .btn.primary {
-  background: var(--accent-text);
-  border-color: var(--accent-text);
-  color: var(--bg-panel);
-  font-weight: 600;
-}
+/* 复活覆盖层里的按钮直接用全局 .btn / .btn.primary（原先是本地又抄了一份） */
 .placeholder-error {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: var(--sp-3);
   max-width: 70%;
   text-align: center;
 }

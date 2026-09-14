@@ -125,7 +125,7 @@ function statusIcon(status: string): { name: 'check' | 'alert' | 'x' | null; cls
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 4px var(--sp-3);
+  padding: var(--sp-1) var(--sp-3);
   border-bottom: 1px solid var(--border);
   font-size: var(--fs-xs);
 }
@@ -136,7 +136,7 @@ function statusIcon(status: string): { name: 'check' | 'alert' | 'x' | null; cls
 }
 .cd-runs {
   display: flex;
-  gap: 4px;
+  gap: var(--sp-1);
   overflow-x: auto;
   flex: 1;
   min-width: 0;
@@ -144,15 +144,28 @@ function statusIcon(status: string): { name: 'check' | 'alert' | 'x' | null; cls
 .cd-pill {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--sp-1);
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: none;
   color: var(--fg-muted);
   font-size: var(--fs-xs);
-  padding: 1px 8px;
+  padding: 2px var(--sp-2);
   cursor: pointer;
   white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+/* 原来这条胶囊完全没有 hover 态：一排运行记录里点哪个都看不出反应 */
+.cd-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.cd-pill:active {
+  background: var(--bg-active);
 }
 .cd-pill.active {
   border-color: var(--accent-text);
@@ -182,19 +195,32 @@ function statusIcon(status: string): { name: 'check' | 'alert' | 'x' | null; cls
 }
 .cd-actions {
   display: inline-flex;
-  gap: 4px;
+  gap: var(--sp-1);
   flex-shrink: 0;
 }
 .cd-btn {
   border: 1px solid var(--border);
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   background: none;
   color: var(--fg-muted);
   font-size: var(--fs-xs);
-  padding: 2px 8px;
+  padding: 2px var(--sp-2);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.cd-btn:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+.cd-btn:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 .cd-btn:hover {
   color: var(--fg);
@@ -210,7 +236,7 @@ function statusIcon(status: string): { name: 'check' | 'alert' | 'x' | null; cls
   margin: 0;
   padding: var(--sp-2) var(--sp-3);
   overflow-y: auto;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
   line-height: 1.55;
   color: var(--fg-secondary);

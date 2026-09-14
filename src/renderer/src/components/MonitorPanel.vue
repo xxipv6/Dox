@@ -14,6 +14,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { AgentStatsPayload, NetConn, ProcInfo } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
 import { useSettingsStore } from '../stores/settings'
+import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
 
@@ -154,10 +155,11 @@ async function refreshConns(): Promise<void> {
     connsTruncated.value = r.truncated
     connsError.value = ''
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    connsError.value = msg.includes('unknown method')
+    // 能力探测看原始报文（errorText 只剥外层包装给用户看，不改变判断依据）
+    const raw = err instanceof Error ? err.message : String(err)
+    connsError.value = raw.includes('unknown method')
       ? '连接表需要助手 v0.6.0，请在侧栏「远程助手」升级'
-      : msg
+      : errorText(err)
   } finally {
     connsInFlight = false
     connsLoading.value = false
@@ -251,7 +253,7 @@ async function refreshProcs(): Promise<void> {
       if (!live.has(Number(pid))) delete termSentAt[Number(pid)]
     }
   } catch (err) {
-    procError.value = err instanceof Error ? err.message : String(err)
+    procError.value = errorText(err)
   } finally {
     procInFlight = false
     procLoading.value = false
@@ -267,7 +269,7 @@ async function killProc(p: ProcInfo, signal: 15 | 9): Promise<void> {
     if (signal === 15) termSentAt[p.pid] = Date.now()
     await refreshProcs()
   } catch (err) {
-    procError.value = err instanceof Error ? err.message : String(err)
+    procError.value = errorText(err)
   }
 }
 
@@ -551,10 +553,15 @@ onBeforeUnmount(() => {
   bottom: 0;
   width: 6px;
   cursor: col-resize;
-  z-index: 5;
+  z-index: var(--z-sticky);
+  transition: background-color var(--dur-fast) var(--ease-out);
 }
 .resize-handle:hover {
   background: var(--accent-soft);
+}
+/* 拖动中：条变实心，用户才知道「我按住了、现在在拖」 */
+.resize-handle:active {
+  background: var(--accent);
 }
 .toolbar {
   display: flex;
@@ -565,7 +572,7 @@ onBeforeUnmount(() => {
 }
 .title {
   font-size: var(--fs-sm);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -575,8 +582,8 @@ onBeforeUnmount(() => {
 }
 .tab-bar {
   display: flex;
-  gap: 2px;
-  padding: 4px 8px;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
   border-bottom: 1px solid var(--border);
 }
 .tab-bar button {
@@ -586,12 +593,20 @@ onBeforeUnmount(() => {
   border-radius: var(--r-sm);
   color: var(--fg-muted);
   font-size: var(--fs-sm);
-  padding: 4px 0;
+  padding: var(--sp-1) 0;
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .tab-bar button:hover {
   color: var(--fg);
   background: var(--bg-hover);
+}
+.tab-bar button:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 .tab-bar button.active {
   color: var(--accent-text);
@@ -644,10 +659,10 @@ onBeforeUnmount(() => {
   right: 0;
   bottom: 0;
   opacity: 0.28;
-  transition: height 0.6s var(--ease-out);
+  transition: height var(--dur-gauge) var(--ease-out);
 }
 .core-label {
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--fg-muted);
   z-index: 1;
 }
@@ -669,7 +684,7 @@ onBeforeUnmount(() => {
   display: block;
   height: 100%;
   opacity: 0.5;
-  transition: width 0.6s var(--ease-out);
+  transition: width var(--dur-gauge) var(--ease-out);
 }
 .dim-line {
   padding: 4px 12px 0;
@@ -689,7 +704,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   color: var(--fg-secondary);
 }
 .top-pct {
@@ -711,7 +726,7 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 .conn-row .mono {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
 .n-proto {
@@ -782,46 +797,38 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--sp-1);
   font-size: var(--fs-xs);
   color: var(--accent-text);
   background: var(--accent-soft);
   border-radius: var(--r-pill);
-  padding: 0 4px 0 8px;
+  padding: 0 var(--sp-1) 0 var(--sp-2);
 }
 .pid-chip .chip-x {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: none;
   color: inherit;
   cursor: pointer;
-  padding: 1px;
+  /* 命中区放到 20px：这枚 ✕ 只有 11px 的图标，原来几乎点不中 */
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: var(--r-pill);
+  transition: background-color var(--dur-fast) var(--ease-out);
 }
-.error-banner {
-  padding: 6px 10px;
-  font-size: var(--fs-sm);
-  color: var(--danger-text);
-  background: var(--danger-soft);
-  border-bottom: 1px solid var(--danger);
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.pid-chip .chip-x:hover {
+  background: var(--bg-hover);
 }
-.error-banner .retry {
-  flex-shrink: 0;
-  background: none;
-  border: 1px solid var(--danger);
-  border-radius: var(--r-xs);
-  color: var(--danger-text);
-  cursor: pointer;
-  font-size: var(--fs-xs);
-  padding: 1px 8px;
-}
+/* 错误横幅与它里面的重试按钮都在 styles.css（全局 .error-banner / .retry） */
 .hint {
-  padding: 24px 12px;
+  padding: var(--sp-5) var(--sp-3);
   text-align: center;
   color: var(--fg-muted);
   font-size: var(--fs-sm);
+  line-height: var(--lh-base);
 }
 .table-wrap {
   flex: 1;
@@ -879,7 +886,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
 .c-act {
@@ -897,15 +904,24 @@ onBeforeUnmount(() => {
 .kill-btn {
   background: none;
   border: 1px solid var(--border);
-  border-radius: var(--r-xs);
+  border-radius: var(--r-sm);
   color: var(--fg-muted);
   cursor: pointer;
   font-size: var(--fs-xs);
-  padding: 1px 8px;
+  padding: 2px var(--sp-2);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .kill-btn:hover {
   color: var(--danger-text);
   border-color: var(--danger);
+}
+.kill-btn:active {
+  background: var(--danger-soft);
+  transform: translateY(0.5px);
 }
 .kill-btn.force,
 .kill-btn.danger {

@@ -151,34 +151,30 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
 </template>
 
 <style scoped>
-.empty-hint {
-  font-size: var(--fs-sm);
-  color: var(--fg-muted);
-  padding: 4px 2px;
-}
+/* 空态文案用 styles.css 的全局 .empty-hint */
 .agent-ok {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-sm);
   color: var(--success-text);
 }
 .agent-upgrade {
-  padding: 0 8px 4px 26px;
+  padding: 0 var(--sp-2) var(--sp-1) 26px;
 }
 .agent-desc {
   font-size: var(--fs-xs);
   color: var(--fg-muted);
-  margin: 0 0 6px;
-  line-height: 1.6;
+  margin: 0 0 var(--sp-1);
+  line-height: var(--lh-base);
 }
 .agent-desc code {
-  font-family: Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--fg);
 }
 .agent-details {
-  margin: 0 0 6px;
+  margin: 0 0 var(--sp-1);
   font-size: var(--fs-xs);
   color: var(--fg-muted);
 }
@@ -190,7 +186,7 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding: 4px 2px;
+  padding: var(--sp-1) 2px;
 }
 .probe-fail-text {
   flex: 1;
@@ -199,29 +195,7 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
   color: var(--danger-text);
   word-break: break-all;
 }
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-hover);
-  color: var(--fg);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-.btn.primary {
-  background: var(--accent-text);
-  border-color: var(--accent-text);
-  color: var(--bg-panel);
-  font-weight: 600;
-}
-.btn:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
+/* 按钮基础长相在 styles.css（全局 .btn / .btn.primary） */
 .form-error {
   font-size: var(--fs-xs);
   color: var(--danger-text);

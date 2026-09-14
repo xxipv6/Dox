@@ -295,27 +295,9 @@ async function onMenuSelect(id: string): Promise<void> {
 </template>
 
 <style scoped>
-.empty-hint {
-  font-size: var(--fs-sm);
-  color: var(--fg-muted);
-  padding: 4px 2px;
-  line-height: 1.6;
-}
-.empty-hint.error {
-  color: var(--warning-text);
-}
+/* 空态与重试按钮的基础长相都在 styles.css（全局 .empty-hint / .retry） */
 .retry {
-  margin-left: 6px;
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: var(--r-xs);
-  color: var(--accent-text);
-  font-size: var(--fs-xs);
-  padding: 1px 6px;
-  cursor: pointer;
-}
-.retry:hover {
-  border-color: var(--accent-text);
+  margin-left: var(--sp-2);
 }
 /* 原始报错折叠区：默认收起，不糊主文案 */
 .err-detail {

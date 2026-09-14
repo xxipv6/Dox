@@ -29,6 +29,19 @@ const expanded = ref(props.open)
 function toggle(): void {
   expanded.value = !expanded.value
 }
+
+/**
+ * 展开自己。
+ *
+ * 给分区头里那些「+ / 新建」按钮用：点 + 是要**添加东西**，而收起状态下
+ * 表单在折叠区里，点了等于什么都没发生（用户只能自己去点箭头）。
+ * 只提供展开、不提供收起 —— 收起由箭头负责，动作按钮不该把内容藏起来。
+ */
+function expand(): void {
+  expanded.value = true
+}
+
+defineExpose({ expand })
 </script>
 
 <template>
@@ -57,8 +70,16 @@ function toggle(): void {
       <Icon class="head-chevron" :name="expanded ? 'chevron-down' : 'chevron-right'" :size="14" />
     </div>
 
-    <div v-show="expanded" class="section-body">
-      <slot />
+    <!--
+      展开/收起用 grid-template-rows 0fr → 1fr 的纯 CSS 做法，不再用 v-show 硬切：
+      硬切是「啪」地出现，用户看不出这块内容是从这个标题下长出来的。
+      不用 JS 量高度、也不用 max-height 猜个大值（猜大了收起的头一段会「没反应」）。
+      visibility 一并过渡：收起后里面的按钮不再可聚焦（单纯 height:0 还留在 Tab 序列里）。
+    -->
+    <div class="section-body" :class="{ open: expanded }">
+      <div class="section-body-inner">
+        <slot />
+      </div>
     </div>
   </section>
 </template>
@@ -123,6 +144,29 @@ function toggle(): void {
   flex-shrink: 0;
 }
 .section-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--dur-slow) var(--ease-enter),
+    visibility var(--dur-slow);
+}
+.section-body.open {
+  grid-template-rows: 1fr;
+  visibility: visible;
+}
+/*
+ * 收起时靠这一层裁剪：grid 的行高变了，里面还得自己 overflow:hidden 才不溢出。
+ * 内边距必须跟着一起过渡到 0 —— 0fr 只把「行高」压成 0，元素自己的 padding
+ * 不受影响，留着会从收起的缝里漏出一条 12px 的空白。
+ */
+.section-body-inner {
+  overflow: hidden;
+  min-height: 0;
+  padding: 0;
+  transition: padding var(--dur-slow) var(--ease-enter);
+}
+.section-body.open .section-body-inner {
   padding: var(--sp-2) var(--sp-1) var(--sp-1) var(--sp-2);
 }
 </style>

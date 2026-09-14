@@ -4,6 +4,11 @@
  * 这个文件是**唯一**允许写死色值的地方。组件里一律 `var(--token)`，
  * 这样「换一套配色」才是一件能做的事 —— 在此之前颜色是散在 14 个文件里的
  * 约 270 个字面量，只对应 28 个不同值，却没有任何一处可以统一调整。
+ *
+ * 颜色之外的东西（时长、缓动、圆角、间距、字号、行高、字重、层级、材质）
+ * 也都在这里定一次。按 Apple HIG 那套说法：**一致性**来自「同一个东西到处
+ * 长得一样」，而这件事只有在有单一出处时才守得住 —— 组件里写死的 `0.6s`
+ * 不会跟着令牌变，层级里写死的 `z-index: 201` 也不会。
  */
 
 /* ---------------------------------------------------------------------------
@@ -12,37 +17,79 @@
 :root {
   /* 动效。同一类交互（悬停、选中、展开）在侧栏、文件列表、传输队列里
      应当是同一个时长，否则放在一起会显得有的地方黏、有的地方跳。
-     整体偏克制 —— 这是工具，不是展示页。 */
-  --dur-fast: 80ms; /* 悬停、按下 */
-  --dur-base: 120ms; /* 选中、状态切换 */
-  --dur-slow: 160ms; /* 面板展开/收起 */
-  --ease-out: cubic-bezier(0.2, 0, 0.2, 1);
+     整体偏克制 —— 这是工具，不是展示页。
+     150–250ms 是「看得见但不挡路」的区间：再短察觉不到，再长开始等。
+     减弱动效（prefers-reduced-motion）在文件末尾统一降级，那里靠的就是
+     这三个令牌 —— 所以组件里**不许**再写死时长。 */
+  --dur-fast: 120ms; /* 悬停、按下 */
+  --dur-base: 180ms; /* 选中、状态切换、浮层进退场 */
+  --dur-slow: 240ms; /* 面板展开/收起 */
+  /* 数值条「追值」：CPU / 内存 / 带宽这些每几秒来一个新值，
+     200ms 会追得发颤，600ms 才看得出「它在往哪走」。它不属于交互动效，
+     所以单独一档 —— 减弱动效时同样会被降级 */
+  --dur-gauge: 600ms;
+  --ease-out: cubic-bezier(0.2, 0, 0.2, 1); /* 小位移：悬停、按下 */
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1); /* 进场：强减速，「滑到位就停」 */
 
-  /* 圆角：控件 / 列表行 / 浮层 三档，徽标用 pill */
+  /* 圆角：控件 / 卡片 / 浮层 三档，徽标用 pill */
   --r-xs: 4px;
-  --r-sm: 6px;
-  --r-md: 8px;
-  --r-lg: 12px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 16px;
   --r-pill: 999px;
 
   /* 间距。现有代码里 2/3/4/5/6/8/10/12/14/16 都在用，
-     收敛到五档之后对齐关系才能一眼看出来。 */
+     收敛到六档之后对齐关系才能一眼看出来。 */
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
   --sp-4: 16px;
   --sp-5: 24px;
+  --sp-6: 32px;
 
-  /* 字号。之前散落 10/11/12/13/14/15/16/18 八种，只保留五档 */
+  /* 字号。之前散落 10/11/12/13/14/15/16/18 八种，只保留六档 */
   --fs-xs: 11px;
   --fs-sm: 12px;
   --fs-md: 13px;
   --fs-lg: 15px;
   --fs-xl: 18px;
+  --fs-2xl: 24px;
+
+  /* 行高。散落过 1.45/1.5/1.55/1.6/1.7，两档足够：贴着的用 tight，
+     成段的说明文字用 base */
+  --lh-tight: 1.35;
+  --lh-base: 1.5;
 
   --fw-normal: 400;
   --fw-medium: 500;
   --fw-semibold: 600;
+
+  /*
+   * 等宽字体。前面有 5 处写的是 `var(--font-mono, monospace)`，而这个令牌
+   * **从来没定义过** —— 于是它们一直静默退化成通用 `monospace`：mac 上是
+   * Menlo 那一档还看得过去，Windows 上就是 Courier New，和旁边几个面板
+   * 写死的 `Consolas, monospace` 长得不一样，同一排面板两套等宽字形。
+   * 现在补上定义，并把两边的首选字体都列进去（都有系统自带的 UI 等宽）。
+   */
+  --font-mono: 'Cascadia Mono', Consolas, 'SF Mono', Menlo, monospace;
+
+  /*
+   * 层级。之前是 1/4/5/6/50/90/91/100/200/201/500 一串裸值，加个浮层
+   * 只能靠猜哪个数字空着。现在按「谁盖谁」排成一条梯子，相邻两级的
+   * 伴生层（菜单的透明背板、浮层的实际内容）用 calc(+1)。
+   */
+  --z-sticky: 5; /* 面板内部的吸顶/覆盖层 */
+  --z-panel: 50; /* 面板间的覆盖层（终端里的提示条等） */
+  --z-pill: 90; /* 标题栏上的浮层触发器 */
+  --z-dialog: 100; /* 弹窗 + 它的遮罩 */
+  --z-menu: 200; /* 右键菜单、溢出清单 */
+  --z-dialog-top: 300; /* 必须盖在其他弹窗之上的确认（指纹确认会在「添加设备」之上弹） */
+  --z-toast: 500; /* 提示条永远最上 */
+
+  /* 材质模糊。只给浮层用，且一处只写一个 —— 嵌套 backdrop-filter 掉帧明显 */
+  --material-blur: blur(20px) saturate(1.6);
+  /* 死 pane 的复活覆盖层：轻轻一层模糊，让背后冻住的终端「还在那儿但不可用」 */
+  --blur-veil: blur(2px);
 }
 
 /* ---------------------------------------------------------------------------
@@ -60,7 +107,7 @@
   --bg-sunken: #e9f0fa; /* 凹陷条：标签栏、传输队列、代码块 */
   --bg-panel: #ffffff; /* 抬升面：侧栏、面板、活动标签、对话框 */
   --bg-hover: #eaf2fc; /* 悬停面 */
-  --bg-active: #dcedfb; /* 选中 / 活动面 */
+  --bg-active: #dcedfb; /* 选中 / 活动面 / 按下 */
 
   --border: #dee7f5;
   --border-strong: #c3d4ea;
@@ -97,10 +144,19 @@
 
   --overlay: rgba(15, 23, 42, 0.35);
 
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  /*
+   * 浮层材质：半透明的抬升面，配上 --material-blur 让底下的内容透上来一层。
+   * 取值由 --bg-panel 推出来（白 72%），不引入新的色相 —— 换主题时它跟着走。
+   * 只有浮层用：侧栏、标签栏这些常驻面用半透明会显脏，而且拖慢滚动。
+   */
+  --material: rgba(255, 255, 255, 0.72);
+
+  /* 阴影走「大范围 + 低不透明度」：层级感来自扩散，而不是一条硬边 */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 0 1px rgba(15, 23, 42, 0.06);
   --shadow-md:
-    0 4px 16px rgba(15, 23, 42, 0.1), 0 1px 3px rgba(15, 23, 42, 0.06);
-  --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.16);
+    0 6px 20px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.06);
+  --shadow-lg:
+    0 18px 48px rgba(15, 23, 42, 0.18), 0 4px 12px rgba(15, 23, 42, 0.08);
 }
 
 /* ---------------------------------------------------------------------------
@@ -152,10 +208,14 @@
 
   --overlay: rgba(0, 0, 0, 0.55);
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  /* 深色下要更实一点：72% 的深底透上来的是黑，浮层会显得发灰 */
+  --material: rgba(19, 28, 46, 0.78);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.32);
   --shadow-md:
-    0 4px 16px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+    0 6px 20px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.34);
+  --shadow-lg:
+    0 20px 56px rgba(0, 0, 0, 0.66), 0 4px 14px rgba(0, 0, 0, 0.4);
 }
 
 html,
@@ -201,6 +261,15 @@ body {
   color: var(--fg);
 }
 
+/* ---------------------------------------------------------------------------
+ * 控件词汇表
+ *
+ * 下面这几类在 HIG 里对应「一致性」：同一语义的东西到处长一个样。
+ * 定义在这里**只写一次**，组件里只保留各自的差异（宽度、flex），
+ * 不要再抄一遍基础规则 —— scoped 样式带 [data-v-*]，抄一份就会盖掉这份，
+ * 于是两处慢慢漂开（`.btn` 曾经在 5 个组件里分别是 6px/7px/8px 的内边距）。
+ * ------------------------------------------------------------------------- */
+
 /*
  * 图标按钮：全局定义一次。
  *
@@ -218,16 +287,26 @@ body {
   color: var(--fg-muted);
   cursor: pointer;
   font-size: var(--fs-md);
-  padding: 3px;
+  /* 4px 内边距 + 16px 图标 = 24px 命中区。手小一点点不中，是「点了没反应」
+     投诉里最常被算到界面头上的那类 */
+  padding: var(--sp-1);
   border-radius: var(--r-sm);
   transition:
     background-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 
 .icon-btn:hover {
   color: var(--fg);
   background: var(--bg-hover);
+}
+
+/* 按下：颜色再深一档 + 半个像素的下沉。位移故意小到「看得见但不跳」 */
+.icon-btn:active:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 
 .icon-btn.danger:hover {
@@ -242,6 +321,296 @@ body {
 
 .icon-btn.dim {
   opacity: 0.45;
+}
+
+/*
+ * 按钮三档：.btn 次要动作 / .btn.primary 主要动作 / .btn.danger 破坏性动作。
+ * 「危险」在这套界面里只有两种表达：红字（文字/图标）与红边框（按钮），
+ * 之前是 icon-btn.danger / menu-item.danger / btn.reject / banner-btn.danger /
+ * kill-btn.danger / cd-btn.danger 六种写法各自调色。
+ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  padding: 7px var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-hover);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-active);
+  border-color: var(--border-strong);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+.btn.primary {
+  background: var(--accent-text);
+  border-color: var(--accent-text);
+  color: var(--fg-on-accent);
+  font-weight: var(--fw-semibold);
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn.danger {
+  background: none;
+  border-color: var(--danger-text);
+  color: var(--danger-text);
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: var(--danger-text);
+}
+
+/* 浮层右上角的关闭（弹窗、提示条共用一套长相） */
+.close-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: var(--fs-xl);
+  line-height: 1;
+  padding: var(--sp-1);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.close-btn:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.close-btn:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
+}
+
+/* 菜单项（右键菜单、溢出清单里的行都按这套） */
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2);
+  background: none;
+  border: none;
+  border-radius: var(--r-xs);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.menu-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.menu-item:active:not(:disabled) {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
+}
+
+.menu-item.danger {
+  color: var(--danger-text);
+}
+
+.menu-item:disabled {
+  color: var(--fg-muted);
+  cursor: default;
+}
+
+/* 空态文案：五个面板里原本各写一份，padding 有 4px 2px 也有 8px */
+.empty-hint {
+  padding: var(--sp-2);
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-base);
+}
+
+.empty-hint.clickable {
+  cursor: pointer;
+  border-radius: var(--r-md);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.empty-hint.clickable:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.empty-hint.clickable:active {
+  background: var(--bg-active);
+}
+
+.empty-hint.error {
+  color: var(--warning-text);
+}
+
+/* 错误横幅：可操作是重点 —— 光说「失败了」等于没说 */
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--danger-soft);
+  border-bottom: 1px solid var(--danger);
+  color: var(--danger-text);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-base);
+}
+
+.error-banner .retry {
+  flex-shrink: 0;
+  border-color: var(--danger);
+  color: var(--danger-text);
+}
+
+/* 重试这类「小号描边按钮」 */
+.retry {
+  padding: 2px var(--sp-2);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--fg-secondary);
+  font-family: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.retry:hover {
+  border-color: var(--accent-text);
+  color: var(--accent-text);
+}
+
+.retry:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
+}
+
+/* ---------------------------------------------------------------------------
+ * 浮层：材质 + 层级 + 进退场
+ * ------------------------------------------------------------------------- */
+
+/* 半透明材质。加在浮层的**最外层容器**上，里面承载内容的面仍用不透明的
+   --bg-panel —— 文字压在模糊背景上会糊，而浮层里最多的就是文字。 */
+.pop-surface {
+  background: var(--material);
+  backdrop-filter: var(--material-blur);
+  -webkit-backdrop-filter: var(--material-blur);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 弹窗的遮罩 + 容器。遮罩留着：它是让弹窗「浮起来」的另一半 */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-dialog);
+}
+
+.dialog {
+  border-radius: var(--r-lg);
+  padding: var(--sp-5);
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--fg);
+  margin-bottom: var(--sp-4);
+}
+
+/*
+ * 浮层的进场（Vue <Transition name="pop">）。
+ *
+ * 只做两件事：淡入 + 轻微的位移/缩放。作用是**解释层级** —— 浮层从
+ * 「它挂在哪」的方向长出来，用户就知道它属于谁、从哪来。
+ * 退场只留淡出，且更快：关东西要立刻结束，别让人等一个动画。
+ *
+ * 弹窗（.overlay）只吃这两条透明度规则，里面的 .dialog 另有一支
+ * pop-in 关键帧负责位移与缩放 —— 缩放任在 .overlay 上会把遮罩一起缩，
+ * 边缘会露出底色。
+ */
+.pop-enter-active {
+  transition:
+    opacity var(--dur-base) var(--ease-enter),
+    transform var(--dur-base) var(--ease-enter);
+}
+
+.pop-leave-active {
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.pop-enter-from,
+.pop-leave-to {
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
+}
+
+.pop-enter-to,
+.pop-leave-from {
+  opacity: 1;
+  transform: none;
+}
+
+/* 弹窗本体从略小、略低的位置长到位 */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+}
+
+.dialog {
+  animation: pop-in var(--dur-base) var(--ease-enter);
 }
 
 /* 键盘可达性：只在键盘聚焦时画环，鼠标点击不画。
@@ -279,9 +648,39 @@ body {
 }
 
 button:disabled,
-.icon-btn:disabled {
+.icon-btn:disabled,
+.btn:disabled {
   color: var(--fg-muted);
   opacity: 0.45;
   cursor: default;
   pointer-events: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * 减弱动效
+ *
+ * Chromium 直接读系统的「减弱动态效果」（macOS 辅助功能 / Windows 动画设置），
+ * 所以这一块不需要设置项。
+ *
+ * 降级方式是把三个时长令牌清零 —— 这也是「组件里不许写死时长」的原因：
+ * 只要有地方硬编码 0.6s，这条路就盖不住它。verify-hig.mjs 的静态守卫
+ * 会扫组件里的字面量时长，就是为了守住这条前提。
+ * 不写 `* { animation-duration: 1ms !important }` 那种一刀切：那会连
+ * xterm / CodeMirror 的光标闪烁一起干掉，而光标闪不闪是**内容**不是界面动效。
+ * ------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+    --dur-gauge: 0ms;
+  }
+
+  /* 「呼吸」类脉冲改成静态：颜色还在，只是不再闪。
+     这两个类分别来自 App.vue 的连接状态点与 TerminalPanel 的重连指示。 */
+  .status-dot.connecting,
+  .status-dot.reconnecting,
+  .pulse {
+    animation: none !important;
+  }
 }

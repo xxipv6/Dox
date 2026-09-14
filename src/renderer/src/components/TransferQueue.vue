@@ -134,14 +134,19 @@ function progress(t: TransferTask): number {
   justify-content: space-between;
   align-items: center;
   flex-shrink: 0;
-  padding: 6px 12px;
+  padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm);
   cursor: pointer;
   background: var(--bg-hover);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+/* 整条标题是「展开/收起」的点击目标，按下要看得出来 */
+.panel-header:active {
+  background: var(--bg-active);
 }
 .header-actions {
   display: flex;
-  gap: 4px;
+  gap: var(--sp-1);
 }
 /*
  * 占满面板剩余高度，上限由 .transfer-panel 的 max-height 控制。
@@ -162,7 +167,7 @@ function progress(t: TransferTask): number {
   opacity: 0;
 }
 .more-hint {
-  padding: 6px 12px;
+  padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-xs);
   color: var(--fg-muted);
   border-bottom: 1px solid var(--bg-hover);
@@ -177,8 +182,8 @@ function progress(t: TransferTask): number {
 .task {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm);
   border-top: 1px solid var(--bg-hover);
   max-width: 720px;
@@ -195,11 +200,11 @@ function progress(t: TransferTask): number {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-bottom: 4px;
+  margin-bottom: var(--sp-1);
 }
 /* 失败原因内联在进度条下面（一行截断，全文在 title） */
 .task-error {
-  margin-top: 3px;
+  margin-top: var(--sp-1);
   font-size: var(--fs-xs);
   color: var(--danger-text);
   overflow: hidden;
@@ -209,13 +214,13 @@ function progress(t: TransferTask): number {
 .progress-track {
   height: 6px;
   background: var(--border);
-  border-radius: var(--r-xs);
+  border-radius: var(--r-pill);
   overflow: hidden;
 }
 .progress-bar {
   height: 100%;
   background: var(--accent-text);
-  transition: width 0.15s;
+  transition: width var(--dur-base) var(--ease-out);
 }
 .progress-bar.done {
   background: var(--success-text);

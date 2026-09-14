@@ -82,6 +82,20 @@ onUnmounted(() => off?.())
   /* 整条可拖窗口 */
   -webkit-app-region: drag;
   user-select: none;
+  /*
+   * 标题栏必须**自成一层**，永远盖在全屏背板之上。
+   *
+   * 那些浮层的透明背板（`.ai-backdrop` 等）是 `position: fixed; inset: 0` +
+   * --z-pill(90)：它们盖住整扇窗，包括这里。macOS 上红绿灯是系统层画的、
+   * 在 webview 之上，所以盖住了也看不出来；Windows 走 frame:false，最小化/
+   * 最大化/关闭是**这里的 DOM 按钮**，被背板压住的结果是「点第一下没反应、
+   * 只是把浮层关掉；浮层开着时窗口还拖不动」。
+   *
+   * 代价是点标题栏空白不再能关掉浮层（那一层在它下面了）。这是有意的取舍：
+   * 浮层永远不许盖住窗口按钮。
+   */
+  position: relative;
+  z-index: calc(var(--z-pill) + 1);
 }
 /* macOS：给系统红绿灯让位（它们在左上角，约 70px 宽） */
 .title-bar.mac {
@@ -142,6 +156,11 @@ onUnmounted(() => off?.())
 .tb-btn:hover {
   background: var(--bg-hover);
   color: var(--fg);
+}
+/* 窗口按钮的「按下」比正文按钮再实一点：它紧挨着系统红绿灯，
+   没有反馈时用户会怀疑是不是点到了标题栏的拖拽区 */
+.tb-btn:active {
+  background: var(--bg-active);
 }
 /*
  * 关闭：悬停时红底。用 --danger-text 而不是 --danger ——

@@ -318,13 +318,24 @@ function dirty(file: OpenFile | null | undefined): boolean {
 .etab {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 6px 10px;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
   font-size: var(--fs-sm);
   color: var(--fg-muted);
   cursor: pointer;
   border-right: 1px solid var(--border);
   white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+/* 编辑器标签原来没有任何 hover 态：一排标签长得一模一样，鼠标划过也不知道会切到哪个 */
+.etab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.etab:active {
+  background: var(--bg-active);
 }
 .etab.active {
   color: var(--fg);
@@ -343,15 +354,23 @@ function dirty(file: OpenFile | null | undefined): boolean {
 .etab-close {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--fg-muted);
   cursor: pointer;
-  padding: 2px;
-  border-radius: var(--r-xs);
+  /* 24px 命中区：关文件是这一排里最容易被误点的动作 */
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--r-sm);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 .etab-close:hover {
-  color: var(--danger-text);
+  color: var(--fg-on-accent);
+  background: var(--danger-text);
 }
 .spacer {
   flex: 1;
@@ -365,12 +384,19 @@ function dirty(file: OpenFile | null | undefined): boolean {
   background: none;
   color: var(--fg-muted);
   font-size: var(--fs-sm);
-  padding: 0 10px;
+  padding: 0 var(--sp-3);
   cursor: pointer;
   white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 .bar-btn:hover:not(:disabled) {
   color: var(--fg);
+  background: var(--bg-hover);
+}
+.bar-btn:active:not(:disabled) {
+  background: var(--bg-active);
 }
 .bar-btn:disabled {
   opacity: 0.4;
@@ -441,13 +467,22 @@ function dirty(file: OpenFile | null | undefined): boolean {
   background: var(--bg-panel);
   color: var(--fg);
   border-radius: var(--r-sm);
-  padding: 3px 10px;
+  padding: 3px var(--sp-3);
   font-size: var(--fs-xs);
   cursor: pointer;
   white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 .banner-btn:hover {
   background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.banner-btn:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
 }
 .banner-btn.danger {
   border-color: var(--danger-text);

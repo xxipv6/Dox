@@ -319,7 +319,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
               </div>
               <div v-else-if="store.deviceContainers[s.id]?.status === 'error'" class="container-hint">
                 <span class="container-error">{{ store.deviceContainers[s.id].error }}</span>
-                <button class="container-retry" type="button" @click="store.loadDeviceContainers(s.id)">
+                <button class="container-retry retry" type="button" @click="store.loadDeviceContainers(s.id)">
                   重试
                 </button>
               </div>
@@ -517,13 +517,16 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   align-items: center;
   gap: var(--sp-2);
   min-height: 48px;
-  padding: 7px var(--sp-2);
+  padding: var(--sp-2);
   border-radius: var(--r-md);
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-out);
 }
 .device:hover {
   background: var(--bg-hover);
+}
+.device:active {
+  background: var(--bg-active);
 }
 .device.active {
   background: var(--bg-active);
@@ -535,17 +538,22 @@ async function onCtrMenuSelect(id: string): Promise<void> {
 /*
  * 行首的容器展开箭头：常驻低透明度（hover 才显形 = 这个功能等于不存在），
  * 悬停行/已展开时全亮。展开后箭头顺时针倒下（▸ → ▾）。
+ * 22px：这枚箭头是「展开/收起容器列表」的唯一入口，16px 很难点。
  */
 .device-expand {
-  width: 16px;
-  height: 16px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   flex-shrink: 0;
   color: var(--fg-muted);
   opacity: 0.45;
   transition:
     opacity var(--dur-fast) var(--ease-out),
-    transform var(--dur-fast) var(--ease-out);
+    transform var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+.device-expand:hover {
+  background: var(--bg-active);
 }
 .device:hover .device-expand,
 .device-expand.open {
@@ -572,26 +580,30 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   color: var(--fg-muted);
 }
 .containers-head .icon-btn {
-  width: 20px;
-  height: 20px;
+  /* 24px 那一档：侧栏里的小刷新键也得不费力才点得中 */
+  width: 24px;
+  height: 24px;
   padding: 0;
   color: var(--fg-muted);
 }
 .containers-head .icon-btn.dim {
-  opacity: 0.4;
+  opacity: 0.45;
   pointer-events: none;
 }
 .device-container {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px var(--sp-2);
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   border-radius: var(--r-sm);
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-out);
 }
 .device-container:hover {
   background: var(--bg-hover);
+}
+.device-container:active {
+  background: var(--bg-active);
 }
 /* 暂停的容器进不去：淡一档 + 恢复默认光标（右键菜单里有「恢复」） */
 .device-container.paused {
@@ -646,17 +658,8 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   min-width: 0;
 }
 .container-retry {
+  /* 沿用全局 .retry 的长相（小号描边按钮只该有一种） */
   flex-shrink: 0;
-  border: 1px solid var(--border);
-  background: none;
-  border-radius: var(--r-sm);
-  padding: 1px 8px;
-  font-size: var(--fs-xs);
-  color: var(--fg);
-  cursor: pointer;
-}
-.container-retry:hover {
-  background: var(--bg-hover);
 }
 .device-icon {
   color: var(--fg-muted);
@@ -706,18 +709,6 @@ async function onCtrMenuSelect(id: string): Promise<void> {
 .device:hover .device-actions {
   display: flex;
 }
-.empty-hint {
-  font-size: var(--fs-sm);
-  color: var(--fg-muted);
-  padding: var(--sp-2);
-  line-height: 1.6;
-}
-.empty-hint.clickable {
-  cursor: pointer;
-  border-radius: var(--r-sm);
-}
-.empty-hint.clickable:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
+/* 空态文案（含 .clickable 那一档）是 styles.css 里的全局 .empty-hint，
+   五个面板共用一个定义 —— 之前这里各写一份，padding 有 4px 2px 也有 8px */
 </style>
