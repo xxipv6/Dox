@@ -78,6 +78,8 @@ if (process.argv.includes('--e2e')) {
   const stamp = Date.now()
   const TAG = `DOXTILE-${stamp}-`
   const receipt = join(tmpdir(), `dox-tile-${stamp}.log`)
+  // 敲进终端的重定向目标用正斜杠：Git Bash 会把反斜杠当转义符吃掉
+  const receiptArg = receipt.replace(/\\/g, '/')
   /** 隔离的 userData：自己的单实例锁、自己的 dox-layout.json，不碰用户在跑的那个 */
   const userData = mkdtempSync(join(tmpdir(), 'dox-tile-'))
   const readReceipt = () => {
@@ -100,6 +102,25 @@ if (process.argv.includes('--e2e')) {
     await win.waitForLoadState('domcontentloaded')
     await win.waitForTimeout(1500)
     await win.evaluate(() => window.api.setLayout({ tabs: [] })).catch(() => {})
+    /*
+     * Windows 默认本地 shell 是 cmd：`$$ $(stty size)` 原样落盘、并发 `>>` 互相
+     * 覆盖，「shell 自证」整个失真。隔离实例里切到 Git Bash 再 reload（与
+     * verify-broadcast.mjs 同一段，说明见那边）。
+     */
+    if (process.platform === 'win32') {
+      const hasGitBash = await win.evaluate(() =>
+        window.api.listLocalShells().then((all) => all.some((s) => s.id === 'gitbash'))
+      )
+      if (hasGitBash) {
+        await win.evaluate(async () => {
+          const cur = await window.api.getSettings()
+          await window.api.setSettings({ ...cur, localShellId: 'gitbash' })
+        })
+        console.log('  [win32] 本地 shell 切到 Git Bash（cmd 下 stty/$$ 不成立）')
+      } else {
+        console.log('  [win32] 未找到 Git Bash，自证类断言将按 cmd 语义失真')
+      }
+    }
     await win.reload()
     await win.waitForLoadState('domcontentloaded')
     // 记下原始设置：后面切暗色核对配色时要基于它改，而不是造一份缺字段的
@@ -207,9 +228,15 @@ if (process.argv.includes('--e2e')) {
     await win.waitForTimeout(400)
     await win.locator('.terminal-container:visible').first().click()
     await win.waitForTimeout(400)
-    await win.keyboard.type(`echo ${TAG}$$ $(stty size) >> ${receipt}`)
+    // 用 $LINES/$COLUMNS 而不是 $(stty size)：MSYS 的 stty 在 ConPTY 下 ioctl
+    // 失败（输出为空），而 bash/zsh 交互式都会在每次命令前用 checkwinsize
+    // 刷新这两个变量（实测 git bash 下 155x47 正确）
+    await win.keyboard.type(`echo ${TAG}$$ $LINES $COLUMNS >> ${receiptArg}`)
     await win.keyboard.press('Enter')
-    await win.waitForTimeout(2600)
+    // 轮询等三行都落地：第三个 shell 的首命令可能比前两个晚**很久**——
+    // Windows 上 git bash 冷启动 + Defender 首扫 bash.exe 实测能拖 8s+，
+    // 固定等待必数漏（输入会排队、晚些照样执行，只是晚到）
+    for (let i = 0; i < 25 && readReceipt().length < 3; i++) await win.waitForTimeout(600)
 
     const lines = readReceipt()
     /*
@@ -284,9 +311,11 @@ if (process.argv.includes('--e2e')) {
         [...document.querySelectorAll('.tile')].findIndex((el) => el.classList.contains('focused'))
       )) === 2
     )
-    await win.keyboard.type(`echo ${TAG}FOCUS >> ${receipt}`)
+    await win.keyboard.type(`echo ${TAG}FOCUS >> ${receiptArg}`)
     await win.keyboard.press('Enter')
-    await win.waitForTimeout(2200)
+    for (let i = 0; i < 14 && readReceipt().filter((l) => l.includes('FOCUS')).length < 3; i++) {
+      await win.waitForTimeout(600)
+    }
     // 广播还开着，所以三个 shell 都会执行；这里看的是**第三个**会话有没有拿到
     check(
       '敲的字进了第三个格子（三行里含第三个 shell 的 PID）',

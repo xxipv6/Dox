@@ -34,6 +34,11 @@ const stamp = Date.now()
 /** 每一轮用不同的后缀，方便按行数分别统计「有几条命令真的执行了」 */
 const TAG = `DOXBC-${stamp}-`
 const receipt = join(tmpdir(), `dox-broadcast-${stamp}.log`)
+/*
+ * 敲进终端的重定向目标：Git Bash 会把反斜杠当转义符吃掉（>> C:\Users\…
+ * 落到 C:Users…），MSYS 对「盘符 + 正斜杠」原生接受；node 侧读写仍用 receipt。
+ */
+const receiptArg = receipt.replace(/\\/g, '/')
 
 const app = await _electron.launch({
   args: ['.', `--user-data-dir=${mkdtempSync(join(tmpdir(), 'dox-bc-'))}`],
@@ -48,6 +53,26 @@ try {
   // 清掉可能恢复出来的旧标签（隔离 userData 里通常本来就是空的）
   await win.waitForTimeout(1500)
   await win.evaluate(() => window.api.setLayout({ tabs: [] })).catch(() => {})
+  /*
+   * Windows 默认本地 shell 是 cmd：$$ 不展开成 PID，两个 cmd 并发 `>>` 同一个
+   * 文件还会互相覆盖（都不是 O_APPEND，先各自 seek 到末尾再写），下面的 POSIX
+   * 记账全部失真。隔离实例里把默认 shell 切到 Git Bash 再 reload，之后建的
+   * 标签就都是 POSIX 语义（仓库的 mac 开发机默认 zsh，不走这段）。
+   */
+  if (process.platform === 'win32') {
+    const hasGitBash = await win.evaluate(() =>
+      window.api.listLocalShells().then((all) => all.some((s) => s.id === 'gitbash'))
+    )
+    if (hasGitBash) {
+      await win.evaluate(async () => {
+        const cur = await window.api.getSettings()
+        await window.api.setSettings({ ...cur, localShellId: 'gitbash' })
+      })
+      console.log('  [win32] 本地 shell 切到 Git Bash（cmd 下 $$ / 追加语义不成立）')
+    } else {
+      console.log('  [win32] 未找到 Git Bash，记账类断言将按 cmd 语义失真')
+    }
+  }
   await win.reload()
   await win.waitForLoadState('domcontentloaded')
 
@@ -79,9 +104,21 @@ try {
     await win.waitForTimeout(250)
     await activeTerm.click()
     await win.waitForTimeout(350)
-    await win.keyboard.type(`echo ${tag} $$ >> ${receipt}`)
+    await win.keyboard.type(`echo ${tag} $$ >> ${receiptArg}`)
     await win.keyboard.press('Enter')
-    await win.waitForTimeout(2200)
+    // 等行数稳定（1.2s 不再增长）而不是固定时长：Windows 上 shell 首命令
+    // 可能晚好几秒，数早了会漏行（期望 1 行还是 2 行由调用方判断）
+    let prev = -1
+    let settled = 0
+    for (let i = 0; i < 16 && settled < 2; i++) {
+      await win.waitForTimeout(600)
+      const n = readReceipt().filter((l) => l.includes(tag)).length
+      if (n === prev) settled++
+      else {
+        settled = 0
+        prev = n
+      }
+    }
     return readReceipt().filter((l) => l.includes(tag))
   }
   const shells = (lines) => new Set(lines.map((l) => l.split(/\s+/).pop())).size

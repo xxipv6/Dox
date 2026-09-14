@@ -29,7 +29,9 @@ const STYLES = `${SRC}/styles.css`
 // ---------------------------------------------------------------- 阶段 1
 console.log('阶段 1：令牌单一出处（静态守卫）')
 
-const css = readFileSync(STYLES, 'utf8')
+// 行尾归一：仓库存 LF，但 Windows 上 core.autocrlf=true 的工作区是 CRLF，
+// 按 \n 定位主题块会整个找不到（实测只挂在亮色块）
+const css = readFileSync(STYLES, 'utf8').replace(/\r\n/g, '\n')
 
 /** 只取某个主题块（从它的选择器到下一个顶层 `}`），免得两套主题串味 */
 function themeBlock(selector) {
@@ -353,13 +355,20 @@ if (process.argv.includes('--e2e')) {
         boxWidth: box.getBoundingClientRect().width,
         screenWidth: rect?.width ?? 0,
         screenHeight: rect?.height ?? 0,
-        overflowX: viewport ? viewport.scrollWidth - viewport.clientWidth : 0
+        overflowX: viewport ? viewport.scrollWidth - viewport.clientWidth : 0,
+        dpr: window.devicePixelRatio
       }
     })
     check('终端内容四周有内边距', term.padLeft > 0 && term.padTop > 0, JSON.stringify(term))
+    /*
+     * 容差要吃掉分数 dpr 的取整偏差：xterm 把 .xterm-screen 的宽度按设备像素
+     * 网格取整（style.width 是整数 px），Windows 125%/150% 缩放下会比利出的
+     * css 宽度多出 1~2px，被内边距吸收、不产生滚动条（下面 overflowX 那条
+     * 才是用户可见性的保证）。整数 dpr（mac 2x）下偏差为 0，容差用不上。
+     */
     check(
       '内边距算进了 fit：屏幕宽度 + 两侧内边距不超出容器',
-      term.screenWidth + term.padLeft * 2 <= term.boxWidth + 1,
+      term.screenWidth + term.padLeft * 2 <= term.boxWidth + Math.ceil(term.dpr) * 2,
       JSON.stringify(term)
     )
     check('终端没有出现横向滚动（列数没算多）', term.overflowX <= 1, String(term.overflowX))
