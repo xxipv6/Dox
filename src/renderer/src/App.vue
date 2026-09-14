@@ -107,20 +107,13 @@ onMounted(async () => {
   window.api.onCliCommand((cmd) => store.handleCliCommand(cmd))
   window.api.cliCommandReady()
 
-  let restored = false
-  try {
-    restored = await layout.restore()
-  } catch (err) {
-    // 恢复失败也必须让用户落在一个能用的界面上，而不是空白窗口
-    console.error('[layout] 恢复上次布局失败，回退到默认本地终端', err)
-  }
-  if (!restored && store.tabs.length === 0) void store.connectLocal()
-  // 恢复期间不写快照，否则重建的中间态会把布局一步步覆盖坏
-  layout.startAutoSave()
-
   /*
    * 量 .terminal-stack 的宽度决定平铺开几列。窗口缩放、侧栏收展、SFTP 面板
    * 开关、编辑器分栏都会改变它，所以交给 ResizeObserver 而不是只在切换时量一次。
+   *
+   * 注意必须在下面第一个 await 之前调：watchElement 里要注册 onBeforeUnmount，
+   * 过了 await 组件实例就被 Vue 摘掉了 —— 钩子注册不上，退出时 observer 也不会
+   * 摘（每次启动控制台都会出两条 warn，就是这个）。
    */
   watchElement(stackEl, {
     size: (el) => {
@@ -137,6 +130,17 @@ onMounted(async () => {
     },
     scroll: measureHiddenTabs
   })
+
+  let restored = false
+  try {
+    restored = await layout.restore()
+  } catch (err) {
+    // 恢复失败也必须让用户落在一个能用的界面上，而不是空白窗口
+    console.error('[layout] 恢复上次布局失败，回退到默认本地终端', err)
+  }
+  if (!restored && store.tabs.length === 0) void store.connectLocal()
+  // 恢复期间不写快照，否则重建的中间态会把布局一步步覆盖坏
+  layout.startAutoSave()
 })
 
 onBeforeUnmount(() => {
