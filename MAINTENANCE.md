@@ -259,11 +259,24 @@ node scripts/verify-cli.mjs         # CLI 伴侣：--cli 参数单实例转发�
 node scripts/verify-shell-env.mjs   # 新终端环境解析：POSIX 假 $SHELL / Windows 注册表注入变量，终端里可见
 node scripts/verify-tar-transfer.mjs # tar 整流文件夹传输：格式纯函数 + 2000 文件树双向 sha256 + 取消两条路 + UI 冒烟
 node scripts/verify-csv-table.mjs   # 编辑器 CSV/TSV 表格视图：解析边界、表格↔文本切换撤销保真、渲染截断
+node scripts/verify-search.mjs      # 项目搜索本机路径：纯函数 + e2e（分组/排除/跳行/Aa/正则/范围）
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
 
 需要远端会话的脚本前置：`npm run build`，且已保存一个可连接的设备。
 **这些脚本会对远端建临时文件并自己删掉，不装任何东西。**
+
+搜索的远端两条路要真机（密码走 `DOX_TEST_PASS` 环境变量，不进仓库）：
+
+```bash
+DOX_TEST_PASS=… node scripts/verify-search-remote.mjs     # SSH 远端：UI 升级助手 → agent fs_search → 点匹配开远端文件
+DOX_TEST_PASS=… node scripts/verify-search-container.mjs  # 容器内：测试机上起一次性 alpine → 装容器助手 → 搜索不回退
+```
+
+例外说明：这两个脚本会经 UI 显式安装/升级 dox-agent（搜索的 agent 引擎要
+v0.7.0+；容器里 agent 是唯一引擎，没装/过旧直接报错指路）——这是产品自己的
+opt-in 入口，脚本走同一条路。容器一律起在 SSH 可达的测试机上，本地没 docker
+就别在本机跑第二条。
 
 ### 跑之前先 `npm run build`
 

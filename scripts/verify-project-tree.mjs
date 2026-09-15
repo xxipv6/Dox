@@ -147,7 +147,11 @@ try {
   // deep 现在是折叠/选中态；先点别的行让 reveal 的效果可分辨
   await rowWith('.explorer .tree .tree-row', 'a.txt').click()
   await win.locator('.tab-content:visible .xterm-helper-textarea').first().click()
-  await win.keyboard.type(`cd "${path.join(base, 'sub', 'deep')}"`)
+  // Windows 默认 shell 是 cmd：cd 跨盘符不切目录（终端起始在 D:、夹具在家目录 C:
+  // 必踩），得用 cd /d，否则 cwd 根本没变、reveal 不触发是 cmd 的行为不是产品 bug
+  await win.keyboard.type(
+    `${process.platform === 'win32' ? 'cd /d' : 'cd'} "${path.join(base, 'sub', 'deep')}"`
+  )
   await win.keyboard.press('Enter')
   let revealed = false
   for (let i = 0; i < 10; i++) {
