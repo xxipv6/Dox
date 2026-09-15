@@ -2,7 +2,7 @@
 
 Dox 是一个面向远程开发的桌面工作区：把 SSH 终端、SFTP 文件管理、容器、端口转发和主机监控放在同一个窗口里。它基于 Electron，支持 Windows、macOS 和 Linux。
 
-[![CI](https://github.com/xxipv6/Dox/actions/workflows/ci.yml/badge.svg)](https://github.com/xxipv6/Dox/actions/workflows/ci.yml) · [下载最新版本 v0.1.3](https://github.com/xxipv6/Dox/releases/latest)
+[下载最新版本](https://github.com/xxipv6/Dox/releases/latest)
 
 ## 为什么用 Dox
 
