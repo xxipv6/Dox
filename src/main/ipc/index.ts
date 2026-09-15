@@ -9,6 +9,7 @@ import type {
   AppSettings,
   CommandSnippet,
   ComposeVerb,
+  SearchStartParams,
   ContainerControlAction,
   DownloadRequest,
   DroppedFile,
@@ -38,6 +39,7 @@ import { createAgentStreamIO } from '../agent/agentStream'
 import type { ProcessService } from '../proc/ProcessService'
 import type { AiUsageService } from '../aiusage/AiUsageService'
 import type { ComposeService } from '../compose/ComposeService'
+import type { SearchService } from '../search/SearchService'
 
 /** agentCall 白名单泛通道允许的方法（0.4.0 起；fs_* 是既有方法，走这里也行） */
 const AGENT_CALL_ALLOW = new Set([
@@ -76,7 +78,8 @@ export function registerIpc(
   agentManager: AgentManager,
   processService: ProcessService,
   aiUsageService: AiUsageService,
-  composeService: ComposeService
+  composeService: ComposeService,
+  searchService: SearchService
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle(
@@ -600,4 +603,10 @@ export function registerIpc(
       composeService.start(sessionId, containerName, filePath, verb)
   )
   ipcMain.on(IpcChannels.composeCancel, (_event, runId: string) => composeService.cancel(runId))
+
+  // ---- 项目模式全文搜索（流式：start 返回 {runId, engine}，结果走 searchEvent 广播）----
+  ipcMain.handle(IpcChannels.searchStart, (_event, params: SearchStartParams) =>
+    searchService.start(params)
+  )
+  ipcMain.on(IpcChannels.searchCancel, (_event, runId: string) => searchService.cancel(runId))
 }

@@ -272,6 +272,9 @@ func dispatchFS(method string, params json.RawMessage) (interface{}, bool, error
 	case "fs_du":
 		r, err := fsDu(params)
 		return r, true, err
+	case "fs_search":
+		r, err := fsSearch(params)
+		return r, true, err
 	case "fs_read_chunk":
 		r, err := fsReadChunk(params)
 		return r, true, err

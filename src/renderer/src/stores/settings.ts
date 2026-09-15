@@ -27,7 +27,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   // 536 是算出来的：网络页极限 `192.168.233.233:23244`（21 等宽字符 ≈139px）
   // 在默认宽度下不省略号（列账见 MonitorPanel 的 .conn-grid 注释）
   monitorWidth: 536,
-  localDefaultDir: ''
+  localDefaultDir: '',
+  projectRoots: {}
 }
 
 /** 界面主题三选。'system' 那一项的解释文案见设置弹窗 */
@@ -37,15 +38,21 @@ export const UI_THEME_OPTIONS: { id: UiTheme; name: string }[] = [
   { id: 'system', name: '跟随系统' }
 ]
 
+/** 终端「跟随系统等宽」的实际字体栈，与 styles.css 的 --font-mono 保持一份 */
+const MENLO_FIRST = 'Menlo, Monaco, Consolas, "Cascadia Mono", "SF Mono", monospace'
+
 /** 编程字体候选；系统未安装时会回退到等宽默认字体，不会报错 */
 export const FONT_PRESETS = [
-  { id: 'default', name: '跟随系统等宽', family: 'Consolas, "Courier New", monospace' },
+  // 顺序与 styles.css 的 --font-mono 一致：mac 命中 Menlo、Windows 命中 Consolas，
+  // 别让 mac 掉到 Courier New（那正是「同一排面板两套字形」的老毛病）
+  { id: 'default', name: '跟随系统等宽', family: MENLO_FIRST },
+
   { id: 'cascadia', name: 'Cascadia Code', family: '"Cascadia Code", Consolas, monospace' },
   { id: 'cascadia-mono', name: 'Cascadia Mono', family: '"Cascadia Mono", Consolas, monospace' },
   { id: 'jetbrains', name: 'JetBrains Mono', family: '"JetBrains Mono", Consolas, monospace' },
   { id: 'firacode', name: 'Fira Code', family: '"Fira Code", Consolas, monospace' },
   { id: 'hack', name: 'Hack', family: 'Hack, Consolas, monospace' },
-  { id: 'menlo', name: 'Menlo / Monaco', family: 'Menlo, Monaco, Consolas, monospace' }
+  { id: 'menlo', name: 'Menlo / Monaco', family: MENLO_FIRST }
 ]
 
 /** 读旧 localStorage 里的设置，用于一次性迁移 */
@@ -78,6 +85,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const outputHighlight = ref(DEFAULT_SETTINGS.outputHighlight)
   const monitorWidth = ref(DEFAULT_SETTINGS.monitorWidth)
   const localDefaultDir = ref(DEFAULT_SETTINGS.localDefaultDir)
+  /** 文件面板项目模式：deviceKey → 根路径（不在 watch 列表里，由 setProjectRoot 显式 persist） */
+  const projectRoots = ref<Record<string, string>>(DEFAULT_SETTINGS.projectRoots ?? {})
   const dialogVisible = ref(false)
   /** load() 完成前不写盘，否则会用默认值覆盖掉用户已保存的设置 */
   let loaded = false
@@ -151,6 +160,7 @@ export const useSettingsStore = defineStore('settings', () => {
      */
     if (persisted?.monitorWidth === 440) monitorWidth.value = DEFAULT_SETTINGS.monitorWidth
     localDefaultDir.value = persisted?.localDefaultDir ?? DEFAULT_SETTINGS.localDefaultDir
+    projectRoots.value = persisted?.projectRoots ?? {}
     uiTheme.value = persisted?.uiTheme ?? DEFAULT_SETTINGS.uiTheme
 
     /*
@@ -175,37 +185,45 @@ export const useSettingsStore = defineStore('settings', () => {
 
   function persist(): void {
     if (!loaded) return
-    window.api
-      .setSettings({
-        themeId: themeId.value,
-        uiTheme: uiTheme.value,
-        fontSize: fontSize.value,
-        fontId: fontId.value,
-        ligatures: ligatures.value,
-        localShellId: localShellId.value,
-        suggestPortForward: suggestPortForward.value,
-        portSentinel: portSentinel.value,
-        outputHighlight: outputHighlight.value,
-        monitorWidth: monitorWidth.value,
-        localDefaultDir: localDefaultDir.value
-      })
-      /*
-       * 落盘失败必须让用户看见。
-       *
-       * 原来只写 console：用户以为设置保存了（界面也确实变了），重启后回到旧值 ——
-       * 这正是这个项目反复强调的「显示的是假的」那一类。提示里给一个「重试」，
-       * 因为失败原因往往是磁盘/权限这类一下过不去的，用户点一下比改一个值再改回来省事。
-       * 高频触发（拖监控面板宽度）用 pushToastOnce 去重，避免刷屏。
-       */
-      .catch((err) => {
-        console.warn('[settings] 保存设置失败', err)
-        pushToastOnce(
-          'settings-persist',
-          `设置没能保存：${errorText(err)}`,
-          'error',
-          { label: '重试', run: () => persist() }
-        )
-      })
+    // projectRoots.value 是 reactive 代理（ref 包裹对象会深层转换），
+    // 过不了 IPC 结构化克隆 —— 必须剥成纯数据；且克隆失败是**同步**抛，
+    // .catch 接不住，得包 try（维护手册：凡是跨 IPC 的，先确认手里的是纯数据）
+    try {
+      window.api
+        .setSettings({
+          themeId: themeId.value,
+          uiTheme: uiTheme.value,
+          fontSize: fontSize.value,
+          fontId: fontId.value,
+          ligatures: ligatures.value,
+          localShellId: localShellId.value,
+          suggestPortForward: suggestPortForward.value,
+          portSentinel: portSentinel.value,
+          outputHighlight: outputHighlight.value,
+          monitorWidth: monitorWidth.value,
+          localDefaultDir: localDefaultDir.value,
+          projectRoots: { ...projectRoots.value }
+        })
+        /*
+         * 落盘失败必须让用户看见。
+         *
+         * 原来只写 console：用户以为设置保存了（界面也确实变了），重启后回到旧值 ——
+         * 这正是这个项目反复强调的「显示的是假的」那一类。提示里给一个「重试」，
+         * 因为失败原因往往是磁盘/权限这类一下过不去的，用户点一下比改一个值再改回来省事。
+         * 高频触发（拖监控面板宽度）用 pushToastOnce 去重，避免刷屏。
+         */
+        .catch((err) => {
+          console.warn('[settings] 保存设置失败', err)
+          pushToastOnce(
+            'settings-persist',
+            `设置没能保存：${errorText(err)}`,
+            'error',
+            { label: '重试', run: () => persist() }
+          )
+        })
+    } catch (err) {
+      console.warn('[settings] 保存设置失败（序列化）', err)
+    }
   }
 
   /*
@@ -232,6 +250,21 @@ export const useSettingsStore = defineStore('settings', () => {
     uiTheme.value = resolvedTheme.value === 'dark' ? 'light' : 'dark'
   }
 
+  /*
+   * 记/清某台设备的项目根。projectRoots 是 Record，改属性不触发 watch，
+   * 所以不挂进上面的 watch 列表，在这里显式 persist。
+   */
+  function setProjectRoot(deviceKey: string, root: string | null): void {
+    if (root === null) {
+      const next = { ...projectRoots.value }
+      delete next[deviceKey]
+      projectRoots.value = next
+    } else {
+      projectRoots.value = { ...projectRoots.value, [deviceKey]: root }
+    }
+    persist()
+  }
+
   function openDialog(): void {
     dialogVisible.value = true
   }
@@ -248,11 +281,13 @@ export const useSettingsStore = defineStore('settings', () => {
     outputHighlight,
     monitorWidth,
     localDefaultDir,
+    projectRoots,
     dialogVisible,
     resolvedTheme,
     currentPreset,
     fontFamily,
     toggleTheme,
+    setProjectRoot,
     load,
     openDialog
   }

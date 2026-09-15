@@ -1,5 +1,5 @@
 import type { Extension } from '@codemirror/state'
-import { StreamLanguage } from '@codemirror/language'
+import { StreamLanguage, type Language, type LanguageSupport } from '@codemirror/language'
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
 import { python } from '@codemirror/lang-python'
@@ -35,8 +35,8 @@ const BY_EXT: Record<string, () => Extension> = {
   css: () => css(),
   scss: () => css(),
   less: () => css(),
-  md: () => markdown(),
-  markdown: () => markdown(),
+  md: () => markdownWithFences(),
+  markdown: () => markdownWithFences(),
   yml: () => yaml(),
   yaml: () => yaml(),
   xml: () => xml(),
@@ -54,6 +54,57 @@ const BY_EXT: Record<string, () => Extension> = {
   conf: () => StreamLanguage.define(properties),
   env: () => StreamLanguage.define(properties)
 }
+
+/**
+ * ``` 围栏里的语言名 → 语言实例。VS Code 会着色围栏里的代码（```bash 块里
+ * 注释是绿的），CodeMirror 默认只把整块当普通文本，这里按 info string 嵌进去。
+ * 认不出的语言名返回 null = 不着色，行为与原来一致。
+ */
+const FENCE_LANGS: Record<string, () => Language> = {
+  js: () => langOf(javascript()),
+  javascript: () => langOf(javascript()),
+  node: () => langOf(javascript()),
+  jsx: () => langOf(javascript({ jsx: true })),
+  ts: () => langOf(javascript({ typescript: true })),
+  typescript: () => langOf(javascript({ typescript: true })),
+  tsx: () => langOf(javascript({ typescript: true, jsx: true })),
+  json: () => langOf(json()),
+  jsonc: () => langOf(json()),
+  py: () => langOf(python()),
+  python: () => langOf(python()),
+  html: () => langOf(html()),
+  css: () => langOf(css()),
+  xml: () => langOf(xml()),
+  yml: () => langOf(yaml()),
+  yaml: () => langOf(yaml()),
+  sh: () => StreamLanguage.define(shell),
+  shell: () => StreamLanguage.define(shell),
+  bash: () => StreamLanguage.define(shell),
+  zsh: () => StreamLanguage.define(shell),
+  console: () => StreamLanguage.define(shell),
+  ps1: () => StreamLanguage.define(powerShell),
+  powershell: () => StreamLanguage.define(powerShell),
+  toml: () => StreamLanguage.define(toml),
+  sql: () => StreamLanguage.define(standardSQL),
+  ini: () => StreamLanguage.define(properties),
+  conf: () => StreamLanguage.define(properties),
+  properties: () => StreamLanguage.define(properties),
+  nginx: () => StreamLanguage.define(nginx),
+  dockerfile: () => StreamLanguage.define(dockerFile),
+  docker: () => StreamLanguage.define(dockerFile)
+}
+
+/**
+ * 内嵌解析要的是裸 Language（markdown 只取它的 parser），而 lang-* 包的工厂
+ * 返回的是 LanguageSupport —— 直接塞进去运行时会挂，取 .language 才是对的。
+ */
+const langOf = (ls: LanguageSupport): Language => ls.language
+
+function fenceLanguage(info: string): Language | null {
+  return FENCE_LANGS[info.trim().toLowerCase()]?.() ?? null
+}
+
+const markdownWithFences = (): LanguageSupport => markdown({ codeLanguages: fenceLanguage })
 
 /** 没有扩展名但靠文件名就能认出来的 */
 const BY_NAME: Record<string, () => Extension> = {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComposeVerb, DiskUsage, DroppedFile, FileEntry, TransferTask } from '@shared/types'
-import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
+import { BUNDLED_AGENT_VERSION, FS_MIN_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { LOCAL_ID_PREFIX } from '@shared/sessionId'
 import { WIN_DRIVES, isWinPath, joinLocal, parentLocal } from '@shared/localPath'
 import { formatSize, formatTime } from '../utils/format'
@@ -11,9 +11,13 @@ import { useComposeStore } from '../stores/compose'
 import { useSettingsStore } from '../stores/settings'
 import { panelClipboard } from '../stores/fileClipboard'
 import { errorText } from '../utils/errors'
+import { vFocus } from '../directives/focus'
 import Icon from './Icon.vue'
+import FileIcon from './FileIcon.vue'
 import Spinner from './Spinner.vue'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
+import ProjectTree from './ProjectTree.vue'
+import SearchPanel from './SearchPanel.vue'
 
 const props = defineProps<{
   /** 面板归属的会话（cwd 跟随/编辑器分组用这个；容器标签 = 容器 pane id） */
@@ -41,9 +45,16 @@ const isWinLocal = computed(() => isLocal.value && window.api.platform === 'win3
 /** 本机终端的 shell 种类（cmd 不认单引号）：「在终端打开」的引号策略靠它 */
 let localShellKind: string | null = null
 
-/** 当前目录下拼一个名字（本机 Windows 走反斜杠，远端一律 posix） */
-function joinInCwd(name: string): string {
-  return isLocal.value ? joinLocal(cwd.value, name) : `${cwd.value}/${name}`
+/** 在指定目录下拼一个名字（本机 Windows 走反斜杠，远端一律 posix） */
+function joinIn(dir: string, name: string): string {
+  return isLocal.value ? joinLocal(dir, name) : `${dir}/${name}`
+}
+
+/** 取父目录（本机 Windows 复用 parentLocal 处理盘符边界，远端 posix 字符串截断） */
+function parentOf(path: string): string {
+  if (isLocal.value) return parentLocal(path)
+  const idx = path.lastIndexOf('/')
+  return idx <= 0 ? '/' : path.slice(0, idx)
 }
 
 const cwd = ref('')
@@ -122,23 +133,60 @@ function toggleDu(): void {
   if (duOpen.value) void refreshDu()
 }
 
-// 内联新建文件夹 / 重命名
+// 内联新建文件夹 / 重命名（browse 模式的状态；项目模式的内联编辑在 ProjectTree 内部）
 const creatingDir = ref(false)
 const newDirName = ref('')
 const renamingPath = ref<string | null>(null)
 const renameValue = ref('')
 
-/**
- * autofocus 属性对动态插入的元素不可靠（同一页面第二次插入常常不聚焦）。
- * 输入框没聚焦就不会有 blur —— 用户点别处输入框也不消失（报告过的 bug）。
- * 指令是确定性的：挂载即聚焦，并像 Finder 一样预选主名（不含扩展名）。
- */
-const vFocus = {
-  mounted(el: HTMLElement): void {
-    if (!(el instanceof HTMLInputElement)) return
-    el.focus()
-    const dot = el.value.lastIndexOf('.')
-    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+// ---- 项目模式：面板整体切到「以某文件夹为根」的树形视图（VS Code explorer 语义）----
+// browse 的 cwd/entries/history 在项目模式期间从不被触碰，退出即精确回到进入前的目录。
+const mode = ref<'browse' | 'project'>('browse')
+const projectRoot = ref('')
+const treeRef = ref<InstanceType<typeof ProjectTree> | null>(null)
+/** 项目模式下树的单选（右键菜单/复制/键盘的动作对象） */
+const treeSelected = ref<FileEntry | null>(null)
+/** 全文搜索面板（与树同位切换；树用 v-show 保活，懒加载缓存不能打回冷启动） */
+const searchOpen = ref(false)
+const searchPanelRef = ref<InstanceType<typeof SearchPanel> | null>(null)
+/** 搜索范围（右键「从文件夹中查找」缩到子目录；空 = 项目根） */
+const searchRoot = ref('')
+/** 设备级持久化 key：同一台设备重连/新开标签算出同一个（规则见 sessions store） */
+const deviceKey = computed(() => store.deviceKeyForSession(props.sessionId))
+/** 顶部栏展示的根名（完整路径放 title） */
+const rootName = computed(() => projectRoot.value.split(/[\\/]/).filter(Boolean).pop() ?? projectRoot.value)
+
+function enterProject(path: string): void {
+  closeFilter()
+  mode.value = 'project'
+  projectRoot.value = path
+  treeSelected.value = null
+  searchOpen.value = false
+  searchRoot.value = ''
+  settings.setProjectRoot(deviceKey.value, path)
+  // 与终端 cwd 跟踪保持同步（cwdBySession 的语义 = 「面板在看哪」）
+  store.setCwd(props.sessionId, path)
+}
+
+async function exitProject(): Promise<void> {
+  mode.value = 'browse'
+  projectRoot.value = ''
+  treeSelected.value = null
+  searchOpen.value = false
+  searchRoot.value = ''
+  settings.setProjectRoot(deviceKey.value, null)
+  // cwd 一直没动过，load() 刷新即回到进入项目模式前的那个目录
+  await load()
+}
+
+/** 操作后刷新：browse 重列当前目录；project 只重列受影响的树目录（缓存仍在的不碰） */
+async function refreshAfterOp(affectedDirs: string[]): Promise<void> {
+  if (mode.value === 'project') {
+    const tree = treeRef.value
+    if (!tree) return
+    await Promise.all([...new Set(affectedDirs)].map((d) => tree.refreshDir(d)))
+  } else {
+    await load()
   }
 }
 
@@ -214,7 +262,7 @@ function copySelection(): void {
   panelClipboard.value = { key: panelKey.value, paths: [...selected.value] }
 }
 
-async function pasteClipboard(): Promise<void> {
+async function pasteClipboard(dir = cwd.value): Promise<void> {
   const clip = panelClipboard.value
   if (!clip) return
   if (clip.key !== panelKey.value) {
@@ -230,13 +278,13 @@ async function pasteClipboard(): Promise<void> {
       // 本机：走传输队列（撞名避让/进度/取消同一套），DroppedFile 只用到 path
       await window.api.enqueueDropped(
         fsSessionId.value,
-        cwd.value,
+        dir,
         clip.paths.map((p) => ({ path: p, name: p, size: 0 }))
       )
     } else {
       // 远端：服务端 cp -a 就地复制（不经本机中转），完事刷新
-      await window.api.sftpCopyWithin(fsSessionId.value, clip.paths, cwd.value)
-      await load()
+      await window.api.sftpCopyWithin(fsSessionId.value, clip.paths, dir)
+      await refreshAfterOp([dir])
     }
   })
 }
@@ -261,17 +309,31 @@ function onKeydown(e: KeyboardEvent): void {
   if (tag === 'INPUT' || tag === 'TEXTAREA') return
   const key = e.key.toLowerCase()
   if (key === 'a') {
+    // 项目模式没有多选（一期）：全选没有意义
+    if (mode.value === 'project') return
     e.preventDefault()
     selectAll()
   } else if (key === 'c') {
     e.preventDefault()
-    copySelection()
+    if (mode.value === 'project') {
+      if (treeSelected.value) {
+        panelClipboard.value = { key: panelKey.value, paths: [treeSelected.value.path] }
+      }
+    } else {
+      copySelection()
+    }
   } else if (key === 'v') {
     e.preventDefault()
-    void pasteClipboard()
+    void pasteClipboard(mode.value === 'project' ? treeRef.value?.selectedDirOrRoot() : undefined)
   } else if (key === 'f') {
     e.preventDefault()
-    openFilter()
+    // browse 的 Ctrl+F 过滤在项目模式无对应物；映射到项目搜索最自然（Shift+F 同路）
+    if (mode.value === 'project') {
+      if (!searchOpen.value) toggleSearch()
+      else searchPanelRef.value?.focusInput()
+    } else {
+      openFilter()
+    }
   }
 }
 
@@ -340,8 +402,10 @@ async function init(): Promise<void> {
       agentMissing.value = true
       return
     }
-    // 版本过旧（没有 fs_* 方法的老助手）：糊 unknown method 原文不如指路升级
-    if (st.version && agentVersionOlder(st.version, BUNDLED_AGENT_VERSION)) {
+    // 版本过旧（没有 fs_* 方法的老助手）：糊 unknown method 原文不如指路升级。
+    // 门槛是 fs 能力的最低版本而非内置最新版 —— 升 BUNDLED 不能把老助手的
+    // 文件面板整个关掉（fs_* 齐全就该能用，只有搜索这类新方法才有更高门槛）
+    if (st.version && agentVersionOlder(st.version, FS_MIN_AGENT_VERSION)) {
       agentOutdated.value = st.version
       return
     }
@@ -356,6 +420,14 @@ async function init(): Promise<void> {
   try {
     // 以远端 home 目录为起点（容器落地 /，由主进程 realpath 分路处理）
     const home = await window.api.sftpRealpath(fsSessionId.value, '.', ctrName.value)
+    // 这台设备上次停在项目模式：直接恢复（cwd 先备好 home，退出项目模式时从那里继续）。
+    // 恢复是热路径 —— 切标签会重挂载本组件（App.vue 按 sessionId 作 key）
+    const savedRoot = settings.projectRoots[deviceKey.value]
+    if (savedRoot) {
+      cwd.value = home
+      enterProject(savedRoot)
+      return
+    }
     await load(home)
   } catch {
     await load('/')
@@ -406,47 +478,64 @@ function goUp(): void {
   nav('/' + parts.join('/') || '/')
 }
 
+/** 打开编辑器的统一入口：收口三处调用点重复的容器 fs 参数拼接 */
+function openInEditor(path: string, opts?: { line?: number; preview?: boolean }): void {
+  void editor.open(
+    props.sessionId,
+    path,
+    props.container
+      ? { sessionId: props.container.parentSessionId, containerName: props.container.containerName }
+      : undefined,
+    opts
+  )
+}
+
 function openEntry(entry: FileEntry): void {
-  // 目录进目录；文件交给内置编辑器（二进制/超限由主编解读取时判定并报错）
+  // 目录进目录；文件交给内置编辑器（二进制/超限由主编解读取时判定并报错）。
+  // browse 双击 = 固定打开（单击是多选语义，不掺预览）
   if (entry.isDir) nav(entry.path)
-  else
-    void editor.open(
-      props.sessionId,
-      entry.path,
-      props.container
-        ? { sessionId: props.container.parentSessionId, containerName: props.container.containerName }
-        : undefined
-    )
+  else openInEditor(entry.path)
 }
 
 // ---- 新建文件夹 ----
+/** 在指定目录下建文件夹（browse 传 cwd；项目模式传树的发起目录） */
+async function createDirIn(dir: string, name: string): Promise<void> {
+  if (!name) return
+  // 「新建」失败多半是权限或重名：把这一段交给 guard，重试才有东西可重跑
+  await guard(async () => {
+    await window.api.sftpMkdir(fsSessionId.value, joinIn(dir, name), ctrName.value)
+    await refreshAfterOp([dir])
+  })
+}
+
 async function submitNewDir(): Promise<void> {
-  const name = newDirName.value.trim()
-  if (name) {
-    // 「新建」失败多半是权限或重名：把这一段交给 guard，重试才有东西可重跑
-    await guard(async () => {
-      await window.api.sftpMkdir(fsSessionId.value, joinInCwd(name), ctrName.value)
-      await load()
-    })
-  }
+  await createDirIn(cwd.value, newDirName.value.trim())
   creatingDir.value = false
   newDirName.value = ''
 }
 
 // ---- 重命名 ----
 function startRename(entry: FileEntry): void {
+  // 项目模式的内联输入框在树里，委托给它（重命名提交走 tree 的 renameSubmit 事件）
+  if (mode.value === 'project') {
+    treeRef.value?.beginRename(entry.path)
+    return
+  }
   renamingPath.value = entry.path
   renameValue.value = entry.name
 }
 
+/** 改名执行体：新路径拼在**被改名项的父目录**下（browse 下等价于拼在 cwd） */
+async function renameTo(entry: FileEntry, name: string): Promise<void> {
+  if (!name || name === entry.name) return
+  await guard(async () => {
+    await window.api.sftpRename(fsSessionId.value, entry.path, joinIn(parentOf(entry.path), name), ctrName.value)
+    await refreshAfterOp([parentOf(entry.path)])
+  })
+}
+
 async function submitRename(entry: FileEntry): Promise<void> {
-  const name = renameValue.value.trim()
-  if (name && name !== entry.name) {
-    await guard(async () => {
-      await window.api.sftpRename(fsSessionId.value, entry.path, joinInCwd(name), ctrName.value)
-      await load()
-    })
-  }
+  await renameTo(entry, renameValue.value.trim())
   renamingPath.value = null
 }
 
@@ -454,7 +543,7 @@ async function submitRename(entry: FileEntry): Promise<void> {
 /** 删一次（不含确认）。拆出来是为了让「重试」复用同一段，不必再问一遍 */
 async function deleteNow(entry: FileEntry): Promise<void> {
   await window.api.sftpDelete(fsSessionId.value, entry.path, entry.isDir, ctrName.value)
-  await load()
+  await refreshAfterOp([parentOf(entry.path)])
 }
 
 async function removeEntry(entry: FileEntry): Promise<void> {
@@ -515,8 +604,8 @@ async function downloadEntry(entry: FileEntry): Promise<void> {
   }
 }
 
-async function pickUpload(): Promise<void> {
-  await guard(() => window.api.pickUpload(fsSessionId.value, cwd.value, ctrName.value))
+async function pickUpload(dir = cwd.value): Promise<void> {
+  await guard(() => window.api.pickUpload(fsSessionId.value, dir, ctrName.value))
 }
 
 // ---- 右键菜单 ----
@@ -533,6 +622,12 @@ const closeMenu = (): void => {
  * 选区规则跟资源管理器一致：点在已选中的行上 → 保持整片选区（这样
  * 「Ctrl 多选之后右键下载」才成立）；点在选区外 → 先把这一行单独选上。
  */
+/**
+ * 右键行。
+ *
+ * 选区规则跟资源管理器一致：点在已选中的行上 → 保持整片选区（这样
+ * 「Ctrl 多选之后右键下载」才成立）；点在选区外 → 先把这一行单独选上。
+ */
 function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void {
   if (!isSelected(entry)) {
     selected.value = new Set([entry.path])
@@ -540,62 +635,108 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
   }
   const targets = entries.value.filter((en) => selected.value.has(en.path))
   menuTargets = targets
-  const many = targets.length > 1
+  menu.value = { x: e.clientX, y: e.clientY, items: buildRowMenuItems(targets) }
+}
+
+/** 树（项目模式）行右键：单选语义，目标从事件载荷冻结（右键同时改选中，时序不可靠） */
+function onTreeRowContextMenu(p: { entry: FileEntry; x: number; y: number }): void {
+  treeSelected.value = p.entry
+  menuTargets = [p.entry]
+  menu.value = { x: p.x, y: p.y, items: buildProjectRowMenuItems(p.entry) }
+}
+
+/** 树空白处右键 = 项目根的菜单 */
+function onTreeBlankContextMenu(p: { x: number; y: number }): void {
+  treeSelected.value = null
+  menuTargets = []
   menu.value = {
-    x: e.clientX,
-    y: e.clientY,
+    x: p.x,
+    y: p.y,
     items: [
-      // SFTP⇥终端的显式入口：目录行 → 进那个目录；文件行 → 它所在的当前目录
-      ...(many
-        ? []
-        : [
-            {
-              id: 'open-terminal',
-              label: targets[0].isDir ? '在终端打开此文件夹' : '在终端打开此目录',
-              icon: 'terminal' as const
-            }
-          ]),
-      {
-        id: 'download',
-        // 本机面板没有「下载」：落地动作是复制到另一个目录（主进程走本机复制队列）
-        label: isLocal.value
-          ? many
-            ? `复制这 ${targets.length} 项到…`
-            : '复制到…'
-          : many
-            ? `下载这 ${targets.length} 项`
-            : '下载',
-        icon: 'download'
-      },
-      {
-        // 就地打包：当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」。
-        // 容器里也能打 —— 由容器里的 agent 用 Go 标准库产包，不依赖容器里有 tar
-        id: 'archive',
-        label: many ? `打包这 ${targets.length} 项` : '打包',
-        icon: 'box'
-      },
-      // 复制进面板剪贴板；粘贴只接受同源（同会话同容器），跨面板给提示
-      { id: 'copy', label: many ? `复制这 ${targets.length} 项` : '复制', icon: 'copy' },
-      { id: 'paste', label: '粘贴到当前目录', icon: 'paste', disabled: !canPaste.value },
-      // 重命名只能对一项，多选时给个禁用项比整条去掉更好读
-      { id: 'rename', label: '重命名', icon: 'pencil', disabled: many },
-      {
-        id: 'delete',
-        label: many ? `删除这 ${targets.length} 项` : '删除',
-        icon: 'trash',
-        danger: true
-      },
-      // compose 文件特供：右键直接编排（down 落手前在 runCompose 里确认）。
-      // 本机面板没有这一项 —— compose 走的是远端 exec / agent 通道
-      ...(isComposeTarget(targets) && !isLocal.value
-        ? [
-            { id: 'compose-up', label: 'Compose: up -d', icon: 'play' as const },
-            { id: 'compose-restart', label: 'Compose: restart', icon: 'refresh' as const },
-            { id: 'compose-down', label: 'Compose: down', icon: 'square' as const, danger: true }
-          ]
-        : [])
+      { id: 'search-in-folder', label: '从文件夹中查找', icon: 'search' },
+      { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' },
+      { id: 'new-folder', label: '新建文件夹', icon: 'folder-plus' },
+      { id: 'paste', label: '粘贴到项目根', icon: 'paste', disabled: !canPaste.value },
+      { id: 'exit-project', label: '退出项目模式', icon: 'x' }
     ]
   }
+}
+
+/**
+ * 行菜单项（browse/项目模式共用一份词汇；项目模式单选语义，外层再包项目项）。
+ * targets = 开菜单那一刻冻结的操作对象。
+ */
+function buildRowMenuItems(targets: FileEntry[]): ContextMenuItem[] {
+  const many = targets.length > 1
+  return [
+    // 项目模式的入口：正好就是「以这个文件夹为根」
+    ...(!many && targets[0].isDir && mode.value === 'browse'
+      ? [{ id: 'enter-project', label: '进入项目模式', icon: 'folder' as const }]
+      : []),
+    // SFTP⇥终端的显式入口：目录行 → 进那个目录；文件行 → 它所在的当前目录
+    ...(many
+      ? []
+      : [
+          {
+            id: 'open-terminal',
+            label: targets[0].isDir ? '在终端打开此文件夹' : '在终端打开此目录',
+            icon: 'terminal' as const
+          }
+        ]),
+    {
+      id: 'download',
+      // 本机面板没有「下载」：落地动作是复制到另一个目录（主进程走本机复制队列）
+      label: isLocal.value
+        ? many
+          ? `复制这 ${targets.length} 项到…`
+          : '复制到…'
+        : many
+          ? `下载这 ${targets.length} 项`
+          : '下载',
+      icon: 'download'
+    },
+    {
+      // 就地打包：当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」。
+      // 容器里也能打 —— 由容器里的 agent 用 Go 标准库产包，不依赖容器里有 tar
+      id: 'archive',
+      label: many ? `打包这 ${targets.length} 项` : '打包',
+      icon: 'box'
+    },
+    // 复制进面板剪贴板；粘贴只接受同源（同会话同容器），跨面板给提示
+    { id: 'copy', label: many ? `复制这 ${targets.length} 项` : '复制', icon: 'copy' },
+    {
+      id: 'paste',
+      label: mode.value === 'project' ? '粘贴到此目录' : '粘贴到当前目录',
+      icon: 'paste',
+      disabled: !canPaste.value || (mode.value === 'project' && !targets[0].isDir)
+    },
+    // 重命名只能对一项，多选时给个禁用项比整条去掉更好读
+    { id: 'rename', label: '重命名', icon: 'pencil', disabled: many },
+    {
+      id: 'delete',
+      label: many ? `删除这 ${targets.length} 项` : '删除',
+      icon: 'trash',
+      danger: true
+    },
+    // compose 文件特供：右键直接编排（down 落手前在 runCompose 里确认）。
+    // 本机面板没有这一项 —— compose 走的是远端 exec / agent 通道
+    ...(isComposeTarget(targets) && !isLocal.value
+      ? [
+          { id: 'compose-up', label: 'Compose: up -d', icon: 'play' as const },
+          { id: 'compose-restart', label: 'Compose: restart', icon: 'refresh' as const },
+          { id: 'compose-down', label: 'Compose: down', icon: 'square' as const, danger: true }
+        ]
+      : [])
+  ]
+}
+
+/** 项目模式行菜单：共用语义一份，头部加「从文件夹中查找」、尾部加退出 */
+function buildProjectRowMenuItems(entry: FileEntry): ContextMenuItem[] {
+  return [
+    ...(entry.isDir ? [{ id: 'search-in-folder', label: '从文件夹中查找', icon: 'search' as const }] : []),
+    ...buildRowMenuItems([entry]),
+    { id: 'exit-project', label: '退出项目模式', icon: 'x' as const }
+  ]
 }
 
 /** 空白处右键：当前目录的菜单（和资源管理器一致，先清掉选区） */
@@ -645,23 +786,58 @@ async function runCompose(verb: ComposeVerb, file: FileEntry): Promise<void> {
 async function onMenuSelect(id: string): Promise<void> {
   const targets = menuTargets
   closeMenu()
+  if (id === 'enter-project') {
+    if (targets[0]) enterProject(targets[0].path)
+    return
+  }
+  if (id === 'search-in-folder') {
+    // 空白处 = 项目根（范围 chip 不显示，就是全项目搜索）
+    searchInFolder(targets[0]?.isDir ? targets[0].path : projectRoot.value)
+    return
+  }
+  if (id === 'exit-project') {
+    void exitProject()
+    return
+  }
+  if (id === 'new-folder') {
+    // 项目模式：在树里就地开内联输入（目录行 → 它里面；空白 → 项目根）
+    const dir = targets[0]?.isDir ? targets[0].path : projectRoot.value
+    treeRef.value?.beginCreate(dir)
+    return
+  }
   if (id === 'open-terminal') {
-    // 目录行 → 进它；其余（文件行 / 空白处）→ 当前目录
-    const dir = targets.length === 1 && targets[0].isDir ? targets[0].path : cwd.value
+    // 目录行 → 进它；文件行 → 它所在目录；空白处 → 当前目录（项目模式 = 项目根）
+    const dir =
+      mode.value === 'project'
+        ? targets.length === 1
+          ? targets[0].isDir
+            ? targets[0].path
+            : parentOf(targets[0].path)
+          : projectRoot.value
+        : targets.length === 1 && targets[0].isDir
+          ? targets[0].path
+          : cwd.value
     openInTerminal(dir)
     return
   }
-  if (!targets.length) {
-    if (id === 'paste') await pasteClipboard()
+  if (id === 'paste') {
+    // 项目模式：目录行 → 粘进它；其余（空白）→ 项目根。browse 口径不变：当前目录
+    const dir =
+      mode.value === 'project'
+        ? targets.length === 1 && targets[0].isDir
+          ? targets[0].path
+          : projectRoot.value
+        : cwd.value
+    await pasteClipboard(dir)
     return
   }
+  if (!targets.length) return
   if (id === 'download') await downloadTargets(targets)
   else if (id === 'archive') await archiveTargets(targets)
   else if (id === 'copy') {
     panelClipboard.value = { key: panelKey.value, paths: targets.map((t) => t.path) }
     clearSelection()
-  } else if (id === 'paste') await pasteClipboard()
-  else if (id === 'rename') startRename(targets[0])
+  } else if (id === 'rename') startRename(targets[0])
   else if (id === 'delete') await removeTargets(targets)
   else if (id.startsWith('compose-')) await runCompose(id.slice('compose-'.length) as ComposeVerb, targets[0])
 }
@@ -681,7 +857,8 @@ async function archiveTargets(targets: FileEntry[]): Promise<void> {
         ctrName.value
       )
       clearSelection()
-      await load()
+      // 产物 .tar.gz 落在第一个目标的同级目录（sftpArchive 的落点口径）
+      await refreshAfterOp([parentOf(targets[0].path)])
     })
   } finally {
     archiving.value = false
@@ -729,7 +906,7 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
       )
   } finally {
     clearSelection()
-    await load()
+    await refreshAfterOp(targets.map((t) => parentOf(t.path)))
   }
 }
 
@@ -770,8 +947,45 @@ function onDrop(e: DragEvent): void {
     name: f.name,
     size: f.size
   }))
+  // 项目模式落到树的选中目录（或根），browse 落当前目录
+  const dir = mode.value === 'project' ? (treeRef.value?.selectedDirOrRoot() ?? projectRoot.value) : cwd.value
   // 会话已断/远端不可写时不能静默失败，否则用户以为拖进去了
-  if (files.length) void guard(() => window.api.enqueueDropped(fsSessionId.value, cwd.value, files, ctrName.value))
+  if (files.length) void guard(() => window.api.enqueueDropped(fsSessionId.value, dir, files, ctrName.value))
+}
+
+// ---- 项目模式：树的事件回调 ----
+/** 树选中变化：记住单选对象，并把 cwd 跟踪同步过去（「在终端打开」/新标签 cwd 继承靠它） */
+function onTreeSelect(entry: FileEntry | null): void {
+  treeSelected.value = entry
+  if (entry) store.setCwd(props.sessionId, entry.isDir ? entry.path : parentOf(entry.path))
+}
+
+/** 树单击文件 → 预览打开（斜体标签，会被下一个预览替换） */
+function onTreePreviewFile(entry: FileEntry): void {
+  openInEditor(entry.path, { preview: true })
+}
+
+/** 树双击文件 → 固定打开（与 browse 的 openEntry 文件分支同一条路） */
+function onTreeOpenFile(entry: FileEntry): void {
+  openInEditor(entry.path)
+}
+
+// ---- 项目模式：全文搜索 ----
+function toggleSearch(): void {
+  searchOpen.value = !searchOpen.value
+  if (searchOpen.value) void nextTick(() => searchPanelRef.value?.focusInput())
+}
+
+/** 右键「从文件夹中查找」：搜索范围缩到那个子目录（顶栏搜索按钮始终是全项目） */
+function searchInFolder(dir: string): void {
+  searchRoot.value = dir
+  if (!searchOpen.value) searchOpen.value = true
+  void nextTick(() => searchPanelRef.value?.focusInput())
+}
+
+/** 点搜索结果 → 预览打开并跳到该行（搜索是翻找的重灾区，标签不再爆炸） */
+function onSearchOpenMatch(p: { path: string; line: number }): void {
+  openInEditor(p.path, { line: p.line, preview: true })
 }
 
 // ---- 上传完成后自动刷新 ----
@@ -791,26 +1005,38 @@ let refreshTimer: number | null = null
 let lastStatus = new Map<string, TransferTask['status']>()
 let unsubscribeTransfers: (() => void) | null = null
 
-/** 落地路径是否在当前目录（含子目录）里 —— 别处的上传没必要刷这一屏 */
-function isUnderCwd(remotePath: string): boolean {
+/** 落地路径是否在面板正在看的范围里（browse = 当前目录；项目模式 = 项目根）—— 别处的上传没必要刷这一屏 */
+function isUnderBase(remotePath: string): boolean {
+  const base = mode.value === 'project' ? projectRoot.value : cwd.value
   const sepChar = isWinLocal.value ? '\\' : '/'
-  const base = cwd.value.endsWith(sepChar) ? cwd.value : `${cwd.value}${sepChar}`
-  return remotePath.startsWith(base)
+  const prefix = base.endsWith(sepChar) ? base : `${base}${sepChar}`
+  return remotePath.startsWith(prefix)
 }
 
 /** 这条任务是不是「我这个面板」的上传：容器认 containerName（remotePath 是中转路径，认不了目录），宿主机认目录归属 */
 function isMyUpload(t: TransferTask): boolean {
   if (t.direction !== 'upload') return false
   if (props.container) return t.containerName === props.container.containerName
-  return !t.containerName && isUnderCwd(t.remotePath)
+  return !t.containerName && isUnderBase(t.remotePath)
 }
+
+/** 项目模式下待刷新的树目录（debounce 期间攒着）；'all' = 容器的任务认不出落点目录，整树重列 */
+let pendingTreeRefresh: Set<string> | 'all' = new Set()
 
 function scheduleRefresh(): void {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer)
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
     if (creatingDir.value || renamingPath.value) return
-    void load()
+    if (mode.value === 'project') {
+      const pend = pendingTreeRefresh
+      pendingTreeRefresh = new Set()
+      if (pend === 'all') void treeRef.value?.refreshAll()
+      else for (const d of pend) void treeRef.value?.refreshDir(d)
+    } else {
+      pendingTreeRefresh = new Set()
+      void load()
+    }
   }, REFRESH_DEBOUNCE_MS)
 }
 
@@ -825,6 +1051,10 @@ function watchTransfers(): void {
       // 否则一打开面板就会为一个早就传完的文件白刷一次
       if (was !== undefined && was !== 'done' && t.status === 'done' && isMyUpload(t)) {
         touched = true
+        if (mode.value === 'project') {
+          if (props.container) pendingTreeRefresh = 'all'
+          else if (pendingTreeRefresh !== 'all') pendingTreeRefresh.add(parentOf(t.remotePath))
+        }
       }
     }
     lastStatus = next
@@ -847,7 +1077,13 @@ watch(
 watch(
   () => (store.followTerminal ? store.cwdBySession[props.sessionId] : undefined),
   (dir) => {
-    if (dir && dir !== cwd.value) nav(dir)
+    if (!dir) return
+    if (mode.value === 'project') {
+      // 根外目录不跳：待在项目里是「项目模式」的存在意义（要出去就退出项目模式）
+      void treeRef.value?.reveal(dir)
+    } else if (dir !== cwd.value) {
+      nav(dir)
+    }
   }
 )
 
@@ -890,24 +1126,32 @@ onBeforeUnmount(() => {
     @dragleave.prevent="dragOver = false"
     @drop.prevent="onDrop"
   >
-    <!-- 工具栏 -->
+    <!-- 工具栏（后退/前进/上一级/过滤是 browse 概念，项目模式下隐藏） -->
     <div class="toolbar">
-      <button class="icon-btn" title="后退（鼠标侧键）" :disabled="!historyBack.length" @click="historyGoBack">
+      <button v-if="mode === 'browse'" class="icon-btn" title="后退（鼠标侧键）" :disabled="!historyBack.length" @click="historyGoBack">
         <Icon name="chevron-left" />
       </button>
-      <button class="icon-btn" title="前进（鼠标侧键）" :disabled="!historyFwd.length" @click="historyGoForward">
+      <button v-if="mode === 'browse'" class="icon-btn" title="前进（鼠标侧键）" :disabled="!historyFwd.length" @click="historyGoForward">
         <Icon name="chevron-right" />
       </button>
-      <button class="icon-btn" title="上一级" @click="goUp"><Icon name="arrow-up" /></button>
-      <button class="icon-btn" title="刷新" @click="load()"><Icon name="refresh" /></button>
-      <button class="icon-btn" title="新建文件夹" @click="creatingDir = true">
+      <button v-if="mode === 'browse'" class="icon-btn" title="上一级" @click="goUp"><Icon name="arrow-up" /></button>
+      <button class="icon-btn" title="刷新" @click="mode === 'project' ? treeRef?.refreshAll() : load()"><Icon name="refresh" /></button>
+      <button
+        class="icon-btn"
+        title="新建文件夹"
+        @click="mode === 'project' ? treeRef?.beginCreate(treeRef.selectedDirOrRoot()) : (creatingDir = true)"
+      >
         <Icon name="folder-plus" />
       </button>
-      <button class="icon-btn" :title="isLocal ? '选文件复制进当前目录' : '上传文件'" @click="pickUpload"><Icon name="upload" /></button>
+      <button
+        class="icon-btn"
+        :title="isLocal ? '选文件复制进当前目录' : '上传文件'"
+        @click="pickUpload(mode === 'project' ? treeRef?.selectedDirOrRoot() : undefined)"
+      ><Icon name="upload" /></button>
       <span class="spacer"></span>
       <!-- 过滤（Ctrl+F）：只过滤当前目录已加载的条目，客户端零往返 -->
       <input
-        v-if="filterOpen"
+        v-if="filterOpen && mode === 'browse'"
         ref="filterInput"
         v-model="filterText"
         class="filter-input"
@@ -915,12 +1159,17 @@ onBeforeUnmount(() => {
         @keyup.esc="closeFilter"
       />
       <button
+        v-if="mode === 'browse'"
         class="icon-btn"
         :class="{ active: filterOpen }"
         title="过滤当前目录（Ctrl/Cmd+F）"
         @click="filterOpen ? closeFilter() : openFilter()"
       ><Icon name="search" /></button>
-      <button class="icon-btn" title="在终端中打开此目录" @click="openInTerminal()">
+      <button
+        class="icon-btn"
+        title="在终端中打开此目录"
+        @click="openInTerminal(mode === 'project' ? treeRef?.selectedDirOrRoot() : undefined)"
+      >
         <Icon name="terminal" />
       </button>
       <button
@@ -932,7 +1181,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 面包屑：容器模式先给容器名徽章（这是哪个容器的文件系统一眼得见），根单独渲染一次 -->
-    <div class="breadcrumb">
+    <div v-if="mode === 'browse'" class="breadcrumb">
       <span v-if="props.container" class="ctr-badge" :title="`容器 ${props.container.containerName} 内的文件（经容器助手）`">
         <Icon name="box" :size="12" />{{ props.container.containerName }}
       </span>
@@ -960,6 +1209,25 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
+    <!-- 项目模式顶栏：根名 + 退出（完整路径在 title） -->
+    <div v-else class="project-bar">
+      <span v-if="props.container" class="ctr-badge" :title="`容器 ${props.container.containerName} 内的文件（经容器助手）`">
+        <Icon name="box" :size="12" />{{ props.container.containerName }}
+      </span>
+      <span v-else-if="isLocal" class="ctr-badge" title="本机文件（本地终端标签）">
+        <Icon name="monitor" :size="12" />本机
+      </span>
+      <Icon name="folder" :size="13" />
+      <span class="project-root" :title="projectRoot">{{ rootName }}</span>
+      <span v-if="archiving" class="archiving" title="正在远端打包…">
+        <Spinner :size="12" />打包中…
+      </span>
+      <span class="spacer"></span>
+      <button class="icon-btn" title="退出项目模式" @click="exitProject">
+        <Icon name="x" />
+      </button>
+    </div>
+
     <div v-if="errorMsg" class="error-banner">
       <span class="banner-text">{{ errorMsg }}</span>
       <button v-if="retryAction" class="retry" @click="retryLast">重试</button>
@@ -974,17 +1242,17 @@ onBeforeUnmount(() => {
       请在侧栏「远程助手」点「安装到容器 {{ props.container?.containerName }}」。
     </div>
 
-    <!-- 容器助手版本过旧：老二进制没有 fs_* 方法 -->
+    <!-- 容器助手版本过旧：低于 fs 能力门槛（fs_* 方法不全的老二进制） -->
     <div v-else-if="agentOutdated" class="hint">
-      容器助手 v{{ agentOutdated }} 过旧，文件管理需要 v{{ BUNDLED_AGENT_VERSION }}。<br />
+      容器助手 v{{ agentOutdated }} 过旧，文件管理需要 v{{ FS_MIN_AGENT_VERSION }}。<br />
       请在侧栏「远程助手」点「升级到 v{{ BUNDLED_AGENT_VERSION }}」。
     </div>
 
-    <div v-else-if="loading" class="hint"><Spinner text="加载中…" /></div>
+    <div v-else-if="loading && mode === 'browse'" class="hint"><Spinner text="加载中…" /></div>
 
     <!-- 文件列表；点空白处取消选中（和资源管理器一致） -->
     <div
-      v-else
+      v-else-if="mode === 'browse'"
       class="file-list"
       @click.self="clearSelection"
       @contextmenu.self.prevent="onBlankContextMenu($event)"
@@ -1013,12 +1281,7 @@ onBeforeUnmount(() => {
         @contextmenu.prevent="onRowContextMenu($event, entry, index)"
         @dblclick="openEntry(entry)"
       >
-        <Icon
-          class="file-icon"
-          :class="{ dir: entry.isDir }"
-          :name="entry.isDir ? 'folder' : entry.isSymlink ? 'link' : 'file'"
-          :size="15"
-        />
+        <FileIcon :entry="entry" :size="15" />
         <input
           v-if="renamingPath === entry.path"
           v-model="renameValue"
@@ -1055,8 +1318,61 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- 项目模式：左栏图标轨（项目/查找，VS Code 活动栏语义）+ 视图区。
+         树用 v-show 保活 —— 懒加载缓存不能因开搜索打回冷启动 -->
+    <template v-else>
+      <div class="project-body">
+        <div class="project-rail">
+          <button
+            class="rail-btn"
+            :class="{ active: !searchOpen }"
+            title="项目文件"
+            @click="searchOpen = false"
+          >
+            <Icon name="folder" :size="16" />
+          </button>
+          <button
+            class="rail-btn"
+            :class="{ active: searchOpen }"
+            title="在项目中搜索（Ctrl/Cmd+Shift+F）"
+            @click="toggleSearch"
+          >
+            <Icon name="search" :size="16" />
+          </button>
+        </div>
+        <ProjectTree
+          v-show="!searchOpen"
+          ref="treeRef"
+          :root="projectRoot"
+          :fs-session-id="fsSessionId"
+          :container-name="ctrName"
+          :is-win="isWinLocal"
+          @select="onTreeSelect"
+          @preview-file="onTreePreviewFile"
+          @open-file="onTreeOpenFile"
+          @row-contextmenu="onTreeRowContextMenu"
+          @blank-contextmenu="onTreeBlankContextMenu"
+          @rename-submit="renameTo($event.entry, $event.name)"
+          @create-submit="createDirIn($event.dir, $event.name)"
+        />
+        <SearchPanel
+          v-show="searchOpen"
+          ref="searchPanelRef"
+          :root="searchRoot || projectRoot"
+          :base-root="projectRoot"
+          :fs-session-id="fsSessionId"
+          :container-name="ctrName"
+          :is-win="isWinLocal"
+          :active="searchOpen"
+          @close="searchOpen = false"
+          @open-match="onSearchOpenMatch"
+          @reset-scope="searchRoot = ''"
+        />
+      </div>
+    </template>
+
     <!-- 磁盘用量分解（点用量条展开）：谁占的、各占多少，点目录直接跳进去 -->
-    <div v-if="duOpen && usage" class="du-panel">
+    <div v-if="duOpen && usage && mode === 'browse'" class="du-panel">
       <div v-if="duLoading" class="hint"><Spinner :size="12" text="扫描目录占用…" /></div>
       <div v-else-if="duError" class="du-error">{{ duError }}</div>
       <template v-else-if="duResult">
@@ -1086,7 +1402,7 @@ onBeforeUnmount(() => {
       分解（du）是 agent 的能力 —— 本机面板的用量条只看不展开。
     -->
     <div
-      v-if="usage"
+      v-if="usage && mode === 'browse'"
       class="usage-bar"
       :class="{ warn: usagePercent >= 85, open: duOpen }"
       :title="isLocal ? '' : (usage.mount ? `挂载点 ${usage.mount} · ` : '') + '点击展开占用分解'"
@@ -1175,6 +1491,67 @@ onBeforeUnmount(() => {
   margin-left: var(--sp-2);
   color: var(--accent-text);
   font-size: var(--fs-xs);
+}
+/* 项目模式：左栏图标轨 + 视图区（VS Code 活动栏语义） */
+.project-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.project-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+  width: 34px;
+  flex-shrink: 0;
+  padding-top: var(--sp-2);
+  border-right: 1px solid var(--border);
+}
+.rail-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 32px;
+  padding: 0;
+  /* 无框图标：不要全局按钮的灰底边框，激活条先占住位置（切换不跳） */
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  color: var(--fg-muted);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.rail-btn:hover {
+  background: var(--bg-hover);
+}
+.rail-btn:active {
+  background: var(--bg-active);
+  transform: translateY(0.5px);
+}
+.rail-btn.active {
+  color: var(--accent-text);
+  border-left-color: var(--accent-text);
+}
+/* 项目模式顶栏：与面包屑同高同位（切换模式时布局不跳） */
+.project-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.project-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: var(--fw-semibold);
+  color: var(--fg);
 }
 .crumb {
   color: var(--accent-text);

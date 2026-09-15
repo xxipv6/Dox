@@ -19,7 +19,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.6.8"
+var version = "0.7.1"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -183,8 +183,8 @@ func serve() error {
 func isFSMethod(method string) bool {
 	switch method {
 	case "fs_list", "fs_stat", "fs_read", "fs_write", "fs_mkdir", "fs_rename", "fs_delete",
-		"fs_archive", "fs_usage", "fs_du", "fs_read_chunk", "fs_write_begin", "fs_write_chunk",
-		"fs_write_commit", "fs_write_abort":
+		"fs_archive", "fs_usage", "fs_du", "fs_search", "fs_read_chunk", "fs_write_begin",
+		"fs_write_chunk", "fs_write_commit", "fs_write_abort":
 		return true
 	default:
 		return false

@@ -921,6 +921,29 @@ export const useSessionStore = defineStore('sessions', () => {
     cwdBySession[sessionId] = path
   }
 
+  /*
+   * 文件面板「项目模式」持久化用的设备标识：同一台设备（重连、新开标签）
+   * 必须算出同一个 key。规则：
+   *   - 本地标签       → '@local'（所有本地标签共享一个项目根）
+   *   - 容器标签       → 宿主 key + '#ctr:<容器名>'（经 originSavedId 拿宿主身份；
+   *                      不能拿 parentSessionId 反查 tab —— 传输会话没有 tab）
+   *   - 已保存的 SSH   → 'saved:<SavedSession.id>'
+   *   - 临时 SSH 连接  → 'tmp:user@host:port'（设备后来保存了，旧 key 成为孤儿条目，无害）
+   *   - 找不到 tab     → 'session:<id>' 兜底：运行期一致，重启即忘
+   */
+  function deviceKeyForSession(sessionId: string): string {
+    const tab = tabs.value.find((t) => t.panes.some((p) => p.sessionId === sessionId))
+    if (!tab) return `session:${sessionId}`
+    if (tab.kind === 'local') return '@local'
+    if (tab.kind === 'container') {
+      const base = tab.container?.originSavedId ? `saved:${tab.container.originSavedId}` : '@local'
+      return `${base}#ctr:${tab.container?.containerName ?? ''}`
+    }
+    if (tab.savedSessionId) return `saved:${tab.savedSessionId}`
+    const cfg = tab.config
+    return cfg ? `tmp:${cfg.username}@${cfg.host}:${cfg.port}` : `session:${sessionId}`
+  }
+
   function setHome(sessionId: string, path: string): void {
     homeBySession[sessionId] = path
   }
@@ -964,6 +987,7 @@ export const useSessionStore = defineStore('sessions', () => {
     homeBySession,
     exitCodeBySession,
     setCwd,
+    deviceKeyForSession,
     tabStatus,
     tabLabel,
     setHome,

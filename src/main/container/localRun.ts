@@ -98,11 +98,14 @@ export function isNotFound(err: unknown): boolean {
 /**
  * runLocal 的流式版（spawn 边跑边吐输出），带取消（SIGTERM 杀子进程）。
  * 用途同远端 execStream：compose 这类长时间命令的本机侧承载。
+ *
+ * onStderr 不给时 stderr 并进 onData（历史行为）；stdout 是结构化数据
+ * 的调用方（搜索的 rg --json）必须给 onStderr，warning 混流会打烂解析。
  */
 export function runLocalStream(
   binary: string,
   args: string[],
-  opts: { timeoutMs?: number; onData: (text: string) => void }
+  opts: { timeoutMs?: number; onData: (text: string) => void; onStderr?: (text: string) => void }
 ): { done: Promise<{ code: number; canceled: boolean }>; cancel: () => void } {
   const timeoutMs = opts.timeoutMs ?? 10 * 60_000
   // spawn 要等 env 解析完才有，取消/超时可能抢在 spawn 之前，全部按可空处理
@@ -147,7 +150,7 @@ export function runLocalStream(
       child = spawn(binary, args, { windowsHide: true, env })
 
       child.stdout?.on('data', (chunk: Buffer) => opts.onData(decOut.write(chunk)))
-      child.stderr?.on('data', (chunk: Buffer) => opts.onData(decErr.write(chunk)))
+      child.stderr?.on('data', (chunk: Buffer) => (opts.onStderr ?? opts.onData)(decErr.write(chunk)))
       child.on('error', (err) => {
         // ENOENT 归成「没装」的友好文案，与 runLocal 同口径（裸抛出去只剩一句「失败了」）
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -157,8 +160,10 @@ export function runLocalStream(
         settle(() => reject(err))
       })
       child.on('close', (code) => {
-        const tail = decOut.end() + decErr.end()
-        if (tail) opts.onData(tail)
+        const tailOut = decOut.end()
+        const tailErr = decErr.end()
+        if (tailOut) opts.onData(tailOut)
+        if (tailErr) (opts.onStderr ?? opts.onData)(tailErr)
         settle(() => resolve({ code: code ?? 1, canceled }))
       })
     })

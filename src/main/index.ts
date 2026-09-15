@@ -19,6 +19,7 @@ import { AgentManager } from './agent/AgentManager'
 import { ProcessService } from './proc/ProcessService'
 import { AiUsageService } from './aiusage/AiUsageService'
 import { ComposeService } from './compose/ComposeService'
+import { SearchService } from './search/SearchService'
 import { prewarmShells } from './local/shells'
 import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
@@ -116,6 +117,18 @@ composeService.onEvent = (ev) => {
     if (!win.isDestroyed()) win.webContents.send(IpcChannels.composeEvent, ev)
   }
 }
+
+// 项目模式全文搜索：引擎链 agent → rg → grep → node；结果流式广播（渲染层按 runId 过滤）
+const searchService = new SearchService((id) => sessionManager.getClient(id), agentManager)
+searchService.onEvent = (ev) => {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(IpcChannels.searchEvent, ev)
+  }
+}
+// 会话断开时其上跑着的搜索全部取消（双保险，面板一般也随标签销毁了）
+sessionManager.onStatus((ev) => {
+  if (ev.status === 'closed') searchService.cancelBySession(ev.id)
+})
 
 // 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped），
 // 并把它承载的容器终端通道一并收掉
@@ -283,7 +296,8 @@ app.whenReady().then(() => {
     agentManager,
     processService,
     aiUsageService,
-    composeService
+    composeService,
+    searchService
   )
   aiUsageService.start()
   createWindow()

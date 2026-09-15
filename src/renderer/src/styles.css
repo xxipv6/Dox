@@ -70,8 +70,11 @@
    * Menlo 那一档还看得过去，Windows 上就是 Courier New，和旁边几个面板
    * 写死的 `Consolas, monospace` 长得不一样，同一排面板两套等宽字形。
    * 现在补上定义，并把两边的首选字体都列进去（都有系统自带的 UI 等宽）。
+   *
+   * 顺序对齐 VS Code 的默认编辑器字体：mac 是 Menlo、Windows 是 Consolas，
+   * 装了 Cascadia Mono / SF Mono 的话在各自平台上排后面做加成。
    */
-  --font-mono: 'Cascadia Mono', Consolas, 'SF Mono', Menlo, monospace;
+  --font-mono: Menlo, Monaco, Consolas, 'Cascadia Mono', 'SF Mono', monospace;
 
   /*
    * 层级。之前是 1/4/5/6/50/90/91/100/200/201/500 一串裸值，加个浮层
@@ -157,6 +160,20 @@
     0 6px 20px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.06);
   --shadow-lg:
     0 18px 48px rgba(15, 23, 42, 0.18), 0 4px 12px rgba(15, 23, 42, 0.08);
+
+  /*
+   * 代码编辑器专用色（--ed-*）。**不走**上面这套界面令牌：编辑器要的是
+   * VS Code 内置主题的原值（Light Modern + editorColorRegistry 内置默认），
+   * 界面色相（偏蓝的晴空）渗进代码区会让同一套 Dark+/Light+ 语法配色
+   * 观感全串。语法 token 色在 editor/vscodeSyntax.ts，同为 VS Code 移植。
+   */
+  --ed-bg: #ffffff; /* editor.background */
+  --ed-fg: #3b3b3b; /* editor.foreground（Modern） */
+  --ed-linenumber: #6e7681; /* editorLineNumber.foreground */
+  --ed-linenumber-active: #171184; /* editorLineNumber.activeForeground */
+  --ed-selection: #add6ff; /* editor.selectionBackground */
+  --ed-cursor: #000000; /* editorCursor.foreground */
+  --ed-activeline: #eeeeee; /* editor.lineHighlightBorder 的近似（Modern 未铺底色） */
 }
 
 /* ---------------------------------------------------------------------------
@@ -216,6 +233,15 @@
     0 6px 20px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.34);
   --shadow-lg:
     0 20px 56px rgba(0, 0, 0, 0.66), 0 4px 14px rgba(0, 0, 0, 0.4);
+
+  /* 代码编辑器专用色：VS Code Dark Modern + editorColorRegistry 内置默认（注释见亮色块） */
+  --ed-bg: #1f1f1f;
+  --ed-fg: #cccccc;
+  --ed-linenumber: #6e7681;
+  --ed-linenumber-active: #cccccc;
+  --ed-selection: #264f78;
+  --ed-cursor: #aeafad;
+  --ed-activeline: #282828;
 }
 
 html,

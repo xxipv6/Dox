@@ -18,6 +18,7 @@ import { CommandError, outputsOf } from '../execError'
 import { createChunkBatcher } from '../chunkBatcher'
 import { isNotFound, runLocal } from './localRun'
 import { mergeEnv, resolveShellEnv } from '../local/shellEnv'
+import { resolveExecutable } from '../local/which'
 import {
   assertContainerTarget,
   classifyFailure,
@@ -1091,59 +1092,6 @@ function exitHint(exitCode: number): string | undefined {
   if ([125, 126, 127].includes(exitCode)) return '进入容器失败（容器可能已停止）'
   return undefined
 }
-
-/**
- * 把命令名解析成绝对路径，供 node-pty 启动。
- *
- * ⚠️ **Windows 上必须挑带 `.exe` 的那个，不能取 `where` 的第一行。**
- * 实测踩到过：Docker Desktop 在 `resources\bin\` 里既放了 `docker.exe`，
- * 也放了一个**同样叫 `docker`、没有扩展名的 1359 字节 POSIX shell 脚本**
- * （内容是 `#!/usr/bin/env sh` + 一堆 case 分支）。而 `where docker` 把那个
- * 脚本排在 `.exe` 前面 —— 直接取第一行就等于把 sh 脚本交给 CreateProcess，
- * 报 `Cannot create process, error code: 193`（ERROR_BAD_EXE_FORMAT）。
- *
- * 只认 `.exe`：`.cmd`/`.bat` 同样不能直接被 CreateProcess 执行（要经 cmd.exe）。
- * 一个 `.exe` 都找不到就退回裸名字，让 CreateProcess 自己按 PATH 找 ——
- * 那是这一层存在之前的行为，不会比它更差。
- */
-async function resolveExecutable(binary: string): Promise<string> {
-  const cached = resolvedBinaryCache.get(binary)
-  if (cached) return cached
-  const finder = process.platform === 'win32' ? 'where' : 'which'
-  // GUI 启动只有 launchd 最小 PATH，which 要带 login shell 环境才找得到
-  // /opt/homebrew/bin 里的 docker/podman（与 runLocal 同一个缺口的另一半）
-  const env = mergeEnv(
-    process.env as Record<string, string>,
-    (await resolveShellEnv()) ?? {}
-  )
-  const found = await new Promise<string[]>((resolve) => {
-    execFile(finder, [binary], { windowsHide: true, env }, (err, stdout) => {
-      resolve(
-        err
-          ? []
-          : stdout
-              .split(/\r?\n/)
-              .map((l) => l.trim())
-              .filter(Boolean)
-      )
-    })
-  })
-
-  let resolved: string
-  if (!found.length) resolved = binary
-  // POSIX 下 execvp 认 shebang 脚本，哪个在前就用哪个
-  else if (process.platform !== 'win32') resolved = found[0]
-  else resolved = found.find((p) => /\.exe$/i.test(p)) ?? binary
-  resolvedBinaryCache.set(binary, resolved)
-  return resolved
-}
-
-/*
- * 解析结果缓存：本机 PATH 在应用活着期间不会变，之前每次开容器终端
- * 都 spawn 一次 which/where 是白送的进程开销。不设上限 —— binary
- * 名字就 docker/podman 两个。
- */
-const resolvedBinaryCache = new Map<string, string>()
 
 /** 关掉本机 pty，并确保不留孤儿进程（同 LocalPtyManager 的 Windows 处理） */
 function killLocalPty(proc: IPty): void {

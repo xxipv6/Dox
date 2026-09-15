@@ -24,6 +24,9 @@ import type {
   RemoteFileContent,
   SavedSession,
   SaveSessionInput,
+  SearchEngine,
+  SearchEvent,
+  SearchStartParams,
   SessionStatusEvent,
   SshAuth,
   SshSessionConfig,
@@ -364,4 +367,15 @@ export interface DoxApi {
   composeCancel(runId: string): void
   /** 订阅 compose 流式输出与结局事件 */
   onComposeEvent(cb: (ev: ComposeRunEvent) => void): () => void
+
+  // ---- 项目模式全文搜索 ----
+  /**
+   * 在 root 下全文搜索（引擎链 agent → rg → grep → node，主进程自动选择）。
+   * 立即返回 {runId, engine}；匹配与结局经 onSearchEvent 流式推进。
+   */
+  searchStart(params: SearchStartParams): Promise<{ runId: string; engine: SearchEngine }>
+  /** 取消正在运行的搜索 */
+  searchCancel(runId: string): void
+  /** 订阅搜索事件（全窗口广播，按 runId 过滤） */
+  onSearchEvent(cb: (ev: SearchEvent) => void): () => void
 }

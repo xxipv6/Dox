@@ -164,5 +164,11 @@ export const IpcChannels = {
   /** 取消正在运行的 compose 动作（关通道/杀进程 ≈ Ctrl+C） */
   composeCancel: 'compose:cancel',
   /** 主进程 → 渲染进程：compose 输出增量与结局 */
-  composeEvent: 'compose:event'
+  composeEvent: 'compose:event',
+  /** 项目模式全文搜索：start 返回 {runId, engine}，结果走 search:event 广播 */
+  searchStart: 'search:start',
+  /** 取消正在运行的搜索（SSH 关通道 / 本机 SIGTERM / node 协作旗标） */
+  searchCancel: 'search:cancel',
+  /** 主进程 → 渲染进程：搜索匹配增量与结局（渲染层按 runId 过滤） */
+  searchEvent: 'search:event'
 } as const

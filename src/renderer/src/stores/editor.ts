@@ -18,6 +18,10 @@ export interface OpenFile {
   savedContent: string
   /** 打开 / 上次保存时的远端 mtime，保存时回传做冲突检测 */
   mtime: number
+  /** 远端文件字节数（读取时来自 res.size，保存后按写入内容重算）。状态栏非 dirty 态显示它 */
+  size: number
+  /** true = 预览标签（斜体）：同会话最多一个，会被下一个预览替换；编辑即转正 */
+  preview: boolean
   loading: boolean
   saving: boolean
   error: string
@@ -26,7 +30,16 @@ export interface OpenFile {
    * 界面据此给「强制覆盖 / 重新加载」而不是一句普通错误。
    */
   conflict: boolean
+  /**
+   * 打开后跳到指定行（搜索结果点击）。seq 单调递增是关键：
+   * 同一行点两次也要能重新触发（行号相同 seq 不同）；
+   * FileEditor 用 seq 比对防重放（切标签回来不旧跳）。
+   */
+  revealLine: { line: number; seq: number } | null
 }
+
+/** revealLine 的触发序号（模块级单调递增，跨文件唯一） */
+let revealSeq = 0
 
 /** 每个会话各自维护一份打开列表：切会话不该看到别人打开的文件 */
 const filesBySession = reactive<Record<string, OpenFile[]>>({})
@@ -63,17 +76,27 @@ export const useEditorStore = defineStore('editor', () => {
     return filesOf(sessionId).some(isDirty)
   }
 
-  /** 打开远端文件。已打开的直接切过去，不重复读。fs 给了就是容器文件（经 agent） */
+  /**
+   * 打开远端文件。已打开的直接切过去，不重复读。fs 给了就是容器文件（经 agent）。
+   * opts.line = 打开后跳到该行；opts.preview = 预览标签（见 OpenFile.preview）。
+   */
   async function open(
     sessionId: string,
     path: string,
-    fs?: { sessionId: string; containerName: string }
+    fs?: { sessionId: string; containerName: string },
+    opts?: { line?: number; preview?: boolean }
   ): Promise<void> {
     const list = (filesBySession[sessionId] ??= [])
     const existing = list.find((f) => f.path === path)
     if (existing) {
+      // 普通打开（双击等）已处于预览态的文件：原地转正（VS Code 语义）。
+      // 这也是「树单击→双击三连」能成立的关键：第一次 click 已预览打开，
+      // dblclick 到达时走这里转正，不重复读、不开第二个标签。
+      if (!opts?.preview) existing.preview = false
       activePathBySession[sessionId] = path
       visible.value = true
+      // 已打开是「同一文件点不同匹配行」的主路径：不能只切活跃就 return
+      if (opts?.line) existing.revealLine = { line: opts.line, seq: ++revealSeq }
       return
     }
 
@@ -88,12 +111,27 @@ export const useEditorStore = defineStore('editor', () => {
       content: '',
       savedContent: '',
       mtime: 0,
+      size: 0,
+      preview: !!opts?.preview,
       loading: true,
       saving: false,
       error: '',
-      conflict: false
+      conflict: false,
+      revealLine: opts?.line ? { line: opts.line, seq: ++revealSeq } : null
     })
-    list.push(file)
+
+    // 预览标签替换：同会话最多一个预览，新的顶掉旧的（原位 splice，标签不跳到队尾）。
+    // 旧的如果是 dirty 的（编辑即转正后正常流程不会出现，纯防御分支）——转正保命，
+    // 不弹 confirm：预览是快速浏览动作，中途弹窗打断比丢一个标签更糟。
+    const pIdx = opts?.preview ? list.findIndex((f) => f.preview) : -1
+    if (pIdx >= 0 && isDirty(list[pIdx])) {
+      list[pIdx].preview = false
+      list.push(file)
+    } else if (pIdx >= 0) {
+      list.splice(pIdx, 1, file)
+    } else {
+      list.push(file)
+    }
     activePathBySession[sessionId] = path
     visible.value = true
 
@@ -110,12 +148,19 @@ export const useEditorStore = defineStore('editor', () => {
         file.content = res.content
         file.savedContent = res.content
         file.mtime = res.mtime
+        file.size = res.size
       }
     } catch (err) {
       file.error = errorText(err)
     } finally {
       file.loading = false
     }
+  }
+
+  /** 预览标签转正：目前唯一触发点是用户开始编辑（FileEditor 的 updateListener） */
+  function pinPreview(sessionId: string, path: string): void {
+    const file = filesOf(sessionId).find((f) => f.path === path)
+    if (file) file.preview = false
   }
 
   /**
@@ -139,6 +184,7 @@ export const useEditorStore = defineStore('editor', () => {
         file.content = res.content
         file.savedContent = res.content
         file.mtime = res.mtime
+        file.size = res.size
       }
     } catch (err) {
       file.error = errorText(err)
@@ -167,6 +213,8 @@ export const useEditorStore = defineStore('editor', () => {
         file.containerName
       )
       file.savedContent = file.content
+      // sftpWriteText 只返回 mtime；写入的内容就是 content，字节数自己算
+      file.size = new TextEncoder().encode(file.content).length
       return true
     } catch (err) {
       const text = errorText(err)
@@ -259,6 +307,7 @@ export const useEditorStore = defineStore('editor', () => {
     save,
     close,
     setActive,
+    pinPreview,
     hide,
     dropSession,
     onSessionClosed

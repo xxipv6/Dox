@@ -49,7 +49,7 @@ export interface HighlightRule {
  */
 export const HIGHLIGHT_RULES: HighlightRule[] = [
   // ---- 日志级别（只认大写：正文里的 error/done 交给下面的关键字规则）----
-  { id: 'level-error', re: /\b(?:ERROR|FATAL|CRIT|CRITICAL|SEVERE)\b/g, role: 'red' },
+  { id: 'level-error', re: /\b(?:ERROR|FATAL|EMERG|ALERT|CRIT|CRITICAL|SEVERE)\b/g, role: 'red' },
   { id: 'level-warn', re: /\b(?:WARN|WARNING)\b/g, role: 'yellow' },
   { id: 'level-info', re: /\b(?:INFO|NOTICE)\b/g, role: 'blue' },
   { id: 'level-debug', re: /\b(?:DEBUG|TRACE|VERBOSE)\b/g, role: 'brightBlack' },
@@ -83,6 +83,22 @@ export const HIGHLIGHT_RULES: HighlightRule[] = [
     id: 'ok',
     re: /\b(?:success|successful|successfully|finished|listening|started|ready|done)\b/gi,
     role: 'green'
+  },
+  // ---- 状态词（systemctl / docker ps / k8s 状态列与事件、CI、git；failed 走上面的 error）----
+  {
+    id: 'status-ok',
+    re: /\b(?:active|running|healthy|online|succeeded|enabled|available|completed|passed|reachable)\b/gi,
+    role: 'green'
+  },
+  {
+    id: 'status-warn',
+    re: /\b(?:inactive|dead|stopped|exited|pending|waiting|restarting|suspended|terminating|activating|reloading|refreshing|starting|stopping|paused|zombie|defunct|unknown|queued|skipped|canceled|cancelled|offline|expired|disabled|masked|read-only|progressing|containercreating|podinitializing)\b/gi,
+    role: 'yellow'
+  },
+  {
+    id: 'status-err',
+    re: /\b(?:unhealthy|evicted|imagepullbackoff|errimagepull|crashloopbackoff|oomkilled|createcontainerconfigerror|progressdeadlineexceeded|nodelost|conflict|corrupted|interrupted)\b/gi,
+    role: 'red'
   }
 ]
 

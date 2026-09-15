@@ -165,6 +165,12 @@ export interface AppSettings {
    * （优先于「继承当前标签 cwd」和学习层；空 = 走学习层那套）
    */
   localDefaultDir: string
+  /**
+   * 文件面板「项目模式」的根目录：deviceKey → 绝对路径。
+   * deviceKey 的生成规则见渲染层 sessions store 的 deviceKeyForSession。
+   * 可选字段：老设置文件没有这个键，向后兼容天然成立。
+   */
+  projectRoots?: Record<string, string>
 }
 
 /**
@@ -507,4 +513,58 @@ export interface CliCommandPayload {
   cwd?: string
   /** kind=connect：`[user@]host[:port]` */
   target?: string
+}
+
+// ---- 项目模式全文搜索（面板内 Ctrl/Cmd+Shift+F，对标 VS Code 全局搜索）----
+
+/**
+ * 搜索引擎：agent（dox-agent fs_search，RE2 并发遍历）→ rg（现成 ripgrep）
+ * → grep（POSIX 保底）→ node（Windows 本机纯遍历兜底）。
+ * 三级回退链的选择在主进程 SearchService，渲染层只拿它当徽章展示。
+ */
+export type SearchEngine = 'agent' | 'rg' | 'grep' | 'node'
+
+export interface SearchMatch {
+  /** 绝对路径（远端 posix / 本机原生形态）；显示相对化在渲染层做 */
+  path: string
+  /** 1 起始 */
+  line: number
+  /**
+   * 匹配起始列。注意 rg/agent 给的都是**字节偏移**（多字节文本下不是字符列），
+   * 只用于展示；编辑器跳转只消费 line。
+   */
+  col: number
+  /** 匹配行预览（解析侧统一截 500 字符） */
+  text: string
+}
+
+/**
+ * 一次搜索的事件流（主进程 → 渲染层，全窗口广播，渲染层按 runId 过滤）。
+ * match 已合批（50ms/200 条）；agent 路径一次性返回后由主进程按批重放，
+ * UI 感知不到引擎差异。
+ */
+export type SearchEvent =
+  | { runId: string; type: 'match'; matches: SearchMatch[] }
+  | {
+      runId: string
+      type: 'done'
+      engine: SearchEngine
+      matchCount: number
+      filesSearched: number
+      elapsedMs: number
+      /** 结果上限/时间预算撞线，结果不全 */
+      truncated: boolean
+      canceled: boolean
+    }
+  | { runId: string; type: 'error'; message: string; engine?: SearchEngine }
+
+export interface SearchStartParams {
+  /** 文件操作会话（容器 = 父 SSH 会话；渲染层直接传 FileExplorer 的 fsSessionId） */
+  fsSessionId: string
+  containerName?: string
+  /** 搜索范围（绝对路径；项目模式 = 项目根） */
+  root: string
+  pattern: string
+  isRegex: boolean
+  ignoreCase: boolean
 }

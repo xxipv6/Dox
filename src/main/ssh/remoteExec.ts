@@ -165,11 +165,15 @@ export interface ExecStreamHandle {
  * 的 UTF-8 多字节序列），结束时给退出码。compose 这类「可能跑几分钟、
  * 用户要盯着进度、随时想掐掉改 Dockerfile 再来」的命令用它；
  * 一次性探测仍走 execCapture。
+ *
+ * onStderr 不给时 stderr 并进 onData（历史行为，compose 要的就是合流）；
+ * 搜索这类「stdout 是结构化数据」的调用方必须给 onStderr —— rg/grep 的
+ * warning 混进 --json 流会把解析打烂。
  */
 export function execStream(
   client: Client,
   command: string,
-  opts: { timeoutMs?: number; onData: (text: string) => void }
+  opts: { timeoutMs?: number; onData: (text: string) => void; onStderr?: (text: string) => void }
 ): ExecStreamHandle {
   const timeoutMs = opts.timeoutMs ?? 10 * 60_000
   let channel: ClientChannel | null = null
@@ -209,7 +213,7 @@ export function execStream(
         // 取消打在通道建立之前：流一就位立即关，别让远端把命令跑完
         if (canceled) stream.close()
         stream.on('data', (chunk: Buffer) => opts.onData(decOut.write(chunk)))
-        stream.stderr?.on('data', (chunk: Buffer) => opts.onData(decErr.write(chunk)))
+        stream.stderr?.on('data', (chunk: Buffer) => (opts.onStderr ?? opts.onData)(decErr.write(chunk)))
         stream.on('exit', (code: number | null) => {
           sawExit = true
           exitCode = code
@@ -217,8 +221,10 @@ export function execStream(
         stream.on('error', (streamErr: Error) => finish(() => reject(streamErr)))
         stream.on('close', () => {
           // 冲刷解码器尾部，别丢最后一个多字节字符
-          const tail = decOut.end() + decErr.end()
-          if (tail) opts.onData(tail)
+          const tailOut = decOut.end()
+          const tailErr = decErr.end()
+          if (tailOut) opts.onData(tailOut)
+          if (tailErr) (opts.onStderr ?? opts.onData)(tailErr)
           finish(() => {
             if (canceled) {
               resolve({ code: exitCode ?? -1, canceled: true })

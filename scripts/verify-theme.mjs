@@ -90,10 +90,28 @@ async function ensureTheme(target) {
 
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(1200)
+
+/*
+ * 阶段 1 断言「默认是亮色」，读的是**当前生效**的界面主题 —— 而设置是持久化的：
+ * 本机主人把 Dox 切成深色之后，这条就会红（跟被测代码半点关系没有，纯环境）。
+ * 所以先记下原值、把主题钉到亮色当基线，收尾再还回去。
+ */
+const origTheme = await win.evaluate(async () => (await window.api.getSettings()).uiTheme)
+async function restoreTheme(page = win) {
+  try {
+    await page.evaluate(async (t) => {
+      const s = await window.api.getSettings()
+      await window.api.setSettings({ ...s, uiTheme: t })
+    }, origTheme ?? 'light')
+  } catch { /* 实例可能已经关掉了 */ }
+}
+
 // 清布局 + reload 必须在同一次 evaluate 里：布局 store 有 400ms 防抖自动保存，
 // 留出间隙它就会把当前标签重新写回快照
 await win.evaluate(async () => {
   await window.api.setLayout({ tabs: [] })
+  const s = await window.api.getSettings()
+  await window.api.setSettings({ ...s, uiTheme: 'light' })
   location.reload()
 })
 await win.waitForLoadState('domcontentloaded')
@@ -361,6 +379,10 @@ check(
   winBg.toLowerCase() === '#0b1220',
   winBg
 )
+// 收尾：把界面主题还回本机原值 —— 这个脚本自己会把主题切来切去，
+// 不还的话「本机主人选的深色」就被它悄悄改写成深色/亮色并持久化下去，
+// 下一次跑阶段 1 又会因为环境而红（吃过三次，见 memory: verify-needs-app-quit）
+await restoreTheme(win2)
 await app2.close()
 
 // ---------- 阶段 7：静态守卫 ----------

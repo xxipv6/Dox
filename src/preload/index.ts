@@ -12,6 +12,8 @@ import type {
   ForwardRule,
   HostKeyVerifyRequest,
   SaveSessionInput,
+  SearchEvent,
+  SearchStartParams,
   SessionStatusEvent,
   SshSessionConfig,
   TermSize,
@@ -246,6 +248,15 @@ const api: DoxApi = {
     const listener = (_e: IpcRendererEvent, ev: ComposeRunEvent): void => cb(ev)
     ipcRenderer.on(IpcChannels.composeEvent, listener)
     return () => ipcRenderer.removeListener(IpcChannels.composeEvent, listener)
+  },
+
+  // ---- 项目模式全文搜索 ----
+  searchStart: (params: SearchStartParams) => ipcRenderer.invoke(IpcChannels.searchStart, params),
+  searchCancel: (runId) => ipcRenderer.send(IpcChannels.searchCancel, runId),
+  onSearchEvent: (cb) => {
+    const listener = (_e: IpcRendererEvent, ev: SearchEvent): void => cb(ev)
+    ipcRenderer.on(IpcChannels.searchEvent, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.searchEvent, listener)
   }
 }
 

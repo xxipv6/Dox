@@ -156,6 +156,17 @@ finalize 里同步完成，不会再重连）。
 漏改检测交给 `verify-theme.mjs`：它在亮/深两套下遍历全 DOM 的计算样式，断言没有任何一处
 等于旧调色板的 15 个值。**逐个人工核对 270 处不现实，漏一个在深色下看着完全正常、只有亮色才露黑。**
 
+**唯一的例外是编辑器的语法配色**：`src/renderer/src/editor/vscodeSyntax.ts` 里是 VS Code
+内置主题（深色 Dark+ / 浅色 Light+）的**第三方主题数据**，性质同 `assets/file-icons/` 的
+Seti —— 那里的十六进制值是移植过来的原值，不走令牌层，也别凭手感调（要改先对照 VS Code 原版）。
+边界很清：**语法高亮归那个文件，编辑器 chrome（底色、行号槽、活动行、选区、字体）一律走令牌**，
+所以同一份语法配色在两套界面主题下都成立。两个真踩过的坑写在文件注释里：给
+`syntaxHighlighting()` 加 `fallback: true` 会被 basicSetup 的默认高亮全面压过；
+markdown 围栏代码要内嵌解析得取 `LanguageSupport.language`（直接塞 LanguageSupport 运行时会挂）。
+
+`verify-theme.mjs` 会切界面主题、并把它持久化 —— 所以脚本**开头记原值、收尾还回去**
+（本机主人选的深色不该被测试悄悄改写）。
+
 ### 3.4 主题不闪
 
 `html`/`body` 刻意**不刷底色**，底色的所有者是 `#app`，而主进程在建窗时按持久化的
@@ -247,6 +258,7 @@ node scripts/verify-local-explorer.mjs # 本地终端文件面板：新建/重�
 node scripts/verify-cli.mjs         # CLI 伴侣：--cli 参数单实例转发、connect 预填、安装器
 node scripts/verify-shell-env.mjs   # 新终端环境解析：POSIX 假 $SHELL / Windows 注册表注入变量，终端里可见
 node scripts/verify-tar-transfer.mjs # tar 整流文件夹传输：格式纯函数 + 2000 文件树双向 sha256 + 取消两条路 + UI 冒烟
+node scripts/verify-csv-table.mjs   # 编辑器 CSV/TSV 表格视图：解析边界、表格↔文本切换撤销保真、渲染截断
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
 
