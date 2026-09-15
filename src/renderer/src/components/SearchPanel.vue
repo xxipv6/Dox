@@ -320,6 +320,9 @@ onBeforeUnmount(() => {
 }
 .search-box {
   flex: 1;
+  /* 同 .search-panel 的 min-width:0：编辑器打开时面板按设计收窄到 250px，
+     输入框的内在默认宽（~20 字符）会把 Aa/.* 挤出面板、滑到编辑器底下点不到 */
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--sp-1);
