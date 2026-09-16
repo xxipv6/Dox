@@ -179,5 +179,7 @@ export const IpcChannels = {
   updaterCheck: 'updater:check',
   updaterQuitAndInstall: 'updater:quitAndInstall',
   /** 主进程 → 渲染进程：更新状态快照（整体替换） */
-  updaterEvent: 'updater:event'
+  updaterEvent: 'updater:event',
+  /** 安装完整性自检（resources/agent 与 asar 同包）：有警告返回文案，无则 null */
+  bundleIntegrityCheck: 'app:bundleIntegrityCheck'
 } as const

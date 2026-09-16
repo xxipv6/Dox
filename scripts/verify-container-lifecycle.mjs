@@ -150,9 +150,10 @@ st = await waitRowState((s) => s.stopped)
 check('停止后回到淡显', st?.stopped === true, JSON.stringify(st))
 await win.screenshot({ path: join('shots', '33-container-lifecycle.png') })
 
-// 删除（confirm 自动确认）
+// 删除（应用内确认弹窗点确定）
 await rightClickRow()
 await clickMenu('删除')
+await win.locator('.confirm-dialog button', { hasText: '确定' }).click()
 const gone = await waitRowState((s) => s === null || undefined, 8000)
 // waitRowState 在 pred 为 null 时不适用，直接轮询不存在
 let exists = true

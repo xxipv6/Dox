@@ -310,6 +310,11 @@ opt-in 入口，脚本走同一条路。容器一律起在 SSH 可达的测试�
 
 ### 写新脚本时的几个坑（都真踩过）
 
+- **原生 `window.confirm` / `dialog.showMessageBox` 已全面移除**（跟界面两套画风）。
+  二次确认一律走 `useConfirmStore().ask()`（ConfirmDialog.vue，`.confirm-dialog`）。
+  验证脚本触发删除/丢弃类动作后要点 `.confirm-dialog button:has-text("确定")` ——
+  `win.on('dialog')` 不会再等到任何东西（留着无害，只是永远哑火）。
+  安装完整性自检（bundleIntegrityCheck）也走 toast 而不是系统弹窗。
 - **别用 `includes` 认标记。** 终端**会回显敲进去的命令**，命令里往往就含那个标记。
   用 `hasOutputLine`（断言标记独占一行）。
 - **测试容器 sshd 的真配置在 `/config/sshd/sshd_config`**（进程以 `-f` 指定），

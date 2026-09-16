@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useSessionStore } from '../stores/sessions'
+import { useConfirmStore } from '../stores/confirm'
 import { useSettingsStore } from '../stores/settings'
 import DeviceDialog from './DeviceDialog.vue'
 import Icon from './Icon.vue'
@@ -90,7 +91,7 @@ function openEdit(s: SavedSession): void {
 }
 
 async function remove(s: SavedSession): Promise<void> {
-  if (!confirm(`删除设备「${s.name}」？`)) return
+  if (!(await useConfirmStore().ask(`删除设备「${s.name}」？`))) return
   await store.deleteSaved(s.id)
 }
 
@@ -160,7 +161,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   }
 
   const ask = CTR_CONFIRMS[id]
-  if (ask && !confirm(ask(box.name))) return
+  if (ask && !(await useConfirmStore().ask(ask(box.name)))) return
   ctrControlling.value = box.name
   try {
     await window.api.controlContainer(tid, box.name, id as 'start' | 'stop' | 'unpause' | 'remove')

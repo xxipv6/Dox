@@ -127,6 +127,8 @@ async function runCompose(verbLabel, rowSel) {
   await win.waitForTimeout(400)
   const item = win.locator('.context-menu .menu-item, .context-menu button').filter({ hasText: verbLabel }).first()
   await item.click()
+  // down 有应用内确认弹窗（原生 confirm 已全部移除）：出现就点确定，没出现（up/restart）跳过
+  await win.locator('.confirm-dialog button', { hasText: '确定' }).click({ timeout: 2000 }).catch(() => {})
   const drawer = win.locator('.compose-drawer')
   await drawer.waitFor({ timeout: 5000 })
   for (let i = 0; i < 90; i++) {

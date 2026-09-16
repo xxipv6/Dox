@@ -86,6 +86,7 @@ const before = await devices()
 if (before.length) {
   await win.locator('.device').last().hover()
   await win.locator('.device').last().locator('button[title="删除"]').click()
+  await win.locator('.confirm-dialog button', { hasText: '确定' }).click()
   await win.waitForTimeout(1200)
   const after = await devices()
   console.log('删除后设备:', JSON.stringify(after))

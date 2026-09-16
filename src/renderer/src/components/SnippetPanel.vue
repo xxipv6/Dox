@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { CommandSnippet, ExecResult } from '@shared/types'
 import { agentVersionOlder } from '@shared/agentVersion'
 import { useSessionStore } from '../stores/sessions'
+import { useConfirmStore } from '../stores/confirm'
 import { errorText } from '../utils/errors'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
@@ -155,7 +156,7 @@ async function save(): Promise<void> {
 }
 
 async function remove(s: CommandSnippet): Promise<void> {
-  if (!confirm(`删除片段「${s.name}」？`)) return
+  if (!(await useConfirmStore().ask(`删除片段「${s.name}」？`))) return
   await api.deleteSnippet(s.id)
   await refresh()
 }

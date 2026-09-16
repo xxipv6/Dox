@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import type { RemoteFileContent } from '@shared/types'
 import { errorText } from '../utils/errors'
+import { useConfirmStore } from './confirm'
 
 export interface OpenFile {
   /** 远端绝对路径，同时作为唯一标识 */
@@ -171,7 +172,7 @@ export const useEditorStore = defineStore('editor', () => {
   async function reload(sessionId: string, path: string, opts?: { discard?: boolean }): Promise<void> {
     const file = filesOf(sessionId).find((f) => f.path === path)
     if (!file) return
-    if (!opts?.discard && isDirty(file) && !confirm(`「${file.name}」有未保存的修改，重新加载将丢弃它们，确定？`)) return
+    if (!opts?.discard && isDirty(file) && !(await useConfirmStore().ask(`「${file.name}」有未保存的修改，重新加载将丢弃它们，确定？`))) return
 
     file.loading = true
     file.error = ''
@@ -231,11 +232,11 @@ export const useEditorStore = defineStore('editor', () => {
    * 关闭一个文件标签。
    * 有未保存改动时先问一句 —— 这些内容只存在于内存里，关掉就没了。
    */
-  function close(sessionId: string, path: string): void {
+  async function close(sessionId: string, path: string): Promise<void> {
     const list = filesOf(sessionId)
     const file = list.find((f) => f.path === path)
     if (!file) return
-    if (isDirty(file) && !confirm(`「${file.name}」有未保存的修改，确定丢弃？`)) return
+    if (isDirty(file) && !(await useConfirmStore().ask(`「${file.name}」有未保存的修改，确定丢弃？`))) return
 
     const idx = list.indexOf(file)
     list.splice(idx, 1)
@@ -254,8 +255,8 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   /** 整个编辑器面板收起（有未保存改动时提示一句 —— 只是提示，内容并不丢） */
-  function hide(sessionId: string): void {
-    if (hasDirty(sessionId) && !confirm('有未保存的修改（收起不会丢失，重新展开可继续编辑）。确定收起？')) return
+  async function hide(sessionId: string): Promise<void> {
+    if (hasDirty(sessionId) && !(await useConfirmStore().ask('有未保存的修改（收起不会丢失，重新展开可继续编辑）。确定收起？'))) return
     visible.value = false
   }
 

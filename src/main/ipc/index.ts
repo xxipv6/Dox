@@ -41,6 +41,7 @@ import type { AiUsageService } from '../aiusage/AiUsageService'
 import type { ComposeService } from '../compose/ComposeService'
 import type { SearchService } from '../search/SearchService'
 import { updaterCheckNow, updaterGetState, updaterQuitAndInstall } from '../updater'
+import { checkBundledAgentIntegrity } from '../agent/AgentManager'
 
 /** agentCall 白名单泛通道允许的方法（0.4.0 起；fs_* 是既有方法，走这里也行） */
 const AGENT_CALL_ALLOW = new Set([
@@ -615,4 +616,6 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.updaterGetState, () => updaterGetState())
   ipcMain.handle(IpcChannels.updaterCheck, () => updaterCheckNow())
   ipcMain.on(IpcChannels.updaterQuitAndInstall, () => updaterQuitAndInstall())
+  // 安装完整性（覆盖安装新旧混合 → 警告文案，渲染层 toast 展示，不用原生弹窗）
+  ipcMain.handle(IpcChannels.bundleIntegrityCheck, () => checkBundledAgentIntegrity())
 }

@@ -232,9 +232,10 @@ try {
   await win.locator('.explorer button[title="后退（鼠标侧键）"]').click()
   await win.waitForTimeout(800)
 
-  // ---- 删除（右键 made → 删除，dialog 自动确认）----
+  // ---- 删除（右键 made → 删除，应用内确认弹窗点确定）----
   await win.locator('.explorer .row', { hasText: 'made' }).first().click({ button: 'right' })
   await win.locator('.context-menu .menu-item', { hasText: '删除' }).click()
+  await win.locator('.confirm-dialog button', { hasText: '确定' }).click()
   await win.waitForTimeout(800)
   check('删除落盘', !fs.existsSync(path.join(base, 'made')))
 

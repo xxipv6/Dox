@@ -7,6 +7,7 @@ import { WIN_DRIVES, isWinPath, joinLocal, parentLocal } from '@shared/localPath
 import { formatSize, formatTime } from '../utils/format'
 import { useSessionStore } from '../stores/sessions'
 import { useEditorStore } from '../stores/editor'
+import { useConfirmStore } from '../stores/confirm'
 import { useComposeStore } from '../stores/compose'
 import { useSettingsStore } from '../stores/settings'
 import { panelClipboard } from '../stores/fileClipboard'
@@ -548,7 +549,7 @@ async function deleteNow(entry: FileEntry): Promise<void> {
 
 async function removeEntry(entry: FileEntry): Promise<void> {
   const hint = entry.isDir ? `目录 ${entry.name} 及其全部内容（递归删除，不可恢复）` : `文件 ${entry.name}`
-  if (!confirm(`确认删除${hint}？`)) return
+  if (!(await useConfirmStore().ask(`确认删除${hint}？`))) return
   await guard(() => deleteNow(entry))
 }
 
@@ -766,7 +767,7 @@ function isComposeTarget(targets: FileEntry[]): boolean {
  */
 async function runCompose(verb: ComposeVerb, file: FileEntry): Promise<void> {
   if (verb === 'down') {
-    if (!confirm(`compose down 会停止并删除 ${file.name} 定义的全部容器与网络（数据卷保留）。确认？`)) {
+    if (!(await useConfirmStore().ask(`compose down 会停止并删除 ${file.name} 定义的全部容器与网络（数据卷保留）。确认？`))) {
       return
     }
   }
@@ -887,7 +888,7 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
   }
   const dirs = targets.filter((t) => t.isDir).length
   const hint = dirs ? `，其中 ${dirs} 个是目录（连同内容递归删除）` : ''
-  if (!confirm(`确认删除选中的 ${targets.length} 项？${hint}。不可恢复。`)) return
+  if (!(await useConfirmStore().ask(`确认删除选中的 ${targets.length} 项？${hint}。不可恢复。`))) return
   try {
     // 批量一条命令删（rm 逐操作数独立：一项失败不耽误其他项，失败原因进错误信息）
     await window.api.sftpDeleteMany(

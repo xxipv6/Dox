@@ -91,6 +91,7 @@ if ((await rows()).includes(NAME)) {
   const stale = win.locator('.explorer .row').filter({ hasText: NAME }).first()
   await stale.hover()
   await stale.locator('button[title="删除"]').click()
+  await win.locator('.confirm-dialog button', { hasText: '确定' }).click({ timeout: 3000 }).catch(() => {})
   await win.waitForTimeout(1800)
 }
 check('起点：远端没有该文件', !(await rows()).includes(NAME))
@@ -173,6 +174,7 @@ await win.waitForTimeout(500)
 const row = win.locator('.explorer .row').filter({ hasText: NAME }).first()
 await row.hover()
 await row.locator('button[title="删除"]').click()
+await win.locator('.confirm-dialog button', { hasText: '确定' }).click({ timeout: 3000 }).catch(() => {})
 await win.waitForTimeout(2000)
 check('清理后远端不再有该文件', !(await rows()).includes(NAME))
 

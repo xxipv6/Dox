@@ -15,7 +15,7 @@ import { TransferManager } from './sftp/TransferManager'
 import { ForwardManager } from './forward/ForwardManager'
 import { ContainerManager } from './container/ContainerManager'
 import { LocalPtyManager } from './local/LocalPtyManager'
-import { AgentManager, checkBundledAgentIntegrity } from './agent/AgentManager'
+import { AgentManager } from './agent/AgentManager'
 import { ProcessService } from './proc/ProcessService'
 import { AiUsageService } from './aiusage/AiUsageService'
 import { ComposeService } from './compose/ComposeService'
@@ -225,8 +225,6 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  // 覆盖安装的新旧混合自检：不一致会弹窗请用户卸载重装（详见函数注释）
-  checkBundledAgentIntegrity()
   /*
    * ---- 应用菜单：两个平台走两条完全不同的路 ----
    *

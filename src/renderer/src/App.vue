@@ -16,6 +16,7 @@ import { useCloseTabShortcut } from './composables/useCloseTabShortcut'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
 import { useUpdaterStore } from './stores/updater'
+import { pushToast } from './stores/toast'
 import SessionSidebar from './components/SessionSidebar.vue'
 import TitleBar from './components/TitleBar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
@@ -25,6 +26,7 @@ import TransferQueue from './components/TransferQueue.vue'
 import ComposeDrawer from './components/ComposeDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 import Icon from './components/Icon.vue'
 import ToastHost from './components/ToastHost.vue'
 import ContextMenu, { type ContextMenuItem } from './components/ContextMenu.vue'
@@ -110,6 +112,11 @@ onMounted(async () => {
 
   // 更新状态镜像：标题栏提示点与设置里的更新区块都从它取数
   void useUpdaterStore().init()
+
+  // 安装完整性自检（覆盖安装新旧混合）：有警告才弹 toast，常驻不自动消失
+  void window.api.bundleIntegrityCheck().then((warn) => {
+    if (warn) pushToast(warn, 'error', 0)
+  })
 
   /*
    * 量 .terminal-stack 的宽度决定平铺开几列。窗口缩放、侧栏收展、SFTP 面板
@@ -801,6 +808,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 
     <SettingsDialog />
     <HostKeyDialog />
+    <ConfirmDialog />
     <ToastHost />
 
     <!-- 标签右键菜单：批量关闭（关闭当前 / 其他 / 右侧 / 全部） -->

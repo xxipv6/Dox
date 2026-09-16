@@ -389,4 +389,6 @@ export interface DoxApi {
   updaterQuitAndInstall(): void
   /** 订阅更新状态变化（快照整体替换） */
   onUpdaterEvent(cb: (state: UpdaterState) => void): () => void
+  /** 安装完整性自检：覆盖安装新旧混合时返回警告文案，正常返回 null（渲染层挂载后问一次） */
+  bundleIntegrityCheck(): Promise<string | null>
 }

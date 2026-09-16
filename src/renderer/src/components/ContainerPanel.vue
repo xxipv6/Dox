@@ -9,6 +9,7 @@ import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
 import SidebarSection from './SidebarSection.vue'
 import { pushToast } from '../stores/toast'
+import { useConfirmStore } from '../stores/confirm'
 
 /**
  * 远端容器列表（Docker / Podman）。
@@ -198,7 +199,7 @@ async function onMenuSelect(id: string): Promise<void> {
 
   // start / stop / unpause / remove
   const ask = CONFIRMS[id]
-  if (ask && !confirm(ask(target.name))) return
+  if (ask && !(await useConfirmStore().ask(ask(target.name)))) return
   controlling.value = target.name
   try {
     await api.controlContainer(sessionId, target.name, id as 'start' | 'stop' | 'unpause' | 'remove', nestedChain.value)

@@ -268,7 +268,8 @@ const api: DoxApi = {
     const listener = (_e: IpcRendererEvent, state: UpdaterState): void => cb(state)
     ipcRenderer.on(IpcChannels.updaterEvent, listener)
     return () => ipcRenderer.removeListener(IpcChannels.updaterEvent, listener)
-  }
+  },
+  bundleIntegrityCheck: () => ipcRenderer.invoke(IpcChannels.bundleIntegrityCheck)
 }
 
 contextBridge.exposeInMainWorld('api', api)
