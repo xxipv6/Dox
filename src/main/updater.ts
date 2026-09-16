@@ -253,13 +253,12 @@ export function setupAutoUpdater(): void {
     // 补一次完整检查把「available（只提示下载）」推进到真正的后台下载
     if (supported && state.phase === 'available') void check()
     /*
-     * 延后 5s 再查：只避开启动第一屏（布局恢复 / SSH 重连 / pty 启动）那一两秒，
-     * 更新检查本身是一次异步 HTTP 请求，谈不上挤占；再晚（曾经的 45s）就是
-     * 用户开应用快一分钟才知道有新版，提示的意义没了。
+     * 启动后 10s 自动查一次：避开首屏（布局恢复 / SSH 重连 / pty 启动）那一两秒，
+     * 又不至于让用户开应用半天才知道有新版。手动「检查更新」随时可点，不受此限。
      */
     const timer = setTimeout(() => {
       void check()
-    }, 5_000)
+    }, 10_000)
     timer.unref?.()
   })
 }
