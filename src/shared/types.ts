@@ -568,3 +568,40 @@ export interface SearchStartParams {
   isRegex: boolean
   ignoreCase: boolean
 }
+
+// ---- 应用内自动更新 ----
+
+/** 更新状态机阶段（主进程 updater.ts 的唯一事实源，渲染层只镜像） */
+export type UpdaterPhase =
+  | 'idle' // 还没查过
+  | 'checking'
+  | 'up-to-date'
+  | 'available' // 发现新版本（autoDownload 开着，随即转 downloading）
+  | 'downloading'
+  | 'downloaded' // 下好了，等重启安装
+  | 'error'
+
+/** 更新源：镜像优先，GitHub 兜底（见 main/updater.ts） */
+export type UpdaterSource = 'mirror' | 'github'
+
+/** 主进程 → 渲染层的更新状态快照（整体替换，不做增量） */
+export interface UpdaterState {
+  phase: UpdaterPhase
+  /** 当前运行的版本 */
+  currentVersion: string
+  /** 发现/下载的新版本号 */
+  version?: string
+  /** downloading 时的进度 */
+  percent?: number
+  bytesPerSecond?: number
+  transferred?: number
+  total?: number
+  /** phase=error 时的用户可读信息 */
+  error?: string
+  /** 当前生效的源 */
+  source?: UpdaterSource
+  /** 自动更新走不通时的手动下载地址（镜像直链或 Release 页） */
+  manualUrl?: string
+  /** false = 此构建不支持自动更新（未打包 / 未签名的 macOS 构建） */
+  supported: boolean
+}

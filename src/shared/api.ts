@@ -32,6 +32,7 @@ import type {
   SshSessionConfig,
   TermSize,
   TransferTask,
+  UpdaterState,
   WindowState,
   ZmodemFile
 } from './types'
@@ -378,4 +379,14 @@ export interface DoxApi {
   searchCancel(runId: string): void
   /** 订阅搜索事件（全窗口广播，按 runId 过滤） */
   onSearchEvent(cb: (ev: SearchEvent) => void): () => void
+
+  // ---- 应用内自动更新 ----
+  /** 当前更新状态快照（挂载时取一次，之后靠 onUpdaterEvent 跟） */
+  updaterGetState(): Promise<UpdaterState>
+  /** 手动检查更新（镜像优先，失败自动回 GitHub；已下好/进行中时是空操作） */
+  updaterCheck(): Promise<void>
+  /** 重启并安装已下载的更新 —— 会断开所有会话，确认动作在渲染层做 */
+  updaterQuitAndInstall(): void
+  /** 订阅更新状态变化（快照整体替换） */
+  onUpdaterEvent(cb: (state: UpdaterState) => void): () => void
 }

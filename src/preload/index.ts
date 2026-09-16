@@ -18,6 +18,7 @@ import type {
   SshSessionConfig,
   TermSize,
   TransferTask,
+  UpdaterState,
   WindowState
 } from '../shared/types'
 
@@ -257,6 +258,16 @@ const api: DoxApi = {
     const listener = (_e: IpcRendererEvent, ev: SearchEvent): void => cb(ev)
     ipcRenderer.on(IpcChannels.searchEvent, listener)
     return () => ipcRenderer.removeListener(IpcChannels.searchEvent, listener)
+  },
+
+  // ---- 应用内自动更新 ----
+  updaterGetState: () => ipcRenderer.invoke(IpcChannels.updaterGetState),
+  updaterCheck: () => ipcRenderer.invoke(IpcChannels.updaterCheck),
+  updaterQuitAndInstall: () => ipcRenderer.send(IpcChannels.updaterQuitAndInstall),
+  onUpdaterEvent: (cb) => {
+    const listener = (_e: IpcRendererEvent, state: UpdaterState): void => cb(state)
+    ipcRenderer.on(IpcChannels.updaterEvent, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.updaterEvent, listener)
   }
 }
 

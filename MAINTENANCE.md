@@ -492,7 +492,33 @@ node scripts/generate-icon.mjs --preview   # 另出 shots/icon-sizes.png（16/32
 
 ---
 
-## 6. 踩过的坑（环境相关）
+## 6. 自动更新
+
+状态机与源策略都在 `src/main/updater.ts`，改动前先读那几段注释。要点：
+
+- **镜像优先**（项目负责人拍板）：主源是 gh-proxy 代理的 generic feed
+  （`releases/latest/download/` 是 GitHub 的固定入口，URL 不随版本变），
+  失败才回 GitHub 直连。exe 的 sha512 由 latest.yml 强制校验，代理传错装不上。
+- **失败处理统一在 `error` 事件里**：`checkForUpdates()` 失败时 error 事件与
+  promise reject **都会来**，所以 `checkWith` 的 catch 是刻意吞掉的 ——
+  两边都处理换源就会执行两遍。
+- **下载停滞有看门狗**（60s 无进度 → 转 error 态）：electron-updater 没有
+  停滞超时也没有 cancelDownload，被代理吊死的 TCP 流不报错也不结束，
+  不看门就是进度条永远停在 42%。
+- **`quitAndInstall(true, true)` 两个 true 都不能省**：默认的 `(false)` 会把
+  assisted 安装向导整个弹出来让用户再点一遍。静默安装从注册表读回原安装目录，
+  用户自选的目录不丢；`installer.nsh` 的 customInit 在静默模式下同样生效。
+- **macOS 未签名构建不支持自动更新**（Squirrel.Mac 要比对签名证书），
+  启动时 `codesign -dv` 探一次 Developer ID 决定 supported。但「有没有新版」
+  照样查：轻量检查只拉 `latest-mac.yml` 比版本号（不下载不安装，签名管不着），
+  发现新版在标题栏冒提示点、引导去镜像手动下载 dmg。将来接上签名公证后
+  不用改代码，探到证书自动解锁完整自动更新。
+- 真机验证只能在 Windows：装旧版 → 设置 → 检查更新 → 下载 → 重启安装。
+  mac 本机（未签名）永远是 supported=false，验不了链路。
+
+---
+
+## 7. 踩过的坑（环境相关）
 
 ### dev 模式下改了 preload 的 API 面要重启
 
@@ -555,7 +581,7 @@ Docker Desktop 在 `C:\Program Files\Docker\Docker\resources\bin\` 里，除了 
 
 ---
 
-## 7. 改动的推荐节奏
+## 8. 改动的推荐节奏
 
 1. `npm run typecheck` —— 两套类型检查都得过
 2. 改完跑一遍受影响的验证脚本（**先 `npm run build`**）

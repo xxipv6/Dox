@@ -40,6 +40,7 @@ import type { ProcessService } from '../proc/ProcessService'
 import type { AiUsageService } from '../aiusage/AiUsageService'
 import type { ComposeService } from '../compose/ComposeService'
 import type { SearchService } from '../search/SearchService'
+import { updaterCheckNow, updaterGetState, updaterQuitAndInstall } from '../updater'
 
 /** agentCall 白名单泛通道允许的方法（0.4.0 起；fs_* 是既有方法，走这里也行） */
 const AGENT_CALL_ALLOW = new Set([
@@ -609,4 +610,9 @@ export function registerIpc(
     searchService.start(params)
   )
   ipcMain.on(IpcChannels.searchCancel, (_event, runId: string) => searchService.cancel(runId))
+
+  // ---- 应用内自动更新（状态机与广播都在 updater.ts，这里只转达意图）----
+  ipcMain.handle(IpcChannels.updaterGetState, () => updaterGetState())
+  ipcMain.handle(IpcChannels.updaterCheck, () => updaterCheckNow())
+  ipcMain.on(IpcChannels.updaterQuitAndInstall, () => updaterQuitAndInstall())
 }

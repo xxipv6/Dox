@@ -15,6 +15,7 @@ import { tabbarCompact } from './utils/tabbar'
 import { useCloseTabShortcut } from './composables/useCloseTabShortcut'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
+import { useUpdaterStore } from './stores/updater'
 import SessionSidebar from './components/SessionSidebar.vue'
 import TitleBar from './components/TitleBar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
@@ -106,6 +107,9 @@ onMounted(async () => {
   // 否则冷启动参数 flush 时监听还没装上
   window.api.onCliCommand((cmd) => store.handleCliCommand(cmd))
   window.api.cliCommandReady()
+
+  // 更新状态镜像：标题栏提示点与设置里的更新区块都从它取数
+  void useUpdaterStore().init()
 
   /*
    * 量 .terminal-stack 的宽度决定平铺开几列。窗口缩放、侧栏收展、SFTP 面板

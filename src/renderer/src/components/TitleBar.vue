@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import Icon from './Icon.vue'
 import Logo from './Logo.vue'
 import AiUsagePill from './AiUsagePill.vue'
+import UpdaterPill from './UpdaterPill.vue'
 
 /**
  * 自绘标题栏。
@@ -46,6 +47,8 @@ onUnmounted(() => off?.())
     </span>
 
     <span class="tb-right">
+      <!-- 更新提示点：只在下载中/待重启时出现，平时不占地方 -->
+      <UpdaterPill />
       <!-- AI 容量速览：没配账号时它自己不渲染，不占地方 -->
       <AiUsagePill />
 

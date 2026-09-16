@@ -170,5 +170,14 @@ export const IpcChannels = {
   /** 取消正在运行的搜索（SSH 关通道 / 本机 SIGTERM / node 协作旗标） */
   searchCancel: 'search:cancel',
   /** 主进程 → 渲染进程：搜索匹配增量与结局（渲染层按 runId 过滤） */
-  searchEvent: 'search:event'
+  searchEvent: 'search:event',
+  /*
+   * 应用内自动更新（镜像优先、GitHub 兜底，状态机见 main/updater.ts）。
+   * quitAndInstall 用 send 不用 handle：调用后进程马上没了，等不到回执。
+   */
+  updaterGetState: 'updater:getState',
+  updaterCheck: 'updater:check',
+  updaterQuitAndInstall: 'updater:quitAndInstall',
+  /** 主进程 → 渲染进程：更新状态快照（整体替换） */
+  updaterEvent: 'updater:event'
 } as const

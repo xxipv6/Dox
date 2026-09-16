@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { FONT_PRESETS, UI_THEME_OPTIONS, useSettingsStore } from '../stores/settings'
+import { useUpdaterStore } from '../stores/updater'
 import { AUTO_THEME_ID, TERMINAL_THEMES } from '../utils/themes'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
 import { errorText } from '../utils/errors'
+import { formatSize } from '../utils/format'
 import type { AiProvider, LocalShellInfo } from '@shared/types'
 
 const settings = useSettingsStore()
+const updater = useUpdaterStore()
 
 useEscapeToClose(
   () => settings.dialogVisible,
@@ -100,6 +103,69 @@ onMounted(async () => {
   shells.value = await window.api.listLocalShells()
   await loadAiAccounts()
 })
+
+// ---- 应用更新（状态机在主进程 updater.ts，这里只做展示与意图转发）----
+const sourceLabel = computed(() => (updater.state?.source === 'github' ? 'GitHub' : '镜像'))
+
+const updateLine = computed(() => {
+  const s = updater.state
+  if (!s) return ''
+  if (!s.supported) {
+    // 未签名 mac 构建：轻量检查照常跑，发现新版引导手动下载
+    if (s.phase === 'available' && s.version) {
+      return `发现新版本 v${s.version} · 未签名构建请手动下载安装`
+    }
+    if (s.phase === 'checking') return '正在检查更新…（镜像源）'
+    if (s.phase === 'up-to-date') return `当前版本 v${s.currentVersion} · 已是最新`
+    if (s.phase === 'error') return `检查失败：${s.error ?? '未知错误'}`
+    return `当前版本 v${s.currentVersion} · 此构建不支持自动更新`
+  }
+  switch (s.phase) {
+    case 'checking':
+      return `正在检查更新…（${sourceLabel.value}源）`
+    case 'up-to-date':
+      return `当前版本 v${s.currentVersion} · 已是最新`
+    case 'available':
+      return `发现新版本 v${s.version}，开始下载…`
+    case 'downloading': {
+      const speed = s.bytesPerSecond ? ` · ${formatSize(s.bytesPerSecond)}/s` : ''
+      return `正在下载 v${s.version} · ${Math.floor(s.percent ?? 0)}%${speed}（${sourceLabel.value}源）`
+    }
+    case 'downloaded':
+      return `v${s.version} 已下载，重启后生效`
+    case 'error':
+      return `更新失败：${s.error ?? '未知错误'}`
+    default:
+      return `当前版本 v${s.currentVersion}`
+  }
+})
+
+/*
+ * 「重启并安装」会断开所有 SSH 会话与传输，必须是个两步动作：
+ * 第一次点变成确认态，4 秒不点第二次自动退回。
+ */
+const confirmInstall = ref(false)
+let confirmTimer: ReturnType<typeof setTimeout> | undefined
+function onInstallClick(): void {
+  if (!confirmInstall.value) {
+    confirmInstall.value = true
+    confirmTimer = setTimeout(() => {
+      confirmInstall.value = false
+    }, 4000)
+    return
+  }
+  clearTimeout(confirmTimer)
+  window.api.updaterQuitAndInstall()
+}
+
+function openManualDownload(): void {
+  const url = updater.state?.manualUrl
+  if (url) void window.api.openExternal(url)
+}
+
+function checkUpdates(): void {
+  void window.api.updaterCheck()
+}
 </script>
 
 <template>
@@ -270,6 +336,50 @@ onMounted(async () => {
           <p v-else class="sub-note">
             在任意终端里敲 <code>dox .</code> 让 Dox 在当前目录开标签，<code>dox user@host</code> 直接连设备
             （已保存的设备用库存凭证直连，没存过会预填表单）。
+          </p>
+        </div>
+
+        <div class="field">
+          <label>应用更新</label>
+          <div class="dir-pick-row">
+            <span class="dir-pick-value" :title="updateLine">{{ updateLine }}</span>
+            <button
+              v-if="updater.state?.phase === 'downloaded'"
+              class="dir-pick-btn"
+              :class="{ 'upd-confirm': confirmInstall }"
+              @click="onInstallClick"
+            >
+              {{ confirmInstall ? '断开所有会话并重启？' : '重启并安装' }}
+            </button>
+            <button
+              v-else-if="updater.state"
+              class="dir-pick-btn"
+              :disabled="updater.state?.phase === 'checking' || updater.state?.phase === 'downloading'"
+              @click="checkUpdates"
+            >
+              {{ updater.state?.phase === 'error' ? '重试' : '检查更新' }}
+            </button>
+            <button
+              v-if="updater.state?.manualUrl && (updater.state.phase === 'error' || !updater.state.supported)"
+              class="dir-pick-btn"
+              @click="openManualDownload"
+            >
+              {{ updater.state.version ? `下载 v${updater.state.version}` : '手动下载' }}
+            </button>
+          </div>
+          <div
+            v-if="updater.state?.phase === 'downloading'"
+            class="upd-bar"
+            role="progressbar"
+            :aria-valuenow="Math.floor(updater.state.percent ?? 0)"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <i :style="{ width: `${updater.state.percent ?? 0}%` }"></i>
+          </div>
+          <p class="sub-note">
+            更新包由 GitHub Releases 分发，国内自动走 gh-proxy 镜像（校验 sha512，镜像篡改装不上）。
+            macOS 未签名构建暂不支持自动更新，请手动下载 dmg。
           </p>
         </div>
 
@@ -516,6 +626,29 @@ select:focus {
 }
 .dir-pick-btn:active {
   transform: translateY(0.5px);
+}
+.dir-pick-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+/* 确认态的「重启并安装」：从主色淡底切到警示语义，避免误点 */
+.dir-pick-btn.upd-confirm {
+  background: var(--danger-text);
+  color: var(--fg-on-accent);
+}
+/* 更新下载进度条：--accent 是颜料档（进度条正是它的职责，见 styles.css 令牌注释） */
+.upd-bar {
+  margin-top: var(--sp-1);
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+.upd-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width var(--dur-fast) linear;
 }
 .dir-pick-clear {
   flex-shrink: 0;
