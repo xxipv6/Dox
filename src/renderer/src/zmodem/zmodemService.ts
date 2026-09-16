@@ -1,9 +1,11 @@
-import zmodemPkg from 'zmodem.js'
-import type { ZDetection, ZSession } from 'zmodem.js'
+import type { Sentry, ZDetection, ZSession } from 'zmodem.js'
 
 // 运行时是 CJS（Object.assign 挂导出）：Node 原生 ESM 解不出 named exports，
-// 只能 default 导入再解构 —— 打包器和 Node 单测两条路都走这条（见 zmodem.d.ts）
-const { Sentry } = zmodemPkg
+// 只能 default 导入再解构 —— 打包器和 Node 单测两条路都走这条（见 zmodem.d.ts）。
+//
+// zmodem.js 有 ~115kB 源码，而 rz/sz 是低频功能：不在启动时装载，第一次扫到
+// 触发序列才动态 import。触发到加载完成之间到达的字节进 sentryBuf 保序缓冲，
+// Sentry 建好一次性灌入 —— 协议头一个字节都不会丢。
 
 /**
  * ZMODEM 桥接：拦截终端数据流，识别 rz/sz 发起序列并接管会话。
@@ -43,6 +45,10 @@ export function createZmodemBridge(
   let active = false
   let session: ZSession | null = null
   let watchdog: ReturnType<typeof setTimeout> | null = null
+  /** zmodem.js 懒加载：Sentry 实例、加载中的 promise、加载前到达的字节缓冲 */
+  let sentry: Sentry | null = null
+  let sentryLoading: Promise<void> | null = null
+  let sentryBuf: Uint8Array[] = []
 
   /*
    * 触发序列预扫描。
@@ -121,6 +127,8 @@ export function createZmodemBridge(
     session = null
     // 回到预扫描模式：下一个 rz/sz 仍要能识别
     engaged = false
+    // 加载途中被收尾：缓冲清掉，Sentry 建好后不灌陈旧字节（ensureSentry 里有守卫）
+    sentryBuf = []
     if (active) {
       active = false
       print(reason ? `会话已中止（${reason}），终端恢复交互` : '会话结束，终端恢复交互')
@@ -199,49 +207,70 @@ export function createZmodemBridge(
     }
   }
 
-  const sentry = new Sentry({
-    to_terminal: (octets) => writeToTerm(new Uint8Array(octets)),
-    sender: (octets) => window.api.input(sessionId, new Uint8Array(octets)),
-    on_detect: (detection: ZDetection) => {
-      const zsession = detection.confirm()
-      session = zsession
-      active = true
-      armWatchdog()
-      zsession.on('session_end', () => finish())
-      // 每个协议事件都重置看门狗：有进展就不算超时
-      zsession.on('offer', () => armWatchdog())
+  /** 懒加载 Sentry（首次扫到触发才调）。缓冲的字节在建好后按序灌入 */
+  function ensureSentry(): void {
+    if (sentry || sentryLoading) return
+    sentryLoading = import('zmodem.js').then((pkg) => {
+      const S = pkg.default.Sentry
+      sentry = new S({
+        to_terminal: (octets) => writeToTerm(new Uint8Array(octets)),
+        sender: (octets) => window.api.input(sessionId, new Uint8Array(octets)),
+        on_detect: (detection: ZDetection) => {
+          const zsession = detection.confirm()
+          session = zsession
+          active = true
+          armWatchdog()
+          zsession.on('session_end', () => finish())
+          // 每个协议事件都重置看门狗：有进展就不算超时
+          zsession.on('offer', () => armWatchdog())
 
-      const run = zsession.type === 'receive' ? handleReceive : handleSend
-      // 关键：pick* 的 reject（例如文件超过 256MB、IPC 异常）若逃逸出去会变成
-      // 未处理 rejection，且 active 永远为 true → 键盘永久失效
-      run(zsession)
-        .then(() => {
-          // 正常收尾由 send/close 触发；这里兜一次，避免对端不回 ZFIN 时卡住
-          try {
-            zsession.close()
-          } catch {
-            finish()
-          }
-        })
-        .catch((err: unknown) => {
-          print(`错误：${err instanceof Error ? err.message : String(err)}`, '31')
-          finish('出错')
-        })
-    },
-    on_retract: () => {
-      active = false
-      session = null
-      // 误触发 retract：回到预扫描模式
-      engaged = false
-    }
-  })
+          const run = zsession.type === 'receive' ? handleReceive : handleSend
+          // 关键：pick* 的 reject（例如文件超过 256MB、IPC 异常）若逃逸出去会变成
+          // 未处理 rejection，且 active 永远为 true → 键盘永久失效
+          run(zsession)
+            .then(() => {
+              // 正常收尾由 send/close 触发；这里兜一次，避免对端不回 ZFIN 时卡住
+              try {
+                zsession.close()
+              } catch {
+                finish()
+              }
+            })
+            .catch((err: unknown) => {
+              print(`错误：${err instanceof Error ? err.message : String(err)}`, '31')
+              finish('出错')
+            })
+        },
+        on_retract: () => {
+          active = false
+          session = null
+          // 误触发 retract：回到预扫描模式
+          engaged = false
+        }
+      })
+      // 加载途中用户中断/出错收尾过：不灌陈旧字节，实例留着复用
+      if (!engaged && !active) return
+      const pending = sentryBuf
+      sentryBuf = []
+      if (pending.length) {
+        sentry.consume(concat(pending, pending.reduce((n, c) => n + c.length, 0)))
+      }
+    })
+    sentryLoading.catch((err: unknown) => {
+      sentryLoading = null
+      print(`ZMODEM 支持库加载失败：${err instanceof Error ? err.message : String(err)}`, '31')
+      finish('加载失败')
+    })
+  }
 
   return {
     consume: (chunk) => {
       const bytes = toBytes(chunk)
-      // 已接管（或已扫到触发、等待 confirm/retract）：维持 Sentry 完整路径
+      // 已接管（或已扫到触发、等待 confirm/retract）：维持 Sentry 完整路径；
+      // zmodem.js 还在加载时进缓冲，建好统一灌入
       if (active || engaged) {
-        sentry.consume(bytes)
+        if (sentry) sentry.consume(bytes)
+        else sentryBuf.push(bytes)
         return
       }
       const hit = scanTrigger(bytes)
@@ -257,7 +286,8 @@ export function createZmodemBridge(
        * 代价是极端罕见地重复输出 ≤3 字节（只在 rz/sz 启动瞬间，无害）。
        */
       engaged = true
-      sentry.consume(hit === 2 ? concat([tail, bytes], tail.length + bytes.length) : bytes)
+      ensureSentry()
+      sentryBuf.push(hit === 2 ? concat([tail, bytes], tail.length + bytes.length) : bytes)
       tail = new Uint8Array(0)
     },
     isActive: () => active,

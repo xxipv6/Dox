@@ -41,6 +41,10 @@ function makeBridge() {
 
 const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i])
 
+// zmodem.js 现在是懒加载（性能：~115kB 不进启动 chunk）：喂了触发序列后
+// 要等动态 import 落地、Sentry 建好并灌入缓冲，断言才有意义
+const waitSentry = () => new Promise((r) => setTimeout(r, 80))
+
 // ---------- A. 纯输出（含 0x18 干扰）----------
 {
   const { bridge, totalOut } = makeBridge()
@@ -75,6 +79,7 @@ const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i])
   bridge.consume(before)
   bridge.consume(triggerish)
   bridge.consume(after)
+  await waitSentry()
   const want = new Uint8Array(before.length + triggerish.length + after.length)
   want.set(before, 0)
   want.set(triggerish, before.length)
@@ -95,6 +100,7 @@ const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i])
   bridge.consume(part1b)
   bridge.consume(part2)
   bridge.consume(after)
+  await waitSentry()
   const wantLen = part1.length + part1b.length + part2.length + after.length
   // 跨块命中会把 ≤3 字节尾巴重复喂给 Sentry（文档里写明的取舍），
   // 所以输出长度可能多 0-3 字节；内容必须以原始流为主体
@@ -109,6 +115,7 @@ const eq = (a, b) => a.length === b.length && a.every((v, i) => v === b[i])
 {
   const { bridge, totalOut } = makeBridge()
   bridge.consume(new Uint8Array([0x2a, 0x2a, 0x18, 0x42, 0x30, ...enc.encode('garbage\r\n')]))
+  await waitSentry()
   const plain = enc.encode('back to normal\r\n')
   const beforeLen = totalOut().length
   bridge.consume(plain)

@@ -21,7 +21,6 @@ import SessionSidebar from './components/SessionSidebar.vue'
 import TitleBar from './components/TitleBar.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
 import FileExplorer from './components/FileExplorer.vue'
-import MonitorPanel from './components/MonitorPanel.vue'
 import TransferQueue from './components/TransferQueue.vue'
 import ComposeDrawer from './components/ComposeDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
@@ -38,6 +37,11 @@ import TabListMenu from './components/TabListMenu.vue'
  * 首次双击文件时才下载解析。
  */
 const FileEditor = defineAsyncComponent(() => import('./components/FileEditor.vue'))
+/*
+ * 性能监控面板同理：只在终端右键「性能监控」打开时才渲染（App 层有 v-if 闸门），
+ * 独立的图表/表格代码不进启动路径。
+ */
+const MonitorPanel = defineAsyncComponent(() => import('./components/MonitorPanel.vue'))
 
 const store = useSessionStore()
 const editor = useEditorStore()
