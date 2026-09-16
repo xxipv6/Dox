@@ -31,7 +31,7 @@ function openManual(): void {
     v-if="phase === 'downloaded'"
     class="upd-pill ready"
     title="新版本已下载，点击打开设置重启安装"
-    @click="settings.dialogVisible = true"
+    @click="settings.openDialog('about')"
   >
     重启更新 v{{ updater.state?.version }}
   </button>

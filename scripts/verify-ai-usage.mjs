@@ -53,9 +53,10 @@ if (kimiAccount) {
   )
   check('UI 添加 Kimi 账号（已有，重写 key 治愈钥匙串漂移）', true)
 } else {
-  // 打开设置（侧栏的设置按钮 title）
+  // 打开设置（侧栏的设置按钮 title）；AI 容量在「工具」页签（设置分签后需要先切过去）
   await win.locator('button[title="设置"], button[title*="设置"]').first().click()
   await win.locator('.dialog').waitFor({ timeout: 5000 })
+  await win.locator('.st-tabs button', { hasText: '工具' }).click()
   await win.locator('.ai-provider-select').selectOption('kimi')
   await win.locator('.ai-key-input').fill(KEY)
   await win.locator('.ai-add-btn').click()

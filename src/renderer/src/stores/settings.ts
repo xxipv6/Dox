@@ -8,6 +8,9 @@ import { pushToastOnce } from './toast'
 /** 旧版把设置放在 localStorage；打包后那个源不落盘，dev 模式下则确实存过东西 */
 const LEGACY_STORAGE_KEY = 'dox-settings'
 
+/** 设置弹窗的页签 */
+export type SettingsTab = 'appearance' | 'terminal' | 'tools' | 'about'
+
 /** 重设计之前 themeId 的默认值。迁移时靠它判断「用户到底选没选过」 */
 const LEGACY_DEFAULT_THEME = 'tokyo-night'
 
@@ -88,6 +91,8 @@ export const useSettingsStore = defineStore('settings', () => {
   /** 文件面板项目模式：deviceKey → 根路径（不在 watch 列表里，由 setProjectRoot 显式 persist） */
   const projectRoots = ref<Record<string, string>>(DEFAULT_SETTINGS.projectRoots ?? {})
   const dialogVisible = ref(false)
+  /** 设置弹窗当前页签（打开时由 openDialog 指定落点） */
+  const dialogTab = ref<SettingsTab>('appearance')
   /** load() 完成前不写盘，否则会用默认值覆盖掉用户已保存的设置 */
   let loaded = false
 
@@ -265,7 +270,12 @@ export const useSettingsStore = defineStore('settings', () => {
     persist()
   }
 
-  function openDialog(): void {
+  /**
+   * 打开设置弹窗，可指定落到哪个页签 —— 标题栏的「重启更新」直达关于页、
+   * AI 容量浮层的「管理账号」直达工具页，不让用户自己找。
+   */
+  function openDialog(tab: SettingsTab = 'appearance'): void {
+    dialogTab.value = tab
     dialogVisible.value = true
   }
 
@@ -283,6 +293,7 @@ export const useSettingsStore = defineStore('settings', () => {
     localDefaultDir,
     projectRoots,
     dialogVisible,
+    dialogTab,
     resolvedTheme,
     currentPreset,
     fontFamily,

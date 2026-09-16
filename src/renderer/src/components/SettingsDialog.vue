@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { FONT_PRESETS, UI_THEME_OPTIONS, useSettingsStore } from '../stores/settings'
+import { FONT_PRESETS, UI_THEME_OPTIONS, useSettingsStore, type SettingsTab } from '../stores/settings'
 import { useUpdaterStore } from '../stores/updater'
 import { AUTO_THEME_ID, TERMINAL_THEMES } from '../utils/themes'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
@@ -11,6 +11,24 @@ import type { AiProvider, LocalShellInfo } from '@shared/types'
 const settings = useSettingsStore()
 const updater = useUpdaterStore()
 const isMac = window.api.platform === 'darwin'
+
+/** 页签：打开时的落点由 store.dialogTab 决定（标题栏/AI 浮层的入口直达对应页） */
+const SETTING_TABS: { id: SettingsTab; name: string }[] = [
+  { id: 'appearance', name: '外观' },
+  { id: 'terminal', name: '终端' },
+  { id: 'tools', name: '工具' },
+  { id: 'about', name: '关于' }
+]
+const tab = computed({
+  get: () => settings.dialogTab,
+  set: (v: SettingsTab) => {
+    settings.dialogTab = v
+  }
+})
+
+function openRepo(): void {
+  void window.api.openExternal('https://github.com/xxipv6/Dox')
+}
 
 useEscapeToClose(
   () => settings.dialogVisible,
@@ -182,6 +200,20 @@ function checkUpdates(): void {
           <button class="close-btn" @click="settings.dialogVisible = false">×</button>
         </div>
 
+        <!-- 页签导航：所有面板常驻 DOM（v-show），已有状态（AI 账号列表等）不丢 -->
+        <div class="st-tabs" role="tablist">
+          <button
+            v-for="t in SETTING_TABS"
+            :key="t.id"
+            role="tab"
+            :aria-selected="tab === t.id"
+            :class="{ active: tab === t.id }"
+            @click="tab = t.id"
+          >{{ t.name }}</button>
+        </div>
+
+        <!-- 外观 -->
+        <div v-show="tab === 'appearance'">
         <div class="field">
           <label>界面主题</label>
           <div class="segmented">
@@ -258,20 +290,6 @@ function checkUpdates(): void {
           <p class="sub-note">
             连字需要切换到 DOM 渲染器，大数据量输出时性能低于 WebGL；切换后需重开标签页生效。
           </p>
-          <label class="checkbox">
-            <input v-model="settings.suggestPortForward" type="checkbox" />
-            检测到服务监听时建议端口转发
-          </label>
-          <p class="sub-note">
-            终端输出里出现 localhost:端口号 这类服务横幅时，右下角弹出「转发到本机」一键建议。
-          </p>
-          <label class="checkbox">
-            <input v-model="settings.portSentinel" type="checkbox" />
-            端口哨兵：新出现的监听端口弹警告
-          </label>
-          <p class="sub-note">
-            需要安装远程助手。连接建立后**新出现**的监听端口会弹警告并反查进程名，点击直达性能监控的连接表；已有服务不打扰。
-          </p>
         </div>
 
         <div class="field">
@@ -290,7 +308,10 @@ function checkUpdates(): void {
           <input v-model.number="settings.fontSize" type="range" min="10" max="24" step="1" />
           <p class="sub-note">终端里按住 {{ isMac ? '⌘' : 'Ctrl' }} 滚轮也可以调（触控板捏合同效）。</p>
         </div>
+        </div>
 
+        <!-- 终端 -->
+        <div v-show="tab === 'terminal'">
         <div class="field">
           <label>本地终端 Shell</label>
           <select v-model="settings.localShellId">
@@ -324,6 +345,29 @@ function checkUpdates(): void {
         </div>
 
         <div class="field">
+          <label>端口转发</label>
+          <label class="checkbox">
+            <input v-model="settings.suggestPortForward" type="checkbox" />
+            检测到服务监听时建议端口转发
+          </label>
+          <p class="sub-note">
+            终端输出里出现 localhost:端口号 这类服务横幅时，右下角弹出「转发到本机」一键建议。
+          </p>
+          <label class="checkbox">
+            <input v-model="settings.portSentinel" type="checkbox" />
+            端口哨兵：新出现的监听端口弹警告
+          </label>
+          <p class="sub-note">
+            需要安装远程助手。连接建立后**新出现**的监听端口会弹警告并反查进程名，点击直达性能监控的连接表；已有服务不打扰。
+          </p>
+        </div>
+
+        <p class="note">快捷键自定义在后续版本提供。</p>
+        </div>
+
+        <!-- 工具 -->
+        <div v-show="tab === 'tools'">
+        <div class="field">
           <label>命令行工具（dox 命令）</label>
           <div class="dir-pick-row">
             <span class="dir-pick-value">
@@ -339,6 +383,51 @@ function checkUpdates(): void {
             在任意终端里敲 <code>dox .</code> 让 Dox 在当前目录开标签，<code>dox user@host</code> 直接连设备
             （已保存的设备用库存凭证直连，没存过会预填表单）。
           </p>
+        </div>
+
+        <div class="field">
+          <label>AI 容量（标题栏速览）</label>
+          <div v-if="aiAccounts.length" class="ai-acc-list">
+            <div v-for="a in aiAccounts" :key="a.id" class="ai-acc-row">
+              <span class="ai-acc-name">{{ a.name }}</span>
+              <span class="ai-acc-provider">{{ AI_PROVIDERS.find((p) => p.id === a.provider)?.name ?? a.provider }}</span>
+              <button class="ai-del" title="删除账号" @click="removeAiAccount(a.id)">×</button>
+            </div>
+          </div>
+          <div class="ai-add">
+            <select v-model="aiProvider" class="ai-provider-select">
+              <option v-for="p in AI_PROVIDERS" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+            <input v-model="aiName" class="ai-name-input" placeholder="备注名（可空）" spellcheck="false" />
+            <input
+              v-model="aiKey"
+              class="ai-key-input"
+              type="password"
+              placeholder="API Key"
+              spellcheck="false"
+              @keydown.enter="addAiAccount"
+            />
+            <button class="ai-add-btn" :disabled="!aiKey.trim() || aiBusy" @click="addAiAccount">
+              添加
+            </button>
+          </div>
+          <p class="sub-note">
+            配置后标题栏显示已用容量（Kimi/GLM 看 5 小时滚动窗与每周窗，DeepSeek 看余额），
+            每 5 分钟自动刷新；Key 经系统钥匙串加密存储，只用于配额查询。
+            有多个同平台账号时，用「备注名」区分（标题栏显示的是备注名）。
+          </p>
+        </div>
+        </div>
+
+        <!-- 关于 -->
+        <div v-show="tab === 'about'">
+        <div class="field">
+          <label>版本</label>
+          <div class="dir-pick-row">
+            <span class="dir-pick-value">Dox v{{ updater.state?.currentVersion ?? '—' }}</span>
+            <button class="dir-pick-btn" @click="openRepo">GitHub 仓库</button>
+          </div>
+          <p class="sub-note">MIT License · 问题与建议请到仓库提 Issue。</p>
         </div>
 
         <div class="field">
@@ -384,41 +473,7 @@ function checkUpdates(): void {
             macOS 未签名构建暂不支持自动更新，请手动下载 dmg。
           </p>
         </div>
-
-        <div class="field">
-          <label>AI 容量（标题栏速览）</label>
-          <div v-if="aiAccounts.length" class="ai-acc-list">
-            <div v-for="a in aiAccounts" :key="a.id" class="ai-acc-row">
-              <span class="ai-acc-name">{{ a.name }}</span>
-              <span class="ai-acc-provider">{{ AI_PROVIDERS.find((p) => p.id === a.provider)?.name ?? a.provider }}</span>
-              <button class="ai-del" title="删除账号" @click="removeAiAccount(a.id)">×</button>
-            </div>
-          </div>
-          <div class="ai-add">
-            <select v-model="aiProvider" class="ai-provider-select">
-              <option v-for="p in AI_PROVIDERS" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
-            <input v-model="aiName" class="ai-name-input" placeholder="备注名（可空）" spellcheck="false" />
-            <input
-              v-model="aiKey"
-              class="ai-key-input"
-              type="password"
-              placeholder="API Key"
-              spellcheck="false"
-              @keydown.enter="addAiAccount"
-            />
-            <button class="ai-add-btn" :disabled="!aiKey.trim() || aiBusy" @click="addAiAccount">
-              添加
-            </button>
-          </div>
-          <p class="sub-note">
-            配置后标题栏显示已用容量（Kimi/GLM 看 5 小时滚动窗与每周窗，DeepSeek 看余额），
-            每 5 分钟自动刷新；Key 经系统钥匙串加密存储，只用于配额查询。
-            有多个同平台账号时，用「备注名」区分（标题栏显示的是备注名）。
-          </p>
         </div>
-
-        <p class="note">快捷键自定义在后续版本提供。</p>
       </div>
     </div>
   </Transition>
@@ -431,6 +486,37 @@ function checkUpdates(): void {
  */
 .dialog {
   width: 380px;
+}
+/* 页签导航：下划线式，active 用文字档主色（语义色，不是颜料档） */
+.st-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border);
+}
+.st-tabs button {
+  padding: var(--sp-1) var(--sp-2);
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.st-tabs button:hover {
+  color: var(--fg);
+}
+.st-tabs button.active {
+  color: var(--accent-text);
+  border-bottom-color: var(--accent-text);
+}
+.st-tabs button:active {
+  transform: translateY(0.5px);
 }
 .field {
   margin-bottom: var(--sp-4);

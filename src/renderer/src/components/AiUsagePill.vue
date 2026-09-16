@@ -95,7 +95,8 @@ async function refresh(): Promise<void> {
 
 function openSettings(): void {
   open.value = false
-  settings.dialogVisible = true
+  // 直达「工具」页签 —— AI 容量账号在那页，别让用户自己找
+  settings.openDialog('tools')
 }
 
 /*
