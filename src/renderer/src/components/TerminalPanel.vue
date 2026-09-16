@@ -904,6 +904,18 @@ function onDropFiles(e: DragEvent): void {
   })
 }
 
+/** Cmd/Ctrl+滚轮缩放的监听元素（卸载时要摘监听，模板 ref 那时已是 null） */
+let wheelZoomEl: HTMLElement | null = null
+
+function onWheelZoom(e: WheelEvent): void {
+  if (!e.ctrlKey && !e.metaKey) return
+  e.preventDefault()
+  e.stopPropagation()
+  // 与设置里滑杆同范围（10–24）
+  const next = settings.fontSize + (e.deltaY < 0 ? 1 : -1)
+  settings.fontSize = Math.min(24, Math.max(10, next))
+}
+
 onMounted(() => {
   // 本地标签：解析这个标签跑的是哪种 shell（拖拽粘路径的引号策略靠它）
   if (props.sessionId.startsWith(LOCAL_ID_PREFIX)) {
@@ -950,6 +962,19 @@ onMounted(() => {
     registerPathLinks(term)
   }
   term.open(container.value!)
+
+  /*
+   * Cmd/Ctrl + 滚轮调终端字号（iTerm2 / Windows Terminal 同款约定）。
+   *
+   * 三个非显而易见的点：
+   * - 必须 capture + stopPropagation：xterm 自己在内层元素上也听 wheel
+   *   （滚回滚缓冲区），冒泡阶段才拦的话它已经先滚了；
+   * - passive: false 才能 preventDefault；
+   * - 触控板双指捏合在 Chromium 里就是 ctrlKey=true 的 wheel，顺带支持。
+   * 字号写 settings.fontSize（全局）：现有 watch 会实时套到所有终端并持久化。
+   */
+  wheelZoomEl = container.value!
+  wheelZoomEl.addEventListener('wheel', onWheelZoom, { capture: true, passive: false })
 
   // 连字需要浏览器做字形替换，只有 DOM 渲染器支持；否则用 WebGL（大数据量不卡）
   if (!settings.ligatures) {
@@ -1207,6 +1232,8 @@ onBeforeUnmount(() => {
     void window.api.agentUnwatchPorts(subscribedTarget.sessionId, subscribedTarget.containerName)
   }
   window.removeEventListener('click', closeMenu)
+  wheelZoomEl?.removeEventListener('wheel', onWheelZoom, { capture: true })
+  wheelZoomEl = null
   unsubscribeData?.()
   unsubscribeStatus?.()
   resizeObserver?.disconnect()

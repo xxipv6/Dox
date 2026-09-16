@@ -18,6 +18,7 @@ Dox 是一个面向远程开发的桌面工作区：把 SSH 终端、SFTP 文件
 - SSH 密码 / 私钥登录，多标签和分屏；支持 ProxyJump（最多三层）与 known_hosts 指纹确认。
 - 平铺：一键把所有标签铺成一屏网格（看日志、改配置、盯进程同屏）；配合广播下发可一次输入同时打进多个会话。
 - 断线重连、状态提示、终端搜索、选中复制，以及 Ctrl/Cmd 点击绝对路径直达文件面板或编辑器。
+- Cmd/Ctrl + 滚轮调节终端字号（触控板捏合同效），实时生效并记住。
 - 本地 shell：Windows 的 cmd、PowerShell、pwsh、Git Bash、WSL；macOS/Linux 的 bash、zsh、fish。
 - 跟踪当前目录，恢复标签布局；拖入文件可上传到远端当前目录，或在本地终端粘贴已转义的路径。
 - rz/sz（ZMODEM）文件传输。

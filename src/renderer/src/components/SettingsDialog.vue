@@ -10,6 +10,7 @@ import type { AiProvider, LocalShellInfo } from '@shared/types'
 
 const settings = useSettingsStore()
 const updater = useUpdaterStore()
+const isMac = window.api.platform === 'darwin'
 
 useEscapeToClose(
   () => settings.dialogVisible,
@@ -287,6 +288,7 @@ function checkUpdates(): void {
         <div class="field">
           <label>终端字号：{{ settings.fontSize }}px</label>
           <input v-model.number="settings.fontSize" type="range" min="10" max="24" step="1" />
+          <p class="sub-note">终端里按住 {{ isMac ? '⌘' : 'Ctrl' }} 滚轮也可以调（触控板捏合同效）。</p>
         </div>
 
         <div class="field">
