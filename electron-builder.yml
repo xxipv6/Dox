@@ -34,6 +34,9 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   shortcutName: Dox
+  # 自定义钩子：覆盖安装时把另一个注册表上下文（HKLM per-machine）里的
+  # 旧版也卸掉 —— 内置逻辑只查当前安装模式的上下文，会残留并存旧版
+  include: installer.nsh
 
 # ---------- macOS ----------
 mac:

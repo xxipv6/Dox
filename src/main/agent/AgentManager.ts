@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
-import { app, type WebContents } from 'electron'
+import { app, dialog, type WebContents } from 'electron'
 import type { ClientChannel } from 'ssh2'
 import type { SessionManager } from '../ssh/SessionManager'
 import { execCapture } from '../ssh/remoteExec'
@@ -13,6 +13,7 @@ import { assertContainerTarget, parseDockerInfoPlatform } from '../container/run
 import { runLocal } from '../container/localRun'
 import { mergeEnv, resolveShellEnv } from '../local/shellEnv'
 import { isLocalContainerTarget } from '../../shared/sessionId'
+import { BUNDLED_AGENT_VERSION } from '../../shared/agentVersion'
 import { IpcChannels } from '../../shared/ipc'
 
 const REMOTE_BIN = '.dox/dox-agent'
@@ -42,6 +43,35 @@ function binaryDir(): string {
   // 所以源码里嵌套多深的 import.meta.url 都只剩两级（与 devIcon 同款算法）
   const mainDir = dirname(fileURLToPath(import.meta.url))
   return join(mainDir, '../../build/agent')
+}
+
+/**
+ * 启动自检：resources/agent 必须与 app.asar 同一次打包。
+ *
+ * Windows 覆盖安装可能留下「新旧混合」（旧 asar + 新 resources 或反之），
+ * 届时界面里的版本口径（BUNDLED_AGENT_VERSION 编译在 asar 里）与磁盘上的
+ * agent 二进制不一致 —— 表现为「装了新版却推出去旧 agent / 没有升级按钮」。
+ * 不一致时显性弹窗请用户重装，而不是静默带着错版本跑。
+ * version.txt 由 scripts/build-agent.mjs 写入；缺失视为旧打包流程产物，不拦。
+ */
+export function checkBundledAgentIntegrity(): void {
+  if (!app.isPackaged) return
+  let bundled: string
+  try {
+    bundled = fs.readFileSync(join(binaryDir(), 'version.txt'), 'utf8').trim()
+  } catch {
+    return
+  }
+  if (!bundled || bundled === BUNDLED_AGENT_VERSION) return
+  void dialog.showMessageBox({
+    type: 'warning',
+    title: '安装文件异常',
+    message: 'Dox 的安装文件不完整',
+    detail:
+      `内置助手版本不一致（程序 ${BUNDLED_AGENT_VERSION} / 磁盘 ${bundled}），` +
+      '通常是覆盖安装时旧版本未完全移除。请先卸载 Dox 再重新安装最新版本。',
+    buttons: ['我知道了']
+  })
 }
 
 /** 订阅/通道的键：宿主机 = sessionId；容器 = sessionId::容器名 */

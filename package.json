@@ -16,10 +16,10 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
-    "pack": "npm run typecheck && npm run build && electron-builder",
-    "pack:win": "npm run typecheck && npm run build && electron-builder --win",
-    "pack:mac": "npm run typecheck && npm run build && electron-builder --mac",
-    "pack:linux": "npm run typecheck && npm run build && electron-builder --linux",
+    "pack": "node scripts/build-agent.mjs && npm run typecheck && npm run build && electron-builder",
+    "pack:win": "node scripts/build-agent.mjs && npm run typecheck && npm run build && electron-builder --win",
+    "pack:mac": "node scripts/build-agent.mjs && npm run typecheck && npm run build && electron-builder --mac",
+    "pack:linux": "node scripts/build-agent.mjs && npm run typecheck && npm run build && electron-builder --linux",
     "postinstall": "node scripts/fix-node-pty-perms.mjs"
   },
   "dependencies": {

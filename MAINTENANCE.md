@@ -238,6 +238,31 @@ HIG 那一轮（`scripts/verify-hig.mjs`）立的规矩，改界面时照着走�
 - 减弱动效跟随系统（Chromium 直接读），不设开关。降级 = 清零四个时长令牌 +
   停掉「呼吸」类脉冲，**加载转圈留着**（那是必要反馈，停了就变成「没反应」）。
 
+### 3.8 Windows 覆盖安装：旧版可能在另一个注册表上下文里
+
+内置 `uninstallOldVersion` 只卸「本次安装模式」对应的上下文：per-user 安装只查
+HKCU。旧版若当年是 per-machine 装的（HKLM），覆盖安装会把它完整留下 ——
+两份 Dox 并存，任务栏固定图标 / 旧快捷方式启动的永远是旧版，表现为
+「装了新版，界面和内置 agent 还是老的，也没有升级按钮；卸载重装才好」。
+
+`build/installer.nsh` 的 `customInit` 补了这个盲区：per-user 安装时把 HKLM 里的
+旧安装也静默卸掉（保留 `%APPDATA%/dox`）。**改这个文件后必须跑一次
+`npm run pack:win`**（macOS 可交叉编译 NSIS，要挂镜像）—— makensis 语法错
+只有编译时才暴露，且 include 没接上是静默的（验证接线的方法：临时加一行
+`!error probe`，看构建是否炸）。文件展开点在 installUtil.nsh 之前，
+`GetInQuotes`/`copyFile`/`readReg` 那些宏不可用，只能用 NSIS 内置指令。
+
+配套的另外两道防线：
+
+- `scripts/build-agent.mjs` 构建时校验 `agent/main.go` 与
+  `src/shared/agentVersion.ts` 的版本一致（drift 直接构建失败），并把版本写进
+  `build/agent/version.txt` 随包分发。`pack:*` 脚本已把 build-agent 串进流程
+  （build/agent 被 gitignore 且不自动清理，不串的话本地打包会用陈旧产物，
+  触发自检误报）。
+- 主进程启动时 `checkBundledAgentIntegrity()` 比对 version.txt 与编译进 asar 的
+  常量：不一致 = 覆盖安装留下了「新旧混合」，弹窗请用户卸载重装，
+  不静默带病跑。
+
 ---
 
 ## 4. 验证脚本
