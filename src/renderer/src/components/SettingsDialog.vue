@@ -200,8 +200,9 @@ function checkUpdates(): void {
           <button class="close-btn" @click="settings.dialogVisible = false">×</button>
         </div>
 
-        <!-- 页签导航：所有面板常驻 DOM（v-show），已有状态（AI 账号列表等）不丢 -->
-        <div class="st-tabs" role="tablist">
+        <!-- 左导航 + 右内容（macOS 系统设置式）。所有面板常驻 DOM（v-show），已有状态不丢 -->
+        <div class="st-body">
+        <div class="st-nav" role="tablist" aria-orientation="vertical">
           <button
             v-for="t in SETTING_TABS"
             :key="t.id"
@@ -211,6 +212,7 @@ function checkUpdates(): void {
             @click="tab = t.id"
           >{{ t.name }}</button>
         </div>
+        <div class="st-pages">
 
         <!-- 外观 -->
         <div v-show="tab === 'appearance'">
@@ -474,6 +476,8 @@ function checkUpdates(): void {
           </p>
         </div>
         </div>
+        </div><!-- /st-pages -->
+        </div><!-- /st-body -->
       </div>
     </div>
   </Transition>
@@ -484,39 +488,58 @@ function checkUpdates(): void {
  * 只留差异：遮罩/弹窗/关闭键的基础长相在 styles.css 的控件词汇表里
  * （.overlay / .dialog / .pop-surface / .close-btn）。
  */
+/* 左右结构：固定高度，弹窗大小不随页签内容跳动；滚动只在右栏 */
 .dialog {
-  width: 380px;
-}
-/* 页签导航：下划线式，active 用文字档主色（语义色，不是颜料档） */
-.st-tabs {
+  width: 620px;
+  height: min(540px, 82vh);
   display: flex;
-  gap: var(--sp-1);
-  margin-bottom: var(--sp-3);
-  border-bottom: 1px solid var(--border);
+  flex-direction: column;
+  overflow: hidden;
 }
-.st-tabs button {
-  padding: var(--sp-1) var(--sp-2);
+.st-body {
+  display: flex;
+  gap: var(--sp-4);
+  flex: 1;
+  min-height: 0;
+}
+/* 左侧竖排导航：active 用主色淡底 + 文字档主色（选中态的既定画法） */
+.st-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 88px;
+  flex-shrink: 0;
+}
+.st-nav button {
+  padding: var(--sp-2);
   border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
+  border-radius: var(--r-md);
   background: none;
   font-size: var(--fs-sm);
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
+  text-align: left;
   cursor: pointer;
   transition:
+    background-color var(--dur-fast) var(--ease-out),
     color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out),
     transform var(--dur-fast) var(--ease-out);
 }
-.st-tabs button:hover {
+.st-nav button:hover {
+  background: var(--bg-hover);
   color: var(--fg);
 }
-.st-tabs button.active {
+.st-nav button.active {
+  background: var(--accent-soft);
   color: var(--accent-text);
-  border-bottom-color: var(--accent-text);
 }
-.st-tabs button:active {
+.st-nav button:active {
   transform: translateY(0.5px);
+}
+.st-pages {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding-right: var(--sp-1);
 }
 .field {
   margin-bottom: var(--sp-4);
