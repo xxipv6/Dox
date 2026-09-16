@@ -33,7 +33,7 @@ function openManual(): void {
     title="新版本已下载，点击打开设置重启安装"
     @click="settings.dialogVisible = true"
   >
-    重启更新
+    重启更新 v{{ updater.state?.version }}
   </button>
   <button
     v-else-if="phase === 'available' && manualUrl"
@@ -44,7 +44,7 @@ function openManual(): void {
     新版 v{{ updater.state?.version }}
   </button>
   <span v-else-if="phase === 'downloading'" class="upd-pill" title="正在下载更新">
-    更新 {{ percent }}%
+    下载 v{{ updater.state?.version }} · {{ percent }}%
   </span>
 </template>
 
