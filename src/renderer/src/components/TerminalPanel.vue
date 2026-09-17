@@ -1138,10 +1138,20 @@ onMounted(() => {
      * 守住了 SIGINT，却和 Xshell / Windows Terminal / VS Code 的肌肉记忆相反，
      * 多出来的 Shift 在终端里对字母键本来也没有对应语义。
      */
+    /*
+     * 下面两处必须显式 preventDefault()。
+     *
+     * attachCustomKeyEventHandler 返回 false 只是让 xterm 别再把这个键编码成
+     * 控制字符，**不阻止浏览器的原生行为**。少了这一行：原生 paste 会再走一遍
+     * xterm 那个隐藏 textarea 自带的 paste 处理器，一次 Ctrl+V 粘出两份；
+     * 原生 copy 则拿 canvas 渲染下永远为空的 DOM 选区，把我刚写进去的剪贴板
+     * 覆盖掉 —— 表现为「按了 Ctrl+C，剪贴板纹丝不动」。
+     */
     const mod = isMac ? e.metaKey : e.ctrlKey
     if (mod && !e.altKey && key === 'c') {
       const sel = term?.getSelection()
       if (!sel) return true
+      e.preventDefault()
       void copyToClipboard(sel, true)
       term?.clearSelection()
       return false
@@ -1153,6 +1163,7 @@ onMounted(() => {
      * paste 包裹都由 xterm 负责，见 pasteClipboard 的注释。
      */
     if (mod && !e.altKey && key === 'v') {
+      e.preventDefault() // 理由同上：不挡的话原生 paste 会再粘一份
       void pasteClipboard()
       return false
     }
