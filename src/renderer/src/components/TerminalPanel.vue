@@ -24,8 +24,16 @@ const props = defineProps<{ sessionId: string }>()
 const store = useSessionStore()
 const settings = useSettingsStore()
 const editor = useEditorStore()
-/** mac 上 ⌘C 才算复制；Win/Linux 上 Ctrl+C 得留给前台进程的 SIGINT */
+/**
+ * 复制粘贴的修饰键按平台分：mac 用 ⌘，Windows/Linux 用 Ctrl ——
+ * 即 VS Code 终端文档里 "follow platform standards" 那句。
+ *
+ * 取键时是 metaKey / ctrlKey **二选一**，不是两者取或：mac 上 Ctrl+C
+ * 仍必须留给前台进程的 SIGINT。
+ */
 const isMac = window.api.platform === 'darwin'
+/** 右键菜单里显示的修饰键名 */
+const modLabel = isMac ? 'Cmd' : 'Ctrl'
 
 /**
  * 写系统剪贴板。
@@ -36,9 +44,9 @@ const isMac = window.api.platform === 'darwin'
  * 还是写剪贴板被拒。改走主进程的 Electron clipboard（见 IPC 通道注释），
  * 但仍留这一层 catch：IPC 本身也会失败，而沉默的失败没法排查。
  *
- * notify：只有**显式复制**（右键菜单 / 快捷键）才回一条成功提示 ——
- * 「选中即复制」每次拖拽都会触发，给它弹提示就是把界面变成噪声。
- * 失败一律提示，那是用户必须知道的事。
+ * notify：只有**显式复制**（右键菜单 / Ctrl+C）才回一条成功提示 ——
+ * 它由调用方决定，因为将来若再加自动复制类的入口，每次触发都弹提示
+ * 就是把界面变成噪声。失败一律提示，那是用户必须知道的事。
  */
 async function copyToClipboard(text: string, notify = false): Promise<void> {
   if (!text) return
@@ -762,7 +770,13 @@ async function pasteClipboard(): Promise<void> {
   closeMenu()
   try {
     const text = await window.api.readClipboardText()
-    if (text) store.sendInput(props.sessionId, text)
+    /*
+     * 走 term.paste() 而不是 store.sendInput()。xterm 在这条路上做两件事：
+     * 换行归一化（\n → \r）与 bracketed paste 包裹 —— 原始文本直灌进去，
+     * 多行内容会被 shell 逐行执行，vim 里还会被自动缩进搅乱。
+     * 它最终仍经 term.onData → store.sendInput，广播与 cwd 跟踪都不丢。
+     */
+    if (text) term?.paste(text)
   } catch (err) {
     pushToast(`读取剪贴板失败：${errorText(err)}`)
   }
@@ -1076,7 +1090,7 @@ onMounted(() => {
     return true
   })
 
-  // Ctrl+F 打开搜索框；Ctrl+Shift+C/V 显式复制粘贴；Ctrl+W 关掉这个终端所在的标签
+  // Ctrl/Cmd+F 搜索；Ctrl/Cmd+C 有选中则复制、否则中断；Ctrl/Cmd+V 粘贴；Ctrl+W 关标签
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     if (e.type !== 'keydown') return true
     const key = e.key.toLowerCase()
@@ -1105,34 +1119,57 @@ onMounted(() => {
       return false
     }
     /*
-     * macOS 上 ⌘C 就是「复制」——这是肌肉记忆，不该逼人多按一个 Shift。
-     * 有选区才吃这个键：没选区时放行，免得把用户想送进终端的按键吞掉
-     * （mac 上给前台进程发 SIGINT 也是 Ctrl+C，不冲突）。
-     * Windows/Linux 不这么干：那边 Ctrl+C 必须是 SIGINT，复制一律 Ctrl+Shift+C。
+     * 复制 / 粘贴：修饰键按平台分 —— mac 用 ⌘，Windows/Linux 用 Ctrl，
+     * 即 VS Code 终端文档那句 "follow platform standards"。
+     *
+     * 这里刻意不复用上面的 primary（ctrlKey || metaKey）：mac 上 Ctrl+C
+     * 仍必须留给 SIGINT，而 primary 会把 Ctrl 和 ⌘ 一并收进来。⌘ 在 mac 上
+     * 根本不会变成终端输入，所以它做复制零冲突，Ctrl 可以完整留给前台进程。
+     *
+     * Ctrl/Cmd+C 智能分流：有选中就是复制，没选中才放行给 xterm 编码成
+     * 0x03 (SIGINT)。VS Code 把 Ctrl+C 绑到 copySelection 上、when 条件正是
+     * terminalTextSelected，也就是这个意思。
+     *
+     * 复制后必须 clearSelection()：否则选区一直挂着，之后想中断卡住的命令
+     * 会一直被当成复制，进程打不断。VS Code 与 Windows Terminal 都靠
+     * 「复制即清除选中」绕开智能 Ctrl+C 唯一的这个坑。
+     *
+     * Windows/Linux 原先复制走 Ctrl+Shift+C、裸 Ctrl+C 一律放行。那样确实
+     * 守住了 SIGINT，却和 Xshell / Windows Terminal / VS Code 的肌肉记忆相反，
+     * 多出来的 Shift 在终端里对字母键本来也没有对应语义。
      */
-    if (isMac && e.metaKey && !e.ctrlKey && !e.shiftKey && key === 'c') {
+    const mod = isMac ? e.metaKey : e.ctrlKey
+    if (mod && !e.altKey && key === 'c') {
       const sel = term?.getSelection()
       if (!sel) return true
       void copyToClipboard(sel, true)
+      term?.clearSelection()
       return false
     }
-    if (primary && e.shiftKey && key === 'c') {
-      const sel = term?.getSelection()
-      if (sel) void copyToClipboard(sel, true)
-      return false
-    }
-    if (primary && e.shiftKey && key === 'v') {
+    /*
+     * 粘贴。裸 Ctrl+V 在终端协议里是 0x16 (literal-next)，几乎无人使用，
+     * 让位给粘贴的收益远大于代价（Windows Terminal / VS Code 同此约定）。
+     * 实际投递走 pasteClipboard() → term.paste()，换行归一化与 bracketed
+     * paste 包裹都由 xterm 负责，见 pasteClipboard 的注释。
+     */
+    if (mod && !e.altKey && key === 'v') {
       void pasteClipboard()
       return false
     }
     return true
   })
 
-  // 选中即复制
-  term.onSelectionChange(() => {
-    const sel = term?.getSelection()
-    if (sel) void copyToClipboard(sel)
-  })
+  /*
+   * 刻意不做「选中即复制」。
+   *
+   * 那是 X11 的习惯，靠 PRIMARY / CLIPBOARD 两套选区并存才成立；这里只有
+   * 一套系统剪贴板，选中就写等于随手一划就把别处复制的内容冲掉 ——
+   * Xshell / MobaXterm / Windows Terminal 也都不这么做。
+   *
+   * 它还与上面的智能 Ctrl+C 天然互斥：选中即复制不改变选区，于是「有选中」
+   * 永远成立，Ctrl+C 就永远轮不到 SIGINT。复制走 Ctrl/Cmd+C 或右键菜单，
+   * 显式且不误伤。
+   */
 
   // 远端输出 → ZMODEM Sentry → xterm（ZMODEM 会话期间数据被协议接管）
   unsubscribeData = window.api.onData((id, chunk) => {
@@ -1374,8 +1411,8 @@ defineExpose({ refit, refitAndFocus })
         :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
         @click.stop
       >
-        <button :disabled="!hasSelection" @click="copySelection">复制<span class="hint">Ctrl+Shift+C</span></button>
-        <button @click="pasteClipboard">粘贴<span class="hint">Ctrl+Shift+V</span></button>
+        <button :disabled="!hasSelection" @click="copySelection">复制<span class="hint">{{ modLabel }}+C</span></button>
+        <button @click="pasteClipboard">粘贴<span class="hint">{{ modLabel }}+V</span></button>
         <button @click="clearTerminal">清屏<span class="hint">Ctrl+L</span></button>
         <button @click="focusTerminal">聚焦终端</button>
         <button v-if="procTarget" @click="openProcesses">性能监控</button>
