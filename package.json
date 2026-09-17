@@ -1,6 +1,6 @@
 {
   "name": "dox",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Dox - 跨平台 SSH 终端与 SFTP 文件管理器",
   "type": "module",
   "main": "./out/main/index.js",
