@@ -7,7 +7,7 @@
 // 子命令：
 //
 //	version  打印一行 JSON 版本信息（安装校验用）
-//	serve    进入请求/事件循环（hello / watch_ports / stop）
+//	serve    进入请求/事件循环（hello / watch_ports / watch_stats / fs_watch / stop）
 package main
 
 import (
@@ -19,7 +19,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.7.2"
+var version = "0.7.4"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -79,6 +79,8 @@ func serve() error {
 	portsRunning := false
 	stopStats := make(chan struct{})
 	statsRunning := false
+	// fs_watch 懒创建（inotify fd 按需）；stop / stdin 关闭时随进程收
+	var fsw *fsWatcher
 	var fsWG sync.WaitGroup
 	// 文件请求来自传输窗口和多个面板，不能无限制地创建 goroutine。
 	// 8 个并发足够填满 SSH 窗口，同时避免 fs_du/archive 与分块读写一起
@@ -124,12 +126,32 @@ func serve() error {
 				go watchStats(p.IntervalMs, enc, stopStats)
 			}
 			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"watching": true}})
+		case "fs_watch":
+			// 目录变更监听：整组替换（幂等）。集合 = 调用方「看得见的目录」
+			// （browse cwd + 树已展开目录），事件只报目录、300ms 合并。
+			var p struct {
+				Dirs []string `json:"dirs"`
+			}
+			_ = json.Unmarshal(req.Params, &p)
+			if fsw == nil {
+				var err error
+				fsw, err = newFsWatcher(enc)
+				if err != nil {
+					_ = enc.Encode(response{ID: req.ID, Error: err.Error()})
+					continue
+				}
+			}
+			fsw.setDirs(p.Dirs)
+			_ = enc.Encode(response{ID: req.ID, Result: map[string]bool{"watching": true}})
 		case "stop":
 			if portsRunning {
 				close(stopPorts)
 			}
 			if statsRunning {
 				close(stopStats)
+			}
+			if fsw != nil {
+				fsw.close()
 			}
 			// 等待异步文件请求完成再退出，避免 stop 抢在 fs_write_commit /
 			// 回包之前执行，调用方收到一个无响应的 pending 请求。

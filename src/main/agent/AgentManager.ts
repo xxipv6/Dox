@@ -131,6 +131,8 @@ interface WatchEntry {
   containerName?: string
   ports: { owners: Set<WebContents>; active: boolean }
   stats: { owners: Set<WebContents>; active: boolean }
+  /** 目录变更监听（fs_watch）：dirs 是订阅意图（面板「看得见的目录」全量集合，重建时按它恢复） */
+  fs: { owners: Set<WebContents>; active: boolean; dirs: string[] }
   /** 文件面板等一次性调用方：持有期间通道不因 watch 退订归零而关闭 */
   holders: Set<WebContents>
 }
@@ -393,6 +395,7 @@ export class AgentManager {
         containerName,
         ports: { owners: new Set(), active: false },
         stats: { owners: new Set(), active: false },
+        fs: { owners: new Set(), active: false, dirs: [] },
         holders: new Set()
       }
       this.watches.set(key, w)
@@ -406,13 +409,15 @@ export class AgentManager {
     for (const [key, w] of this.watches) {
       if (w.sessionId !== e.id) continue
       const stale =
-        (w.ports.owners.size > 0 && !w.ports.active) || (w.stats.owners.size > 0 && !w.stats.active)
+        (w.ports.owners.size > 0 && !w.ports.active) ||
+        (w.stats.owners.size > 0 && !w.stats.active) ||
+        (w.fs.owners.size > 0 && !w.fs.active)
       if (stale) void this.rebuildWatch(key, w)
     }
   }
 
   private async rebuildWatch(key: string, w: WatchEntry): Promise<void> {
-    for (const lane of [w.ports, w.stats]) {
+    for (const lane of [w.ports, w.stats, w.fs]) {
       for (const owner of lane.owners) {
         if (owner.isDestroyed()) lane.owners.delete(owner)
       }
@@ -420,7 +425,7 @@ export class AgentManager {
     for (const holder of w.holders) {
       if (holder.isDestroyed()) w.holders.delete(holder)
     }
-    if (w.ports.owners.size + w.stats.owners.size + w.holders.size === 0) {
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size === 0) {
       if (this.watches.get(key) === w) this.watches.delete(key)
       return
     }
@@ -438,6 +443,10 @@ export class AgentManager {
         await this.callOn(ch, 'watch_stats', { interval_ms: 3000 })
         w.stats.active = true
       }
+      if (w.fs.owners.size > 0 && !w.fs.active) {
+        await this.callOn(ch, 'fs_watch', { dirs: w.fs.dirs })
+        w.fs.active = true
+      }
     } catch {
       // 重建失败：留在降级态（渲染层轮询顶着），下次重连/重试再试
       this.broadcast(w, { event: 'agent_closed' })
@@ -447,17 +456,25 @@ export class AgentManager {
   /**
    * 统一广播：按事件类型路由到对应泳道的订阅者（订阅者以意图表为准）。
    * 事件带 containerName —— 同一条 SSH 会话上宿主机与多个容器并存时靠它区分。
-   * agent_closed 两泳道都通知 —— 它是通道级事件，不是业务事件。
+   * agent_closed 三泳道都通知 —— 它是通道级事件，不是业务事件。
    */
   private broadcast(w: WatchEntry, payload: { event?: string } & object): void {
-    const statsLane = payload.event === 'stats' || payload.event === 'stats_error'
-    const channel = statsLane ? IpcChannels.agentStats : IpcChannels.agentPorts
+    const lane =
+      payload.event === 'stats' || payload.event === 'stats_error'
+        ? 'stats'
+        : payload.event === 'fs'
+          ? 'fs'
+          : 'ports'
+    const channel =
+      lane === 'stats'
+        ? IpcChannels.agentStats
+        : lane === 'fs'
+          ? IpcChannels.agentFsEvent
+          : IpcChannels.agentPorts
     const owners =
       payload.event === 'agent_closed'
-        ? new Set([...w.ports.owners, ...w.stats.owners])
-        : statsLane
-          ? w.stats.owners
-          : w.ports.owners
+        ? new Set([...w.ports.owners, ...w.stats.owners, ...w.fs.owners])
+        : w[lane].owners
     for (const owner of owners) {
       if (!owner.isDestroyed()) owner.send(channel, w.sessionId, w.containerName ?? null, payload)
     }
@@ -473,6 +490,7 @@ export class AgentManager {
     if (w) {
       w.ports.active = false
       w.stats.active = false
+      w.fs.active = false
       this.broadcast(w, { event: 'agent_closed' })
     }
   }
@@ -626,13 +644,77 @@ export class AgentManager {
     this.unwatch(sessionId, containerName, owner, 'stats')
   }
 
+  /**
+   * 订阅目录变更推送（fs_watch）：dirs = 面板「看得见的目录」全量集合
+   * （browse cwd / 项目树根 + 已展开目录）。机制与 watchPorts 相同、共用通道；
+   * 老 agent 没有这个方法会抛错 —— 渲染层捕获后降级回手动刷新。
+   */
+  async watchFs(sessionId: string, containerName: string | undefined, owner: WebContents, dirs: string[]): Promise<void> {
+    const w = this.watchEntry(sessionId, containerName)
+    w.fs.owners.add(owner)
+    w.fs.dirs = dirs
+    const ch = await this.connect(sessionId, containerName)
+    await this.callOn(ch, 'fs_watch', { dirs })
+    /*
+     * connect/callOn 在途期间调用方可能已 unwatchFs 归零（面板秒关/会话切走）：
+     * 不补这一下，远端替「死人」看目录直到通道寿终 —— 清空指令只在
+     * active 分支发，而 active 恰恰不会被置上（变体 a）；就算置过，
+     * 流上顺序也是 clear→set，远端照样在听（变体 b）。两个都靠这次复查堵上。
+     */
+    if (this.watches.get(keyOf(sessionId, containerName)) !== w || w.fs.owners.size === 0) {
+      w.fs.active = false
+      w.fs.dirs = []
+      await this.callOn(ch, 'fs_watch', { dirs: [] }).catch(() => undefined)
+      return
+    }
+    w.fs.active = true
+  }
+
+  /** 可见目录集合变化（cd / 展开 / 折叠）→ 更新订阅意图与远端监听集合（幂等） */
+  async updateFsWatch(sessionId: string, containerName: string | undefined, dirs: string[]): Promise<void> {
+    const w = this.watches.get(keyOf(sessionId, containerName))
+    if (!w || w.fs.owners.size === 0) return
+    w.fs.dirs = dirs
+    if (!w.fs.active) return
+    const ch = await this.connect(sessionId, containerName)
+    await this.callOn(ch, 'fs_watch', { dirs })
+    // 与 watchFs 同款的在途退订复查
+    if (w.fs.owners.size === 0) {
+      w.fs.active = false
+      w.fs.dirs = []
+      await this.callOn(ch, 'fs_watch', { dirs: [] }).catch(() => undefined)
+    }
+  }
+
+  unwatchFs(sessionId: string, containerName: string | undefined, owner: WebContents): void {
+    const key = keyOf(sessionId, containerName)
+    const w = this.watches.get(key)
+    if (!w) return
+    w.fs.owners.delete(owner)
+    // fs 泳道归零：远端监听集合清空（通道可能还被别的泳道/holder 用着，不收）
+    if (w.fs.owners.size === 0 && w.fs.active) {
+      w.fs.active = false
+      w.fs.dirs = []
+      const ch = this.channels.get(key)
+      if (ch) void this.callOn(ch, 'fs_watch', { dirs: [] }).catch(() => undefined)
+    }
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size > 0) return
+    this.watches.delete(key)
+    const ch = this.channels.get(key)
+    if (!ch) return
+    void this.callOn(ch, 'stop', {}).catch(() => undefined)
+    setTimeout(() => {
+      try { ch.stream.close() } catch { /* 已死 */ }
+    }, 500).unref?.()
+  }
+
   /** 退订：该泳道归零只是不再推送；泳道与 holder 全归零才 stop + 关通道（远端不留闲进程） */
   private unwatch(sessionId: string, containerName: string | undefined, owner: WebContents, lane: 'ports' | 'stats'): void {
     const key = keyOf(sessionId, containerName)
     const w = this.watches.get(key)
     if (!w) return
     w[lane].owners.delete(owner)
-    if (w.ports.owners.size + w.stats.owners.size + w.holders.size > 0) return
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size > 0) return
     this.watches.delete(key)
     const ch = this.channels.get(key)
     if (!ch) return
@@ -664,7 +746,7 @@ export class AgentManager {
     const w = this.watches.get(key)
     if (!w) return
     w.holders.delete(owner)
-    if (w.ports.owners.size + w.stats.owners.size + w.holders.size > 0) return
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size > 0) return
     this.watches.delete(key)
     const ch = this.channels.get(key)
     if (!ch) return

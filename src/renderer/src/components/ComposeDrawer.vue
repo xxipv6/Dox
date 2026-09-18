@@ -17,11 +17,14 @@ const activeId = ref<string | null>(null)
 const active = computed(
   () => store.runs.find((r) => r.id === activeId.value) ?? store.runs[store.runs.length - 1] ?? null
 )
-// 新运行出现时自动切过去（刚从菜单点出来的那条就是用户想看的）
+// 新运行出现时自动切过去（刚从菜单点出来的那条就是用户想看的）；
+// 只在变长时切 —— 删掉中间的 pill 不应该把视图弹走
+let prevLen = 0
 watch(
   () => store.runs.length,
   (n) => {
-    if (n) activeId.value = store.runs[n - 1].id
+    if (n && n > prevLen) activeId.value = store.runs[n - 1].id
+    prevLen = n
   }
 )
 
@@ -77,6 +80,14 @@ function statusIcon(status: string): { name: 'check' | 'alert' | 'x' | null; cls
           <span v-if="r.status === 'running'" class="cd-spin"></span>
           <Icon v-else :name="statusIcon(r.status).name!" :size="11" />
           {{ VERB_LABEL[r.verb] }} · {{ r.file }}
+          <span
+            class="cd-pill-x"
+            role="button"
+            title="移除这条记录（正在跑的会先中断）"
+            @click.stop="store.remove(r.id)"
+          >
+            <Icon name="x" :size="10" />
+          </span>
         </button>
       </span>
       <span class="cd-actions">
@@ -179,6 +190,25 @@ function statusIcon(status: string): { name: 'check' | 'alert' | 'x' | null; cls
 }
 .cd-pill.canceled {
   color: var(--warning-text);
+}
+/* 单条移除：默认藏起来，hover 到这条 pill 上才出现（button 里不能再套 button，用 span） */
+.cd-pill-x {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border-radius: 50%;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.cd-pill:hover .cd-pill-x {
+  display: inline-flex;
+}
+.cd-pill-x:hover {
+  background: var(--bg-active);
+  color: var(--fg);
 }
 .cd-spin {
   width: 9px;

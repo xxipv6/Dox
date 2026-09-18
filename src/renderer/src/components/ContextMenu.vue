@@ -10,6 +10,10 @@ export interface ContextMenuItem {
   /** 危险操作（删除）用红色，和行尾按钮的 danger 一致 */
   danger?: boolean
   disabled?: boolean
+  /** 该项渲染为分组分隔线（label 留空即可，id 仅作 key） */
+  separator?: boolean
+  /** 右侧快捷键提示（如 ↩ / F2 / ⌘⌫），按平台由调用方给文案 */
+  hint?: string
 }
 
 const props = defineProps<{
@@ -82,17 +86,20 @@ useEscapeToClose(
         class="context-menu pop-surface"
         :style="{ left: pos.left + 'px', top: pos.top + 'px' }"
       >
-        <button
-          v-for="item in items"
-          :key="item.id"
-          class="menu-item"
-          :class="{ danger: item.danger }"
-          :disabled="item.disabled"
-          @click="emit('select', item.id)"
-        >
-          <Icon v-if="item.icon" :name="item.icon" :size="14" />
-          <span>{{ item.label }}</span>
-        </button>
+        <template v-for="item in items" :key="item.id">
+          <div v-if="item.separator" class="menu-separator"></div>
+          <button
+            v-else
+            class="menu-item"
+            :class="{ danger: item.danger }"
+            :disabled="item.disabled"
+            @click="emit('select', item.id)"
+          >
+            <Icon v-if="item.icon" :name="item.icon" :size="14" />
+            <span>{{ item.label }}</span>
+            <span v-if="item.hint" class="menu-hint">{{ item.hint }}</span>
+          </button>
+        </template>
       </div>
     </Transition>
   </Teleport>

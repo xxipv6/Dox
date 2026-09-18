@@ -6,10 +6,13 @@ import type { FileHandle } from 'node:fs/promises'
 import { basename, dirname, join, sep } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import type { Client, ClientChannel, SFTPWrapper } from 'ssh2'
+// 默认导入而不是命名导入：Node 原生 ESM 探不出 CJS 包的命名导出
+// （verify 脚本用 type stripping 直接 import 本模块），打包器两种都行
+import ssh2 from 'ssh2'
 import type { TransferDirection, TransferTask } from '../../shared/types'
 import type { AgentStreamIO } from '../agent/agentStream'
 import { mkdirRemoteRecursive, posix, readdirP, statP, toPosixRel, unlinkP } from './sftpUtils.ts'
-import { execCapture } from '../ssh/remoteExec.ts'
+import { execCapture, execStream } from '../ssh/remoteExec.ts'
 import { firstLine } from '../execError.ts'
 import {
   TarParser,
@@ -65,6 +68,13 @@ interface InternalTask extends TransferTask {
  */
 function publicTask(task: InternalTask): TransferTask {
   return Object.fromEntries(Object.entries(task).filter(([k]) => !k.startsWith('_'))) as TransferTask
+}
+
+/** P2P 直传预备产物：A 上的私钥路径 + B 上 authorized_keys 的标记 + 拼好的 ssh 命令头 */
+interface P2PSession {
+  keyPath: string
+  marker: string
+  sshBase: string
 }
 
 /** 容器传输 IO：docker cp 段 + 容器内目录操作（经 agent fs 协议） */
@@ -453,6 +463,665 @@ export class TransferManager {
       task._cancel?.()
     }
   }
+
+  // ---- 服务器互传（A 远端 → B 远端）----
+
+  /**
+   * 把 srcSession 上的若干路径复制到 dstSession 的 dstDir。三级路线，自动选：
+   *
+   *  1. **同一台机器**（machine-id 相同）：服务端 `cp -a`，零网络流量 ——
+   *     两个标签开同一台机器时跨面板粘贴就走这条。
+   *  2. **P2P 直传**（opts.p2pTarget 给了 = 用户已授权 + 目标是直连地址）：
+   *     一次性 ed25519 密钥对，公钥临时写 B 的 authorized_keys（带标记行）、
+   *     私钥临时放 A 的 /tmp（600），A 上 `tar | ssh` 直连 B 满速，
+   *     传完两边都删。预飞失败（A 连不到 B）自动落回中继。
+   *  3. **中继**：A 的 tar stdout → 本机 → B 的 tar stdin（两端都有 tar），
+   *     或 SFTP 逐文件中继。永远能用，但流量过一遍本机。
+   *
+   * 任务 direction 记 'upload'、sessionId 记**目的端**：目标面板的
+   * 「传完自动刷新」（isMyUpload 按 direction+remotePath 判）零改动生效。
+   */
+  async enqueueServerCopy(
+    srcSessionId: string,
+    paths: string[],
+    dstSessionId: string,
+    dstDir: string,
+    opts?: { p2pTarget?: { host: string; port: number; username: string }; skipSameMachineCheck?: boolean }
+  ): Promise<TransferTask[]> {
+    const gen = this.expansionGen
+    const dstSftp = await this.getSftp(dstSessionId)
+    await mkdirRemoteRecursive(dstSftp, dstDir)
+
+    // 按源父目录分组（tar -C 只接受一个基准目录；cp/P2P 也复用这个分组出任务）
+    const groups = new Map<string, string[]>()
+    for (const p of paths) {
+      const parent = posix.dirname(p)
+      const arr = groups.get(parent) ?? []
+      arr.push(posix.basename(p))
+      groups.set(parent, arr)
+    }
+
+    /**
+     * 「复制进自己」守卫：**只在确认同台**（或同一连接的安全网）时套用。
+     * A 的 /www 复制到 B 的 /www/backup 是完全合法的跨机操作，文本前缀判断
+     * 不能越权拦 —— 两边是不同的命名空间。
+     */
+    const guardSelfCopy = (): void => {
+      for (const p of paths) {
+        if (dstDir === p || dstDir.startsWith(p.endsWith('/') ? p : `${p}/`)) {
+          throw new Error(`不能把「${posix.basename(p)}」复制到它自己里面`)
+        }
+      }
+    }
+
+    /** du 总量（失败就 0，只影响百分比）：du -sk 两族通吃（busybox 没有 -b），×1024 估算 */
+    const duTotal = async (parent: string, names: string[]): Promise<number> => {
+      const client = this.getClient(srcSessionId)
+      if (!client) return 0
+      try {
+        const fullPaths = names.map((n) => shQuote(posix.join(parent, n))).join(' ')
+        const r = await execCapture(
+          client,
+          `du -sk -- ${fullPaths} 2>/dev/null | awk '{s+=$1} END {print s*1024}'`,
+          { timeoutMs: 60_000 }
+        )
+        return parseInt(r.stdout.trim(), 10) || 0
+      } catch {
+        return 0
+      }
+    }
+
+    // ---- 第 1 级：同一台机器 → cp -a ----
+    if (!opts?.skipSameMachineCheck) {
+      const [srcMid, dstMid] = await Promise.all([
+        this.machineId(srcSessionId),
+        this.machineId(dstSessionId)
+      ])
+      if ((srcMid && dstMid && srcMid === dstMid) || srcSessionId === dstSessionId) {
+        guardSelfCopy()
+        const created: TransferTask[] = []
+        for (const [parent, names] of groups) {
+          if (this.expansionGen !== gen) break
+          const total = await duTotal(parent, names)
+          const display =
+            names.length === 1 ? `${names[0]}（同台直连）` : `${names[0]} 等 ${names.length} 项（同台直连）`
+          const task = this.createTask(
+            dstSessionId,
+            'upload',
+            `${srcSessionId}:${parent}`,
+            posix.join(dstDir, names[0]),
+            total,
+            display
+          )
+          task._stream = (t) => this.cpWithin(t, srcSessionId, parent, names, dstDir)
+          if (this.pushIfCurrent(task, gen)) created.push(this.snapshot(task))
+        }
+        return created
+      }
+    }
+
+    // ---- 第 2/3 级：tar 可用时按组出任务（每组内 P2P 优先、中继兜底）----
+    const useTar =
+      (await this.supportsTar(srcSessionId)) && (await this.supportsTar(dstSessionId))
+
+    if (useTar) {
+      const created: TransferTask[] = []
+      for (const [parent, names] of groups) {
+        if (this.expansionGen !== gen) break
+        const total = await duTotal(parent, names)
+        const display =
+          names.length === 1 ? `${names[0]}（互传整流）` : `${names[0]} 等 ${names.length} 项（互传整流）`
+        const task = this.createTask(
+          dstSessionId,
+          'upload',
+          `${srcSessionId}:${parent}`,
+          posix.join(dstDir, names[0]),
+          total,
+          display
+        )
+        const p2pTarget = opts?.p2pTarget
+        task._stream = async (t) => {
+          // P2P：预飞不过（拿不到 key/连不通）安静落回中继；传一半失败才报错
+          const p2p = p2pTarget ? await this.prepareP2p(srcSessionId, dstSessionId, p2pTarget) : null
+          // 预备期间（最坏 ~40s 的多个 await）用户点了取消：收尾后立即落定，
+          // 别带着「已取消」标记继续发起传输
+          if (t._cancelRequested) {
+            if (p2p) await this.cleanupP2p(srcSessionId, dstSessionId, p2p)
+            throw new Error(CANCELED)
+          }
+          // 路线定了就把任务名换成真实路线，界面看得见走了哪条路
+          const base = t.fileName.replace(/（互传整流）$/, '')
+          t.fileName = `${base}（${p2p ? 'P2P 直传' : '互传中继'}）`
+          this.emit()
+          if (p2p) {
+            try {
+              await this.p2pCopy(t, srcSessionId, p2p, parent, names, dstDir)
+              return
+            } finally {
+              await this.cleanupP2p(srcSessionId, dstSessionId, p2p)
+            }
+          }
+          await this.tarRelay(t, srcSessionId, parent, names, dstDir)
+        }
+        if (this.pushIfCurrent(task, gen)) created.push(this.snapshot(task))
+      }
+      return created
+    }
+
+    // ---- 无 tar 慢路：逐文件 SFTP 中继（源端递归展开目录，目的端建骨架）----
+    const srcSftp = await this.getSftp(srcSessionId)
+    const created: TransferTask[] = []
+    const createdDirs = new Set<string>()
+
+    const walk = async (rPath: string, rel: string): Promise<void> => {
+      if (this.expansionGen !== gen) return
+      const st = await statP(srcSftp, rPath)
+      if (st.isSymbolicLink()) return // 与下载目录同一口径：不跟链
+      if (!st.isDirectory()) {
+        const dstPath = posix.join(dstDir, rel)
+        await mkdirRemoteRecursive(dstSftp, posix.dirname(dstPath), createdDirs)
+        const task = this.createTask(dstSessionId, 'upload', rPath, dstPath, st.size, rel)
+        task._stream = (t) => this.fileRelay(t, srcSessionId)
+        if (this.pushIfCurrent(task, gen)) created.push(this.snapshot(task))
+        return
+      }
+      // 目录本身也要在目的端建出来（空目录不落空）
+      await mkdirRemoteRecursive(dstSftp, posix.join(dstDir, rel), createdDirs)
+      const items = await readdirP(srcSftp, rPath)
+      const children: Array<{ rChild: string; rel: string }> = []
+      for (const item of items) {
+        if (item.filename === '.' || item.filename === '..') continue
+        children.push({ rChild: posix.join(rPath, item.filename), rel: `${rel}/${item.filename}` })
+      }
+      // 兄弟条目 8 路并发：readdir/stat 每个一次 RTT，宽目录树下串行是纯等待
+      for (let i = 0; i < children.length && this.expansionGen === gen; i += 8) {
+        await Promise.all(children.slice(i, i + 8).map((c) => walk(c.rChild, c.rel)))
+      }
+    }
+
+    for (const p of paths) {
+      if (this.expansionGen !== gen) break
+      await walk(p, posix.basename(p))
+    }
+    return created
+  }
+
+  /** sessionId → machine 标识（互传同台检测；探测一次缓存全程，空串=没探到也缓存防反复 exec） */
+  private machineIds = new Map<string, string>()
+
+  /**
+   * 同台判定的标识：machine-id + boot_id 双因子。
+   * 只用 machine-id 不够：同一 golden image 克隆出来的 VM/容器 machine-id 相同，
+   * 会被误判同台 → cp -a 只在 A 本地执行，B 上什么都没有（无报错的数据错投）。
+   * boot_id 每次启动重新生成，克隆机也不同。hostname 不当因子（重名太常见）。
+   * 拿不到就返回 null —— 安全方向：当中继，不猜。
+   */
+  private async machineId(sessionId: string): Promise<string | null> {
+    const cached = this.machineIds.get(sessionId)
+    if (cached !== undefined) return cached || null
+    const client = this.getClient(sessionId)
+    if (!client) return null
+    let id = ''
+    try {
+      const r = await execCapture(
+        client,
+        '(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null; cat /proc/sys/kernel/random/boot_id 2>/dev/null) | tr "\\n" " "',
+        { timeoutMs: 5000 }
+      )
+      id = r.stdout.trim()
+    } catch {
+      id = ''
+    }
+    this.machineIds.set(sessionId, id)
+    return id || null
+  }
+
+  /**
+   * 入队前最后一次世代检查：任务创建隔着 await（du/stat/mkdir），
+   * 「全部取消」可能正好落在窗口里 —— 不查这一下，清扫之后入队的任务照跑。
+   */
+  private pushIfCurrent(task: InternalTask, gen: number): boolean {
+    if (this.expansionGen !== gen) {
+      this.tasks.delete(task.id)
+      return false
+    }
+    this.push(task)
+    return true
+  }
+
+  /**
+   * 同台复制：服务端 `cp -a`，零网络流量。进度靠轮询目标侧已落地字节
+   * （同台时「目标侧」就是这台机器自己，dst 连接直接能量）。
+   */
+  private async cpWithin(
+    task: InternalTask,
+    sessionId: string,
+    parent: string,
+    names: string[],
+    dstDir: string
+  ): Promise<void> {
+    const client = this.getClient(sessionId)
+    if (!client) throw new Error('会话已断开')
+    const quoted = names.map((n) => shQuote(posix.join(parent, n))).join(' ')
+    // 失败时把 stderr 首行带上：「退出码 1」分不清是权限不足还是磁盘满
+    let stderr = ''
+    const handle = execStream(client, `cp -a -- ${quoted} ${shQuote(`${dstDir}/`)}`, {
+      timeoutMs: 6 * 3600_000,
+      onData: () => undefined,
+      onStderr: (text) => {
+        if (stderr.length < 4096) stderr += text
+      }
+    })
+    task._cancel = () => handle.cancel()
+    this.pollDstSize(task, dstDir, names, handle.done)
+    const r = await handle.done
+    if (r.canceled || task._cancelRequested) throw new Error(CANCELED)
+    if (r.code !== 0) {
+      const detail = stderr.split('\n').map((l) => l.trim()).filter(Boolean)[0]
+      throw new Error(detail ? `同台复制失败：${detail}` : `同台复制失败（cp 退出码 ${r.code}）`)
+    }
+  }
+
+  /**
+   * 同一台 B 的 P2P 串行锁：authorized_keys 的「读-改-写」（清扫陈旧标记、
+   * 追加新公钥、传完删除）不是原子操作，并发任务交错会互相复活/误删标记行。
+   * 串行化后，prepare 清扫陈旧标记也安全 —— 此刻没有别的任务处于
+   * 「已 append 未连接」的窗口（正在传的 ssh 会话已建立，删行无影响）。
+   */
+  private p2pLocks = new Map<string, Promise<unknown>>()
+
+  private p2pSerialized<T>(dstSessionId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.p2pLocks.get(dstSessionId) ?? Promise.resolve()
+    const run = prev.catch(() => undefined).then(fn)
+    this.p2pLocks.set(dstSessionId, run)
+    return run
+  }
+
+  /**
+   * P2P 预备：一次性 ed25519 密钥对，公钥临时进 B 的 authorized_keys（带标记行），
+   * 私钥临时放 A 的 /tmp（600）；预飞 `ssh true` 确认 A 能直连 B。
+   * 任何一步失败都清理现场并返回 null（调用方落回中继），不报错。
+   */
+  private async prepareP2p(
+    srcSessionId: string,
+    dstSessionId: string,
+    target: { host: string; port: number; username: string }
+  ): Promise<P2PSession | null> {
+    const srcClient = this.getClient(srcSessionId)
+    const dstClient = this.getClient(dstSessionId)
+    if (!srcClient || !dstClient) return null
+    // host/username 来自保存的会话配置：过白名单再拼进命令行（防配置被污染时注入）
+    if (!/^[a-zA-Z0-9._:-]{1,253}$/.test(target.host)) return null
+    if (!/^[a-zA-Z0-9._-]{1,64}$/.test(target.username)) return null
+    if (!(target.port > 0 && target.port < 65536)) return null
+
+    const uuid = randomUUID().slice(0, 8)
+    const keyPath = `/tmp/.dox-p2p-${uuid}`
+    const marker = `dox-p2p-${uuid}`
+    try {
+      // A 上要有 ssh 客户端与 tar
+      await execCapture(srcClient, 'command -v ssh && command -v tar', { timeoutMs: 5000 })
+      const kp = ssh2.utils.generateKeyPairSync('ed25519', {})
+      // B：先清陈旧标记行（上次崩溃/掉线的残留）再追加本次公钥；目录权限一并备好
+      const pubLine = `${kp.public.trim()} ${marker}`
+      await this.p2pSerialized(dstSessionId, () =>
+        execCapture(
+          dstClient,
+          `mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && ` +
+            `f=~/.ssh/authorized_keys && t=$(mktemp) && (grep -v 'dox-p2p-' "$f" > "$t" || true) && cat "$t" > "$f" && rm -f "$t" && ` +
+            `printf '%s\n' ${shQuote(pubLine)} >> "$f"`,
+          { timeoutMs: 10_000 }
+        )
+      )
+      // A：私钥落 /tmp。umask 077 先压权限再建文件 —— 先建后 chmod 会给
+      // 多用户机器留一个「私钥 644」的毫秒级窗口
+      const b64 = Buffer.from(kp.private, 'utf8').toString('base64')
+      await execCapture(srcClient, `(umask 077; echo ${shQuote(b64)} | base64 -d > ${keyPath})`, {
+        timeoutMs: 10_000
+      })
+      const sshBase =
+        `ssh -i ${keyPath} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 ` +
+        `-p ${target.port} ${target.username}@${target.host}`
+      // 预飞：连不上 / 密钥被拒立刻失败（BatchMode 不会卡在密码提示上）
+      await execCapture(srcClient, `${sshBase} true`, { timeoutMs: 15_000 })
+      return { keyPath, marker, sshBase }
+    } catch {
+      await this.cleanupP2p(srcSessionId, dstSessionId, { keyPath, marker })
+      return null
+    }
+  }
+
+  /**
+   * P2P 直传：A 上 `tar -cf - | ssh B 'tar -xf -'`，字节不过本机。
+   * 进度靠轮询 B 侧已落地字节（本机与 B 的连接还在，能量）。
+   */
+  private async p2pCopy(
+    task: InternalTask,
+    srcSessionId: string,
+    p2p: P2PSession,
+    parent: string,
+    names: string[],
+    dstDir: string
+  ): Promise<void> {
+    const srcClient = this.getClient(srcSessionId)
+    if (!srcClient) throw new Error('源会话已断开')
+    // 两层引号：shQuote(dstDir) 给 B 的 shell，外层 shQuote 给 A 的 shell（ssh 拿到的是单参数）
+    const remoteCmd = `tar -xf - -C ${shQuote(dstDir)}`
+    const quoted = names.map((n) => shQuote(n)).join(' ')
+    const cmd = `tar -cf - -C ${shQuote(parent)} -- ${quoted} | ${p2p.sshBase} ${shQuote(remoteCmd)}`
+    // 失败时把 stderr 首行带上：认证失败/网络不通/磁盘满不能都压成「退出码 1」
+    let stderr = ''
+    const handle = execStream(srcClient, cmd, {
+      timeoutMs: 6 * 3600_000,
+      onData: () => undefined,
+      onStderr: (text) => {
+        if (stderr.length < 4096) stderr += text
+      }
+    })
+    task._cancel = () => handle.cancel()
+    this.pollDstSize(task, dstDir, names, handle.done)
+    const r = await handle.done
+    if (r.canceled || task._cancelRequested) throw new Error(CANCELED)
+    if (r.code !== 0) {
+      const detail = stderr.split('\n').map((l) => l.trim()).filter(Boolean)[0]
+      throw new Error(detail ? `直传失败：${detail}` : `直传失败（A 侧管道退出码 ${r.code}）`)
+    }
+  }
+
+  /** P2P 收尾：删 A 的私钥、按标记行清 B 的 authorized_keys（尽力而为，不抛错；B 侧操作串行化防并发交错） */
+  private async cleanupP2p(
+    srcSessionId: string,
+    dstSessionId: string,
+    p2p: { keyPath: string; marker: string }
+  ): Promise<void> {
+    const srcClient = this.getClient(srcSessionId)
+    if (srcClient) {
+      await execCapture(srcClient, `rm -f ${p2p.keyPath}`, { timeoutMs: 5000 }).catch(() => undefined)
+    }
+    await this.p2pSerialized(dstSessionId, async () => {
+      const dstClient = this.getClient(dstSessionId)
+      if (!dstClient) return
+      // grep -v 后 cat 回写而不是 sed -i：保持原文件的 inode/权限/属主（busybox 的 sed -i 行为不一）
+      await execCapture(
+        dstClient,
+        `f=~/.ssh/authorized_keys; t=$(mktemp) && (grep -v ${shQuote(p2p.marker)} "$f" > "$t" || true) && cat "$t" > "$f" && rm -f "$t"`,
+        { timeoutMs: 10_000 }
+      ).catch(() => undefined)
+    })
+  }
+
+  /**
+   * 进度轮询：周期性 du 目标侧已落地的顶层条目，合计 ≈ 已传字节。
+   * 覆盖写场景下旧内容会被算进去（进度偏快），可接受的近似；
+   * du 失败/会话断开都静默跳过 —— 它只是进度条，不是正确性。
+   *
+   * 节奏 3s + 启动随机相位：8 路并发任务同相轮询会在 dst 连接上瞬时
+   * 挤出 8 条 exec 通道（sshd MaxSessions 默认 10，会把 tar/sftp 通道挤失败）；
+   * du -sk 两族通吃（busybox 没有 -b），块口径对「近似进度」无影响。
+   */
+  private pollDstSize(task: InternalTask, dstDir: string, names: string[], done: Promise<unknown>): void {
+    if (task.size <= 0) return
+    const client = this.getClient(task.sessionId)
+    if (!client) return
+    const quoted = names.map((n) => shQuote(posix.join(dstDir, n))).join(' ')
+    const cmd = `du -sk -- ${quoted} 2>/dev/null | awk '{s+=$1} END {print s*1024}'`
+    let finished = false
+    // done 可能 reject（通道断/超时）：.finally 会把 rejection 原样传下去变成
+    // unhandled rejection —— 用 then 双分支吃掉，这里只要「结束了」这个事实
+    void done.then(
+      () => {
+        finished = true
+      },
+      () => {
+        finished = true
+      }
+    )
+    void (async () => {
+      // 启动随机相位，把并发任务的轮询错开
+      await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 3000)))
+      while (!finished) {
+        await new Promise((r) => setTimeout(r, 3000))
+        if (finished) break
+        try {
+          const r = await execCapture(client, cmd, { timeoutMs: 30_000 })
+          const n = parseInt(r.stdout.trim(), 10)
+          if (Number.isFinite(n) && n > task.transferred) {
+            task.transferred = Math.min(task.size, n)
+            this.emitThrottled()
+          }
+        } catch {
+          /* 轮询失败不碍事 */
+        }
+      }
+    })()
+  }
+
+  /**
+   * tar 整流互传：A 的 tar stdout → B 的 tar stdin，主进程逐块中继。   * 背压 = writeChannel 等 drain；取消 = 双通道都关，B 上已解开的文件保留
+   * （与 tar 上传/下载「已完成保留」同口径）。
+   */
+  private async tarRelay(
+    task: InternalTask,
+    srcSessionId: string,
+    srcParent: string,
+    names: string[],
+    dstDir: string
+  ): Promise<void> {
+    const srcClient = this.getClient(srcSessionId)
+    const dstClient = this.getClient(task.sessionId) // 任务 sessionId 就是目的端
+    if (!srcClient || !dstClient) throw new Error('会话已断开')
+    const quoted = names.map((n) => shQuote(n)).join(' ')
+    const srcCmd = `tar -cf - -C ${shQuote(srcParent)} -- ${quoted}`
+    const dstCmd = `tar -xf - -C ${shQuote(dstDir)}`
+
+    // 两端各收一份退出状态；stderr 各攒 4KB 报错用
+    const watch = (ch: ClientChannel, label: string): Promise<void> =>
+      new Promise((resolve, reject) => {
+        let sawExit = false
+        let exitCode: number | null = null
+        const errChunks: Buffer[] = []
+        let errLen = 0
+        ch.stderr?.on('data', (c: Buffer) => {
+          if (errLen < 4096) {
+            errChunks.push(c)
+            errLen += c.length
+          }
+        })
+        ch.on('exit', (code: number | null) => {
+          sawExit = true
+          exitCode = code
+        })
+        ch.on('error', (err: Error) => reject(err))
+        ch.on('close', () => {
+          if (task._cancelRequested) {
+            reject(new Error(CANCELED))
+            return
+          }
+          if (!sawExit) {
+            reject(new Error(`${label}侧连接中断，传输未完成`))
+            return
+          }
+          if (exitCode !== 0) {
+            const detail = firstLine(Buffer.concat(errChunks).toString('utf8'))
+            reject(new Error(detail || `${label}侧 tar 退出码 ${exitCode}`))
+            return
+          }
+          resolve()
+        })
+      })
+
+    /*
+     * 监听必须在 exec 回调里同步挂上：小文件的 tar 秒退，exit-status 可能
+     * 赶在 open 返回之后才到 —— 没人听就被丢掉，接着就是「连接中断」的冤案。
+     */
+    const open = (
+      client: Client,
+      cmd: string,
+      label: string
+    ): Promise<{ ch: ClientChannel; done: Promise<void> }> =>
+      new Promise((resolve, reject) => {
+        try {
+          client.exec(cmd, { pty: false }, (err, ch) => {
+            if (err) {
+              reject(err)
+              return
+            }
+            resolve({ ch, done: watch(ch, label) })
+          })
+        } catch (err) {
+          reject(err as Error)
+        }
+      })
+
+    const src = await open(srcClient, srcCmd, '源')
+    const srcCh = src.ch
+    const srcDone = src.done
+    let dst: { ch: ClientChannel; done: Promise<void> }
+    try {
+      dst = await open(dstClient, dstCmd, '目标')
+    } catch (err) {
+      srcCh.close()
+      srcDone.catch(() => undefined)
+      throw err
+    }
+    const dstCh = dst.ch
+    const dstDone = dst.done
+    /*
+     * 目的端通道的读侧必须放行（resume）：ssh2 的 Duplex 要等读侧流完才发
+     * 'close'，没人读就永远等 —— 远端 tar 明明已退出，任务却卡在 active。
+     * tar -xf 本来也不往 stdout 写东西，纯粹是放行读侧（同 tarUpload 的坑）。
+     */
+    dstCh.resume()
+    /*
+     * 取消要能打断「数据没在流动」的等待：卡在 writeChannel 的 drain 或
+     * Promise.all 的收尾时，循环里的逐块检查帮不上忙。close 双通道后，
+     * writeChannel 的 onClose / watch 会以 CANCELED 落定（suppressor 已兜住）。
+     */
+    task._cancel = () => {
+      srcCh.close()
+      dstCh.close()
+    }
+    // 通道建立前就点过取消：立刻关，别让远端把活跑起来
+    if (task._cancelRequested) {
+      srcCh.close()
+      dstCh.close()
+    }
+
+    try {
+      for await (const chunk of srcCh) {
+        if (task._cancelRequested) throw new Error(CANCELED)
+        task.transferred += (chunk as Buffer).length
+        this.emitThrottled()
+        await this.writeChannel(dstCh, chunk as Buffer)
+      }
+      if (task._cancelRequested) throw new Error(CANCELED)
+      // 源端 EOF：给目的端收尾信号，等两端 tar 各自落定
+      dstCh.end()
+      await Promise.all([srcDone, dstDone])
+    } catch (err) {
+      srcCh.close()
+      dstCh.close()
+      // 关通道会让两个 watch 异步 reject：先挂 suppressor 再抛，
+      // 不然取消路径的「__transfer_canceled__」变成未处理拒绝把进程打崩
+      srcDone.catch(() => undefined)
+      dstDone.catch(() => undefined)
+      // 取消优先：tar 非正常退出是被我们掐的，不算失败
+      if (task._cancelRequested) throw new Error(CANCELED)
+      throw err
+    }
+  }
+
+  /**
+   * 慢路单文件中继：源 SFTP 带 offset 读一块 → 目的 SFTP 同 offset 写一块。
+   * 8 路在途（≈2MB），worker 各自「读+写」串成一环，窗口天然背压 ——
+   * 两端速度不一致时在途块数就是缓冲上限，不会无限攒内存。
+   */
+  private async fileRelay(task: InternalTask, srcSessionId: string): Promise<void> {
+    if (task._cancelRequested) throw new Error(CANCELED)
+    const CHUNK = 256 * 1024
+    const CONCURRENCY = 8
+    const srcSftp = await this.getSftp(srcSessionId)
+    const dstSftp = await this.getSftp(task.sessionId)
+
+    const openH = (sftp: SFTPWrapper, p: string, flags: 'r' | 'w'): Promise<Buffer> =>
+      new Promise((resolve, reject) => {
+        sftp.open(p, flags, (err, h) => (err ? reject(err) : resolve(h)))
+      })
+    const closeH = (sftp: SFTPWrapper, h: Buffer): Promise<void> =>
+      new Promise((resolve) => sftp.close(h, () => resolve()))
+
+    const srcH = await openH(srcSftp, task.localPath, 'r')
+    let dstH: Buffer
+    let total: number
+    try {
+      const stats = await new Promise<{ size: number }>((resolve, reject) => {
+        srcSftp.fstat(srcH, (err, st) => (err ? reject(err) : resolve(st)))
+      })
+      total = stats.size
+      dstH = await openH(dstSftp, task.remotePath, 'w')
+    } catch (err) {
+      await closeH(srcSftp, srcH)
+      throw err
+    }
+
+    let readPos = 0
+    let failure: Error | null = null
+    task._cancel = () => {
+      if (!failure) failure = new Error(CANCELED)
+    }
+    if (task._cancelRequested) failure = new Error(CANCELED)
+
+    const worker = async (): Promise<void> => {
+      const buf = Buffer.allocUnsafe(CHUNK)
+      for (;;) {
+        if (failure) return
+        const pos = readPos
+        if (pos >= total) return
+        const len = Math.min(CHUNK, total - pos)
+        readPos += len
+
+        const bytesRead = await new Promise<number>((resolve) => {
+          srcSftp.read(srcH, buf, 0, len, pos, (err, n) => {
+            if (err) {
+              if (!failure) failure = err
+              resolve(0)
+            } else {
+              resolve(n)
+            }
+          })
+        })
+        if (bytesRead === 0 || failure) return
+        await new Promise<void>((resolve) => {
+          dstSftp.write(dstH, buf, 0, bytesRead, pos, (err) => {
+            if (err) {
+              if (!failure) failure = err
+            } else {
+              task.transferred += bytesRead
+              this.emitThrottled()
+            }
+            resolve()
+          })
+        })
+      }
+    }
+
+    try {
+      await Promise.all(Array.from({ length: CONCURRENCY }, worker))
+    } finally {
+      await closeH(dstSftp, dstH!)
+      await closeH(srcSftp, srcH)
+    }
+
+    const err = failure as Error | null
+    if (err) {
+      // 取消：删掉目的端半截（句柄已关，不赛跑）；失败：留着给断点续传
+      if (err.message === CANCELED) {
+        await unlinkP(dstSftp, task.remotePath).catch(() => undefined)
+      }
+      throw err
+    }
+  }
+
 
   // ---- 容器传输：SFTP（本机 ↔ 宿主机 /tmp 中转）+ docker cp（中转 ↔ 容器）两段接力 ----
 

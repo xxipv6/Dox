@@ -78,5 +78,17 @@ export const useComposeStore = defineStore('compose', () => {
     if (!runs.value.length) visible.value = false
   }
 
-  return { runs, visible, init, start, cancel, clearDone }
+  /**
+   * 单条移除运行记录（pill 上的 ×）。
+   * running 的先发 cancel（远端收 HUP），迟到的 end 事件在 onEvent 里 find 不到会静默丢弃。
+   */
+  function remove(id: string): void {
+    const run = runs.value.find((r) => r.id === id)
+    if (!run) return
+    if (run.status === 'running') cancel(id)
+    runs.value = runs.value.filter((r) => r.id !== id)
+    if (!runs.value.length) visible.value = false
+  }
+
+  return { runs, visible, init, start, cancel, clearDone, remove }
 })

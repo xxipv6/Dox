@@ -12,34 +12,54 @@ import {
   LOCAL_CONTAINER_TARGET
 } from '../../shared/sessionId'
 import type { ContainerControlAction, ContainerInfo, ContainerProbeResult, TermSize } from '../../shared/types'
-import { execCapture } from '../ssh/remoteExec'
+import { execCapture, execStream } from '../ssh/remoteExec'
 import { parseProcNetTcp } from '../ssh/procNet'
 import { CommandError, outputsOf } from '../execError'
 import { createChunkBatcher } from '../chunkBatcher'
-import { isNotFound, runLocal } from './localRun'
+import { isNotFound, runLocal, runLocalStream } from './localRun'
 import { mergeEnv, resolveShellEnv } from '../local/shellEnv'
 import { resolveExecutable } from '../local/which'
+import type { ImageDfRow, ImageRow } from './runtime'
 import {
   assertContainerTarget,
+  builderPruneCommand,
   classifyFailure,
   controlCommand,
+  imageDfCommand,
+  imagePullCommand,
+  imagePruneCommand,
+  imageRemoveCommand,
+  imageSaveCommand,
+  imagesCommand,
   interactiveExecCommand,
   listCommand,
+  localBuilderPruneArgs,
   localControlArgs,
+  localImageDfArgs,
+  localImagePullArgs,
+  localImagePruneArgs,
+  localImageRemoveArgs,
+  localImageSaveArgs,
+  localImagesArgs,
   localInteractiveArgs,
   localListArgs,
   localLogsArgs,
   localShellProbeArgs,
+  localUsedImagesArgs,
   logsCommand,
+  MARKER,
   NESTED_RUNTIME_CANDIDATES,
   nestedChainArgv,
+  parseImageDf,
+  parseImages,
   parseInspectIp,
   parseListing,
   parseRows,
   shellJoinArgv,
   shellProbeCommand,
   SHELL_CANDIDATES,
-  shouldDowngradeFormat
+  shouldDowngradeFormat,
+  usedImagesCommand
 } from './runtime'
 
 /**
@@ -1063,6 +1083,224 @@ export class ContainerManager {
   /** 应用退出 */
   closeAll(): void {
     for (const id of [...this.sessions.keys()]) this.close(id)
+  }
+
+  // ---- 镜像管理（列表/拉取/导出/清理；不抛错路径与 list() 同口径）----
+
+  /** 列镜像 + 标记是否被容器引用（inUse=false 即「未使用」，清理对话框的候选） */
+  async listImages(
+    parentSessionId: string
+  ): Promise<{ ok: boolean; images?: import('../../shared/types').ContainerImage[]; message?: string }> {
+    try {
+      let rows: ImageRow[]
+      let used: string[]
+      if (isLocalContainerTarget(parentSessionId)) {
+        const cached = this.runtimeByParent.get(parentSessionId)
+        const candidates = cached ? [cached.binary] : ['docker', 'podman']
+        let lastErr: unknown = null
+        let done = false
+        rows = []
+        used = []
+        for (const binary of candidates) {
+          try {
+            const res = await runLocal(binary, localImagesArgs(), { timeoutMs: 20_000 })
+            const usedRes = await runLocal(binary, localUsedImagesArgs(), { timeoutMs: 20_000 })
+            rows = parseImages(res.stdout)
+            used = usedRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+            done = true
+            break
+          } catch (err) {
+            if (isNotFound(err)) continue
+            lastErr = err
+            break
+          }
+        }
+        if (!done) return { ok: false, message: lastErr ? textOf(lastErr) : '本机没有可用的容器运行时' }
+      } else {
+        const client = this.getClient(parentSessionId)
+        if (!client) return { ok: false, message: '会话不存在或已断开' }
+        const res = await execCapture(client, imagesCommand(), { timeoutMs: 25_000 })
+        // MARKER none = 远端没有 docker/podman：与容器页同口径的优雅空列表，
+        // 别再去调 usedImages（那个会 exit 127 变成一条报错）
+        if (res.stdout.includes(`${MARKER} none`)) return { ok: true, images: [] }
+        const usedRes = await execCapture(client, usedImagesCommand(), { timeoutMs: 25_000 })
+        rows = parseImages(res.stdout)
+        used = usedRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+      }
+      const usedSet = new Set(used)
+      // ps 的 Image 列是「创建时的引用原文」：repo:tag / 短 id / repo / repo@digest 四种都认
+      const images = rows.map((r) => ({
+        ...r,
+        inUse:
+          usedSet.has(`${r.repository}:${r.tag}`) ||
+          usedSet.has(r.id) ||
+          usedSet.has(r.repository) ||
+          (r.digest !== '' && r.digest !== '<none>' && usedSet.has(`${r.repository}@${r.digest}`))
+      }))
+      return { ok: true, images }
+    } catch (err) {
+      return { ok: false, message: firstLine(outputsOf(err).stderr || textOf(err)) || textOf(err) }
+    }
+  }
+
+  /** docker system df：清理对话框的「各类能回收多少」 */
+  async imageDf(
+    parentSessionId: string
+  ): Promise<{ ok: boolean; rows?: import('../../shared/types').ImageDfRow[]; message?: string }> {
+    try {
+      let rows: ImageDfRow[]
+      if (isLocalContainerTarget(parentSessionId)) {
+        const runtime = this.runtimeByParent.get(parentSessionId)
+        if (!runtime) return { ok: false, message: '还没有探测到容器运行时，请先刷新容器列表' }
+        const res = await runLocal(runtime.binary, localImageDfArgs(), { timeoutMs: 20_000 })
+        rows = parseImageDf(res.stdout)
+      } else {
+        const client = this.getClient(parentSessionId)
+        if (!client) return { ok: false, message: '会话不存在或已断开' }
+        const res = await execCapture(client, imageDfCommand(), { timeoutMs: 25_000 })
+        rows = parseImageDf(res.stdout)
+      }
+      return { ok: true, rows }
+    } catch (err) {
+      return { ok: false, message: firstLine(outputsOf(err).stderr || textOf(err)) || textOf(err) }
+    }
+  }
+
+  /** 进行中的拉取：一台设备同时只许一个（界面有取消按钮，按了调这里的 cancel） */
+  private activePulls = new Map<string, () => void>()
+
+  /** 拉取镜像：输出逐行推给 owner（进度行含 \r 进度条，按行切发给渲染层自己挑最后一行画） */
+  async pullImage(
+    parentSessionId: string,
+    ref: string,
+    owner: WebContents
+  ): Promise<{ ok: boolean; canceled?: boolean; message?: string }> {
+    if (this.activePulls.has(parentSessionId)) {
+      return { ok: false, message: '已有一个拉取任务在进行' }
+    }
+    const send = (text: string): void => {
+      if (owner.isDestroyed()) return
+      for (const line of text.split(/\r|\n/)) {
+        if (line.trim()) owner.send(IpcChannels.containerImageEvent, parentSessionId, { op: 'pull', line })
+      }
+    }
+    try {
+      let handle: { done: Promise<{ code: number; canceled: boolean }>; cancel: () => void }
+      if (isLocalContainerTarget(parentSessionId)) {
+        const runtime = this.runtimeByParent.get(parentSessionId)
+        if (!runtime) return { ok: false, message: '还没有探测到容器运行时，请先刷新容器列表' }
+        handle = runLocalStream(runtime.binary, localImagePullArgs(ref), { timeoutMs: 30 * 60_000, onData: send })
+      } else {
+        const client = this.getClient(parentSessionId)
+        if (!client) return { ok: false, message: '会话不存在或已断开' }
+        handle = execStream(client, imagePullCommand(ref), { timeoutMs: 30 * 60_000, onData: send })
+      }
+      this.activePulls.set(parentSessionId, handle.cancel)
+      try {
+        const r = await handle.done
+        if (r.canceled) return { ok: false, canceled: true, message: '已取消' }
+        if (r.code !== 0) return { ok: false, message: `拉取失败（退出码 ${r.code}）` }
+      } finally {
+        this.activePulls.delete(parentSessionId)
+      }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, message: firstLine(textOf(err)) || textOf(err) }
+    }
+  }
+
+  /** 取消进行中的拉取（关通道/杀进程；没有在进行的就是空操作） */
+  cancelImagePull(parentSessionId: string): void {
+    this.activePulls.get(parentSessionId)?.()
+  }
+
+  /** 删除镜像（rmi；force 给「被已停容器引用还要删」的场景） */
+  async removeImages(parentSessionId: string, ids: string[], force: boolean): Promise<{ ok: boolean; message?: string }> {
+    try {
+      if (isLocalContainerTarget(parentSessionId)) {
+        const runtime = this.runtimeByParent.get(parentSessionId)
+        if (!runtime) return { ok: false, message: '还没有探测到容器运行时，请先刷新容器列表' }
+        await runLocal(runtime.binary, localImageRemoveArgs(ids, force), { timeoutMs: 60_000 })
+      } else {
+        const client = this.getClient(parentSessionId)
+        if (!client) return { ok: false, message: '会话不存在或已断开' }
+        await execCapture(client, imageRemoveCommand(ids, force), { timeoutMs: 60_000 })
+      }
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, message: firstLine(outputsOf(err).stderr || textOf(err)) || textOf(err) }
+    }
+  }
+
+  /** 清理镜像：all=false 只清悬空（<none>），all=true 连未被引用的也清（docker image prune [-a]） */
+  async pruneImages(parentSessionId: string, all: boolean): Promise<{ ok: boolean; message?: string }> {
+    try {
+      let out = ''
+      if (isLocalContainerTarget(parentSessionId)) {
+        const runtime = this.runtimeByParent.get(parentSessionId)
+        if (!runtime) return { ok: false, message: '还没有探测到容器运行时，请先刷新容器列表' }
+        const res = await runLocal(runtime.binary, localImagePruneArgs(all), { timeoutMs: 5 * 60_000 })
+        out = res.stdout
+      } else {
+        const client = this.getClient(parentSessionId)
+        if (!client) return { ok: false, message: '会话不存在或已断开' }
+        const res = await execCapture(client, imagePruneCommand(all), { timeoutMs: 5 * 60_000 })
+        out = res.stdout
+      }
+      // docker 末行是 "Total reclaimed space: 1.2GB"，拿去 toast 正好
+      const tail = out.split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? ''
+      return { ok: true, message: tail }
+    } catch (err) {
+      return { ok: false, message: firstLine(outputsOf(err).stderr || textOf(err)) || textOf(err) }
+    }
+  }
+
+  /** 清理构建缓存（docker builder prune -a -f；toast 同样吃末行 "Total reclaimed space"） */
+  async pruneBuildCache(parentSessionId: string): Promise<{ ok: boolean; message?: string }> {
+    try {
+      let out = ''
+      if (isLocalContainerTarget(parentSessionId)) {
+        const runtime = this.runtimeByParent.get(parentSessionId)
+        if (!runtime) return { ok: false, message: '还没有探测到容器运行时，请先刷新容器列表' }
+        const res = await runLocal(runtime.binary, localBuilderPruneArgs(), { timeoutMs: 5 * 60_000 })
+        out = res.stdout
+      } else {
+        const client = this.getClient(parentSessionId)
+        if (!client) return { ok: false, message: '会话不存在或已断开' }
+        const res = await execCapture(client, builderPruneCommand(), { timeoutMs: 5 * 60_000 })
+        out = res.stdout
+      }
+      const tail = out.split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? ''
+      return { ok: true, message: tail }
+    } catch (err) {
+      return { ok: false, message: firstLine(outputsOf(err).stderr || textOf(err)) || textOf(err) }
+    }
+  }
+
+  /** 导出到远端临时文件（随后走既有下载通道拿回本地，临时文件由渲染层下载完顺手 sftpDelete） */
+  async exportImage(parentSessionId: string, ref: string): Promise<{ ok: boolean; tmpPath?: string; message?: string }> {
+    if (isLocalContainerTarget(parentSessionId)) return { ok: false, message: '本机导出请走另存路径' }
+    const client = this.getClient(parentSessionId)
+    if (!client) return { ok: false, message: '会话不存在或已断开' }
+    const tmpPath = `/tmp/dox-img-${randomUUID().slice(0, 8)}.tar`
+    try {
+      await execCapture(client, imageSaveCommand(ref, tmpPath), { timeoutMs: 10 * 60_000 })
+      return { ok: true, tmpPath }
+    } catch (err) {
+      await execCapture(client, `/bin/sh -c 'rm -f "${tmpPath}"'`).catch(() => undefined)
+      return { ok: false, message: firstLine(outputsOf(err).stderr || textOf(err)) || textOf(err) }
+    }
+  }
+
+  /** 本机导出：docker save 直写用户选好的路径（没有临时文件这一跳） */  async exportImageLocal(ref: string, outPath: string): Promise<{ ok: boolean; message?: string }> {
+    const runtime = this.runtimeByParent.get(LOCAL_CONTAINER_TARGET)
+    if (!runtime) return { ok: false, message: '还没有探测到容器运行时，请先刷新容器列表' }
+    try {
+      await runLocal(runtime.binary, localImageSaveArgs(ref, outPath), { timeoutMs: 10 * 60_000 })
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, message: firstLine(outputsOf(err).stderr || textOf(err)) || textOf(err) }
+    }
   }
 }
 

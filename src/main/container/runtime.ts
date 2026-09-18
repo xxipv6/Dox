@@ -24,7 +24,7 @@ export function assertContainerTarget(name: string): string {
 }
 
 /** 探测脚本用这一行把 runtime 的绝对路径回传出来，与后面的列表区分开 */
-const MARKER = '@@DOX@@'
+export const MARKER = '@@DOX@@'
 
 /**
  * `docker ps --format` 里的字段分隔符。
@@ -144,6 +144,159 @@ export function controlCommand(binary: string, name: string, action: ContainerCo
 /** 本机生命周期参数（argv 直给，不经 shell） */
 export function localControlArgs(name: string, action: ContainerControlAction): string[] {
   return [CONTROL_VERBS[action], assertContainerTarget(name)]
+}
+
+/*
+ * ---- 镜像管理（列表/拉取/导出/清理）----
+ *
+ * 与列容器同一套双轨：远端走 `/bin/sh -c` 包裹（command -v 找二进制 + 补 PATH），
+ * 本机 argv 直给。镜像名/ref 只允许安全字符（仓库:标签@digest 的合法字符集），
+ * 拼进 shell 串前统一过闸。
+ */
+/** 镜像 ref 的合法字符（字母数字 . _ - / : @），堵 shell 注入 */
+const IMAGE_REF_RE = /^[a-zA-Z0-9][a-zA-Z0-9._\/:@-]{0,255}$/
+export function assertImageRef(ref: string): string {
+  const t = ref.trim()
+  if (!IMAGE_REF_RE.test(t)) throw new Error(`非法镜像引用：${ref}`)
+  return t
+}
+
+/** 镜像列表的 --format（真 tab 分隔，与 FORMAT_FULL 同约定；仓库:标签 可能带 <none>） */
+const IMAGES_FORMAT = `{{.Repository}}${SEP}{{.Tag}}${SEP}{{.ID}}${SEP}{{.Digest}}${SEP}{{.Size}}${SEP}{{.CreatedSince}}`
+
+export function imagesCommand(): string {
+  return (
+    `/bin/sh -c 'PATH="$PATH:/usr/local/sbin:/usr/local/bin:/snap/bin"; ` +
+    `d=$(command -v docker 2>/dev/null) || d=$(command -v podman 2>/dev/null) || true; ` +
+    `if [ -z "$d" ]; then echo "${MARKER} none"; exit 0; fi; ` +
+    `echo "${MARKER} $d"; ` +
+    `exec "$d" images --format "${IMAGES_FORMAT}"'`
+  )
+}
+
+export function localImagesArgs(): string[] {
+  return ['images', '--format', IMAGES_FORMAT]
+}
+
+/** 远端 shell 包裹：command -v 找 docker/podman（补 PATH）后 exec 给定命令尾 */
+function shWrapDocker(execTail: string): string {
+  return (
+    `/bin/sh -c 'PATH="$PATH:/usr/local/sbin:/usr/local/bin:/snap/bin"; ` +
+    `d=$(command -v docker 2>/dev/null) || d=$(command -v podman 2>/dev/null) || exit 127; ` +
+    `exec "$d" ${execTail}'`
+  )
+}
+
+/** 容器实际引用的镜像（算「未使用」用）：ps -a 的 Image 列，可能是 repo:tag 也可能是 ID 或 repo@digest */
+export function usedImagesCommand(): string {
+  // 模板无空格不需要引号（本文件规矩：/bin/sh -c 单引号包裹内不再出现单引号）
+  return shWrapDocker(`ps -a --format {{.Image}}`)
+}
+
+export function localUsedImagesArgs(): string[] {
+  return ['ps', '-a', '--format', '{{.Image}}']
+}
+
+/** docker system df（各类型的总量/可回收，清理对话框的「能省多少」） */
+const DF_FORMAT = `{{.Type}}${SEP}{{.TotalCount}}${SEP}{{.Size}}${SEP}{{.Reclaimable}}`
+
+export function imageDfCommand(): string {
+  return shWrapDocker(`system df --format "${DF_FORMAT}"`)
+}
+
+export function localImageDfArgs(): string[] {
+  return ['system', 'df', '--format', DF_FORMAT]
+}
+
+export function imagePullCommand(ref: string): string {
+  return shWrapDocker(`pull ${assertImageRef(ref)}`)
+}
+
+export function localImagePullArgs(ref: string): string[] {
+  return ['pull', assertImageRef(ref)]
+}
+
+export function imageRemoveCommand(ids: string[], force: boolean): string {
+  // 与 assertImageRef 同一白名单（覆盖 repo:tag、短 id、repo@digest 三种形态）
+  const safe = ids.map((i) => assertImageRef(i))
+  return shWrapDocker(`rmi ${force ? '-f ' : ''}${safe.join(' ')}`)
+}
+
+export function localImageRemoveArgs(ids: string[], force: boolean): string[] {
+  return ['rmi', ...(force ? ['-f'] : []), ...ids]
+}
+
+export function imagePruneCommand(all: boolean): string {
+  return shWrapDocker(`image prune -f ${all ? '-a' : ''}`)
+}
+
+export function localImagePruneArgs(all: boolean): string[] {
+  return ['image', 'prune', '-f', ...(all ? ['-a'] : [])]
+}
+
+/** 构建缓存清理（builder prune；-a = 全部，不只是 dangling 的缓存记录） */
+export function builderPruneCommand(): string {
+  return shWrapDocker(`builder prune -a -f`)
+}
+
+export function localBuilderPruneArgs(): string[] {
+  return ['builder', 'prune', '-a', '-f']
+}
+
+/** 导出：远端先 save 到临时文件（随后走既有下载通道拿回本地），本机直接 save 到目标路径 */
+export function imageSaveCommand(ref: string, outPath: string): string {
+  return shWrapDocker(`save -o "${outPath.replace(/"/g, '')}" ${assertImageRef(ref)}`)
+}
+
+export function localImageSaveArgs(ref: string, outPath: string): string[] {
+  return ['save', '-o', outPath, assertImageRef(ref)]
+}
+
+/** 镜像列表行（`docker images --format` 的 tab 分隔输出） */
+export interface ImageRow {
+  repository: string
+  tag: string
+  id: string
+  /** sha256:… 或 <none>（按 digest 拉取/引用时的比对键） */
+  digest: string
+  size: string
+  createdSince: string
+}
+
+/** 与 parseRow 同款兜底：某些 runtime 不把 --format 里的转义还原，整行只有字面 \t 时改按字面切 */
+function splitFields(line: string, want: number): string[] {
+  let fields = line.split(SEP)
+  if (fields.length < want && line.includes('\\t')) fields = line.split('\\t')
+  return fields
+}
+
+/** 解析 images 输出（跳过 MARKER 探测行；<none> 原样保留，展示层决定怎么画） */
+export function parseImages(stdout: string): ImageRow[] {
+  const out: ImageRow[] = []
+  for (const line of stdout.split('\n')) {
+    if (!line.trim() || line.startsWith(MARKER)) continue
+    const [repository = '', tag = '', id = '', digest = '', size = '', ...rest] = splitFields(line, 6)
+    out.push({ repository, tag, id, digest, size, createdSince: rest.join('\t') })
+  }
+  return out
+}
+
+/** system df 行（原始字符串就行 —— docker 给的就是人读尺寸，展示层不再换算） */
+export interface ImageDfRow {
+  type: string
+  count: string
+  size: string
+  reclaimable: string
+}
+
+export function parseImageDf(stdout: string): ImageDfRow[] {
+  const out: ImageDfRow[] = []
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue
+    const [type = '', count = '', size = '', ...rest] = splitFields(line, 4)
+    out.push({ type, count, size, reclaimable: rest.join('\t') })
+  }
+  return out
 }
 
 /** 依次尝试的候选 shell；容器里多半只有 sh，distroless 类一个都没有 */

@@ -50,11 +50,19 @@ const form = reactive({
   password: '',
   privateKeyPath: '',
   passphrase: '',
-  jumpHostId: ''
+  jumpHostId: '',
+  group: ''
 })
 
 const isEdit = computed(() => !!props.editing)
 const isJumpTarget = (s: SavedSession): boolean => s.id === props.editing?.id
+
+/** 已有分组名（datalist 提示用）：分组由设备反推，distinct 值即全部组 */
+const existingGroups = computed(() => {
+  const names = new Set<string>()
+  for (const s of store.savedSessions) if (s.group) names.add(s.group)
+  return [...names]
+})
 
 watch(
   () => [props.visible, props.editing, props.prefill] as const,
@@ -72,6 +80,7 @@ watch(
     form.privateKeyPath = e?.privateKeyPath ?? ''
     form.passphrase = ''
     form.jumpHostId = e?.jumpHostId ?? ''
+    form.group = e?.group ?? ''
   },
   { immediate: true }
 )
@@ -96,7 +105,8 @@ function payload(): Parameters<typeof store.saveSession>[0] {
     password: form.password || undefined,
     privateKeyPath: form.privateKeyPath.trim() || undefined,
     passphrase: form.passphrase || undefined,
-    jumpHostId: form.jumpHostId || undefined
+    jumpHostId: form.jumpHostId || undefined,
+    group: form.group.trim() || undefined
   }
 }
 
@@ -151,6 +161,12 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
         <div class="grid">
           <label>名称</label>
           <input v-model="form.name" placeholder="留空则用 用户名@主机" />
+
+          <label>分组</label>
+          <input v-model="form.group" list="dox-device-groups" placeholder="留空则不分组" />
+          <datalist id="dox-device-groups">
+            <option v-for="g in existingGroups" :key="g" :value="g" />
+          </datalist>
 
           <label>主机地址</label>
           <div class="row">

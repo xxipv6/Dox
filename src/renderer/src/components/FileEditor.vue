@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { Compartment, EditorState, StateEffect, type Extension } from '@codemirror/state'
 import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view'
+import { indentLess, indentMore, insertTab } from '@codemirror/commands'
 import { basicSetup } from 'codemirror'
 import { useEditorStore, type OpenFile } from '../stores/editor'
 import { useSettingsStore } from '../stores/settings'
@@ -274,6 +275,17 @@ function buildExtensions(path: string): Extension[] {
     EditorView.lineWrapping,
     // 最高优先级：否则会被 basicSetup 里的默认键位吃掉
     keymap.of([
+      /*
+       * Tab 语义对齐 VS Code（官方 indentWithTab 是无选区也整行缩进，不一样）：
+       * 无选区 → 在光标处插入缩进字符；有选区 → 触及的行整批缩进。
+       * Shift+Tab 一律反缩进当前行。
+       */
+      {
+        key: 'Tab',
+        preventDefault: true,
+        run: (v) => (v.state.selection.main.empty ? insertTab(v) : indentMore(v)),
+        shift: indentLess
+      },
       {
         key: 'Mod-s',
         preventDefault: true,
@@ -472,6 +484,7 @@ watch(savedAt, () => {
 function dirty(file: OpenFile | null | undefined): boolean {
   return !!file && store.isDirty(file)
 }
+
 </script>
 
 <template>

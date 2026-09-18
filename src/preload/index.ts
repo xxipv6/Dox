@@ -11,6 +11,7 @@ import type {
   DroppedFile,
   ForwardRule,
   HostKeyVerifyRequest,
+  ImagePullEvent,
   SaveSessionInput,
   SearchEvent,
   SearchStartParams,
@@ -102,6 +103,30 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.containerIp, parentSessionId, containerName),
   containerListeners: (parentSessionId, containerName) =>
     ipcRenderer.invoke(IpcChannels.containerListeners, parentSessionId, containerName),
+  containerImages: (parentSessionId) =>
+    ipcRenderer.invoke(IpcChannels.containerImages, parentSessionId),
+  containerImageDf: (parentSessionId) =>
+    ipcRenderer.invoke(IpcChannels.containerImageDf, parentSessionId),
+  containerImagePull: (parentSessionId, ref) =>
+    ipcRenderer.invoke(IpcChannels.containerImagePull, parentSessionId, ref),
+  containerImagePullCancel: (parentSessionId) =>
+    ipcRenderer.invoke(IpcChannels.containerImagePullCancel, parentSessionId),
+  containerImageRemove: (parentSessionId, ids, force) =>
+    ipcRenderer.invoke(IpcChannels.containerImageRemove, parentSessionId, ids, force),
+  containerImagePrune: (parentSessionId, all) =>
+    ipcRenderer.invoke(IpcChannels.containerImagePrune, parentSessionId, all),
+  containerBuilderPrune: (parentSessionId) =>
+    ipcRenderer.invoke(IpcChannels.containerBuilderPrune, parentSessionId),
+  containerImageSave: (parentSessionId, ref) =>
+    ipcRenderer.invoke(IpcChannels.containerImageSave, parentSessionId, ref),
+  containerImageSaveLocal: (ref, outPath) =>
+    ipcRenderer.invoke(IpcChannels.containerImageSaveLocal, ref, outPath),
+  onContainerImageEvent: (cb) => {
+    const listener = (_e: unknown, parentSessionId: string, ev: ImagePullEvent): void =>
+      cb(parentSessionId, ev)
+    ipcRenderer.on(IpcChannels.containerImageEvent, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.containerImageEvent, listener)
+  },
 
   // ---- 传输队列 ----
   pickUpload: (sessionId, remoteDir, containerName) =>
@@ -114,6 +139,10 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.transferDownloadDir, sessionId, remotePath, containerName),
   downloadMany: (sessionId, items, containerName) =>
     ipcRenderer.invoke(IpcChannels.transferDownloadMany, sessionId, items, containerName),
+  transferDownloadTo: (sessionId, items, localDir) =>
+    ipcRenderer.invoke(IpcChannels.transferDownloadTo, sessionId, items, localDir),
+  transferServerCopy: (srcSessionId, paths, dstSessionId, dstDir, allowP2p) =>
+    ipcRenderer.invoke(IpcChannels.transferServerCopy, srcSessionId, paths, dstSessionId, dstDir, allowP2p),
   sftpArchive: (sessionId, paths, containerName) =>
     ipcRenderer.invoke(IpcChannels.sftpArchive, sessionId, paths, containerName),
   remoteListeners: (sessionId) =>
@@ -144,6 +173,23 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.agentFsHold, sessionId, containerName),
   agentFsRelease: (sessionId, containerName) =>
     ipcRenderer.invoke(IpcChannels.agentFsRelease, sessionId, containerName),
+  agentWatchFs: (sessionId, containerName, dirs) =>
+    ipcRenderer.invoke(IpcChannels.agentWatchFs, sessionId, containerName, dirs),
+  agentUnwatchFs: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentUnwatchFs, sessionId, containerName),
+  agentUpdateFsWatch: (sessionId, containerName, dirs) =>
+    ipcRenderer.invoke(IpcChannels.agentUpdateFsWatch, sessionId, containerName, dirs),
+  localFsWatch: (sessionId, dirs) => ipcRenderer.invoke(IpcChannels.localFsWatch, sessionId, dirs),
+  onAgentFsEvent: (cb) => {
+    const listener = (
+      _e: IpcRendererEvent,
+      sessionId: string,
+      containerName: string | null,
+      data: { event: string; dirs?: string[] }
+    ): void => cb(sessionId, containerName, data)
+    ipcRenderer.on(IpcChannels.agentFsEvent, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.agentFsEvent, listener)
+  },
   agentCall: (sessionId, containerName, method, params) =>
     ipcRenderer.invoke(IpcChannels.agentCall, sessionId, containerName, method, params),
   procList: (sessionId, containerName) =>

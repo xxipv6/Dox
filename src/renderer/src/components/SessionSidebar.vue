@@ -11,7 +11,9 @@ import ForwardPanel from './ForwardPanel.vue'
 import SnippetPanel from './SnippetPanel.vue'
 import ContainerPanel from './ContainerPanel.vue'
 import AgentPanel from './AgentPanel.vue'
+import DockerManager from './DockerManager.vue'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
+import { vFocus } from '../directives/focus'
 import { errorText } from '../utils/errors'
 import type { ContainerInfo, SavedSession } from '@shared/types'
 import { pushToast } from '../stores/toast'
@@ -42,6 +44,230 @@ const filteredSessions = computed(() => {
     [s.name, s.host, s.username, String(s.port)].some((v) => v.toLowerCase().includes(q))
   )
 })
+
+// ---- 设备分组（group 是设备上的字符串标签；组实体 = distinct 值）----
+
+/** 侧栏行：组头与设备行混排，设备块只有一份模板 */
+type DeviceRow = { kind: 'group'; name: string; count: number } | { kind: 'device'; s: SavedSession }
+
+/** 折叠状态持久化（localStorage）：刷新/重启后分组开合维持原样 */
+const COLLAPSED_KEY = 'dox-collapsed-groups'
+const collapsedGroups = ref<Set<string>>(new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]') as string[]))
+
+function persistCollapsed(): void {
+  localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedGroups.value]))
+}
+
+function toggleGroup(name: string): void {
+  const next = new Set(collapsedGroups.value)
+  if (next.has(name)) next.delete(name)
+  else next.add(name)
+  collapsedGroups.value = next
+  persistCollapsed()
+}
+
+/**
+ * 用户显式创建的分组（含空分组）。
+ *
+ * 分组实体本来是设备上 group 字段的 distinct 值 —— 那「空分组」就不存在，
+ * 而 ＋分组 按钮建出来的恰恰先是空的，只能靠这张显式名单记住它。
+ * 一旦塞进设备，派生模型会接管；名字留在这里也无害（union 去重）。
+ */
+const GROUPS_KEY = 'dox-groups'
+const knownGroups = ref<string[]>(JSON.parse(localStorage.getItem(GROUPS_KEY) ?? '[]') as string[])
+
+function persistKnownGroups(): void {
+  localStorage.setItem(GROUPS_KEY, JSON.stringify(knownGroups.value))
+}
+
+/** 全部分组名：显式创建的按创建顺序在前，只在设备上出现的补在后面 */
+const groupNames = computed<string[]>(() => {
+  const names = [...knownGroups.value]
+  for (const s of store.savedSessions) {
+    if (s.group && !names.includes(s.group)) names.push(s.group)
+  }
+  return names
+})
+
+/** 未分组的在前（老用户的平铺列表位置不动），分组跟在后面；过滤时不出空组 */
+const displayRows = computed<DeviceRow[]>(() => {
+  const rows: DeviceRow[] = []
+  const byGroup = new Map<string, SavedSession[]>()
+  for (const name of groupNames.value) byGroup.set(name, [])
+  const filtering = !!filter.value.trim()
+  for (const s of filteredSessions.value) {
+    if (s.group) byGroup.get(s.group)?.push(s)
+    else rows.push({ kind: 'device', s })
+  }
+  for (const [name, list] of byGroup) {
+    if (filtering && !list.length) continue
+    rows.push({ kind: 'group', name, count: list.length })
+    if (!collapsedGroups.value.has(name)) {
+      for (const s of list) rows.push({ kind: 'device', s })
+    }
+  }
+  return rows
+})
+
+/** ＋分组：在分组区末尾就地出输入框，空组也立得住（写进 knownGroups） */
+const creatingGroup = ref(false)
+const createGroupValue = ref('')
+
+function startCreateGroup(): void {
+  createGroupValue.value = ''
+  creatingGroup.value = true
+}
+
+function submitCreateGroup(): void {
+  const name = createGroupValue.value.trim()
+  creatingGroup.value = false
+  if (!name) return
+  if (!knownGroups.value.includes(name)) {
+    knownGroups.value = [...knownGroups.value, name]
+    persistKnownGroups()
+  }
+  // 已存在也当作成功：把它展开，让用户看到「组在这儿」
+  if (collapsedGroups.value.has(name)) {
+    const next = new Set(collapsedGroups.value)
+    next.delete(name)
+    collapsedGroups.value = next
+    persistCollapsed()
+  }
+}
+
+/** 分组重命名：组头名字就地变输入框（与 ProjectTree 重命名同一模式） */
+const renamingGroup = ref<string | null>(null)
+const renameValue = ref('')
+/** 「新分组…」：在哪台设备行下面出输入框（提交即把该设备移进去） */
+const newGroupFor = ref<string | null>(null)
+const newGroupValue = ref('')
+
+/** Enter/blur 提交、Esc 取消：editing 态先置空，输入框卸载时 blur 再进来也是空转 */
+function submitGroupRename(): void {
+  const old = renamingGroup.value
+  renamingGroup.value = null
+  const name = renameValue.value.trim()
+  if (!old || !name || name === old) return
+  // 显式分组名单同步改名 —— 空分组只有这一处记录，store 那边没有设备可改。
+  // 新名已存在 = 合并：旧名从名单里去掉，设备由 store.renameGroup 全部迁过去
+  const idx = knownGroups.value.indexOf(old)
+  if (idx >= 0) {
+    const next = knownGroups.value.filter((g) => g !== old && g !== name)
+    next.splice(Math.min(idx, next.length), 0, name)
+    knownGroups.value = next
+    persistKnownGroups()
+  }
+  // 折叠态跟着名字走，不然改完名组会突然展开/消失
+  if (collapsedGroups.value.has(old)) {
+    const next = new Set(collapsedGroups.value)
+    next.delete(old)
+    next.add(name)
+    collapsedGroups.value = next
+    persistCollapsed()
+  }
+  void store.renameGroup(old, name)
+}
+
+function submitNewGroup(): void {
+  const savedId = newGroupFor.value
+  newGroupFor.value = null
+  const name = newGroupValue.value.trim()
+  if (!savedId || !name) return
+  const saved = store.savedSessions.find((s) => s.id === savedId)
+  if (saved) void store.moveToGroup(saved, name)
+}
+
+// ---- 拖拽归组 ----
+/*
+ * 手势口径（文件管理器惯例）：
+ *   拖到组头上          → 进这个组
+ *   拖到某台设备上      → 跟它同组（它没组 = 移出分组；两台都没组 = 现场建组）
+ * dataTransfer.types 在 dragover 阶段可读（data 不可读），够用来做落点高亮。
+ */
+const DND_MIME = 'application/x-dox-device'
+const dragDeviceId = ref<string | null>(null)
+/** 悬停落点：`g:组名` 或设备 id（高亮用） */
+const dropTarget = ref<string | null>(null)
+
+function dndOurs(e: DragEvent): boolean {
+  return !!e.dataTransfer?.types.includes(DND_MIME)
+}
+
+function onDeviceDragStart(e: DragEvent, s: SavedSession): void {
+  dragDeviceId.value = s.id
+  e.dataTransfer?.setData(DND_MIME, s.id)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+
+function onDeviceDragEnd(): void {
+  dragDeviceId.value = null
+  dropTarget.value = null
+}
+
+function onGroupDragOver(e: DragEvent, name: string): void {
+  if (!dndOurs(e)) return
+  e.preventDefault()
+  dropTarget.value = `g:${name}`
+}
+
+function onDeviceDragOver(e: DragEvent, s: SavedSession): void {
+  if (!dndOurs(e) || s.id === dragDeviceId.value) return
+  e.preventDefault()
+  dropTarget.value = s.id
+}
+
+/** dragleave 在子元素间乱冒：relatedTarget 还在行内就不算离开 */
+function onRowDragLeave(e: DragEvent, key: string): void {
+  if (
+    e.relatedTarget instanceof Node &&
+    e.currentTarget instanceof HTMLElement &&
+    e.currentTarget.contains(e.relatedTarget)
+  ) {
+    return
+  }
+  if (dropTarget.value === key) dropTarget.value = null
+}
+
+function draggedSession(): SavedSession | undefined {
+  return store.savedSessions.find((s) => s.id === dragDeviceId.value)
+}
+
+async function onDropOnGroup(e: DragEvent, name: string): Promise<void> {
+  if (!dndOurs(e)) return
+  e.preventDefault()
+  const s = draggedSession()
+  onDeviceDragEnd()
+  if (s && s.group !== name) await store.moveToGroup(s, name)
+}
+
+async function onDropOnDevice(e: DragEvent, target: SavedSession): Promise<void> {
+  if (!dndOurs(e)) return
+  e.preventDefault()
+  const s = draggedSession()
+  onDeviceDragEnd()
+  if (!s || s.id === target.id) return
+  if (target.group) {
+    if (s.group !== target.group) await store.moveToGroup(s, target.group)
+    return
+  }
+  if (s.group) {
+    await store.moveToGroup(s, undefined)
+    return
+  }
+  // 两台都没组：拖到一起 = 现场建组（两台都进），名字马上可改
+  const name = uniqueGroupName()
+  await store.moveToGroup(target, name)
+  await store.moveToGroup(s, name)
+  renameValue.value = name
+  renamingGroup.value = name
+}
+
+function uniqueGroupName(): string {
+  let name = '新分组'
+  let i = 2
+  while (groupNames.value.includes(name)) name = `新分组 ${i++}`
+  return name
+}
 
 function isDeviceActive(session: SavedSession): boolean {
   return store.tabs.some((tab) => tab.kind === 'ssh' && tab.savedSessionId === session.id)
@@ -93,6 +319,94 @@ function openEdit(s: SavedSession): void {
 async function remove(s: SavedSession): Promise<void> {
   if (!(await useConfirmStore().ask(`删除设备「${s.name}」？`))) return
   await store.deleteSaved(s.id)
+}
+
+// ---- 设备行右键菜单：容器管理抽屉的入口 ----
+
+const deviceMenu = ref<{ x: number; y: number; saved: SavedSession } | null>(null)
+/** 容器管理抽屉开着哪台设备（null = 没开） */
+const dockerManagerFor = ref<SavedSession | null>(null)
+
+const deviceMenuItems = computed<ContextMenuItem[]>(() => {
+  const s = deviceMenu.value?.saved
+  if (!s) return []
+  const items: ContextMenuItem[] = [
+    { id: 'connect', label: '连接', icon: 'play' },
+    { id: 'docker', label: '容器管理', icon: 'box' },
+    { id: 'edit', label: '编辑', icon: 'pencil' },
+    { separator: true, id: 'sep-group', label: '' }
+  ]
+  // 移动到分组：已有分组逐个列出（自己所在的组除外），加「新分组…」入口
+  for (const g of groupNames.value) {
+    if (g !== s.group) items.push({ id: `move:${g}`, label: `移动到「${g}」`, icon: 'folder' })
+  }
+  items.push({ id: 'move:new', label: '新分组…', icon: 'folder-plus' })
+  if (s.group) items.push({ id: 'move:out', label: '移出分组', icon: 'x' })
+  items.push(
+    { separator: true, id: 'sep-danger', label: '' },
+    { id: 'remove', label: '删除', icon: 'trash', danger: true }
+  )
+  return items
+})
+
+function onDeviceMenu(e: MouseEvent, s: SavedSession): void {
+  deviceMenu.value = { x: e.clientX, y: e.clientY, saved: s }
+}
+
+async function onDeviceMenuSelect(id: string): Promise<void> {
+  const s = deviceMenu.value?.saved
+  deviceMenu.value = null
+  if (!s) return
+  if (id.startsWith('move:')) {
+    const g = id.slice(5)
+    // 「新分组…」不落库：分组由设备反推，空组不存在 —— 先出输入框，填了名才算数
+    if (g === 'new') {
+      newGroupValue.value = ''
+      newGroupFor.value = s.id
+    }
+    else if (g === 'out') await store.moveToGroup(s, undefined)
+    else await store.moveToGroup(s, g)
+    return
+  }
+  if (id === 'connect') await store.connectSaved(s)
+  else if (id === 'docker') dockerManagerFor.value = s
+  else if (id === 'edit') openEdit(s)
+  else if (id === 'remove') await remove(s)
+}
+
+// ---- 分组头右键菜单 ----
+
+const groupMenu = ref<{ x: number; y: number; name: string } | null>(null)
+
+const groupMenuItems = computed<ContextMenuItem[]>(() => [
+  { id: 'rename', label: '重命名分组', icon: 'pencil' },
+  { id: 'ungroup', label: '解散分组', icon: 'x' }
+])
+
+function onGroupMenu(e: MouseEvent, name: string): void {
+  groupMenu.value = { x: e.clientX, y: e.clientY, name }
+}
+
+async function onGroupMenuSelect(id: string): Promise<void> {
+  const name = groupMenu.value?.name
+  groupMenu.value = null
+  if (!name) return
+  if (id === 'rename') {
+    renameValue.value = name
+    renamingGroup.value = name
+  }
+  // 解散只是把设备移回未分组，设备本身不删 —— 可逆，不劳确认弹窗
+  else if (id === 'ungroup') {
+    knownGroups.value = knownGroups.value.filter((g) => g !== name)
+    persistKnownGroups()
+    if (collapsedGroups.value.has(name)) {
+      const next = new Set(collapsedGroups.value)
+      next.delete(name)
+      collapsedGroups.value = next
+      persistCollapsed()
+    }
+    await store.ungroup(name)
+  }
 }
 
 // ---- 设备行展开的容器列表：右键菜单（与 ContainerPanel 同一套动作）----
@@ -235,6 +549,9 @@ async function onCtrMenuSelect(id: string): Promise<void> {
       -->
       <SidebarSection title="设备" icon="server" :open="true">
         <template #actions>
+          <button class="icon-btn" title="新建分组（把设备拖进来归组）" @click="startCreateGroup">
+            <Icon name="folder-plus" :size="15" />
+          </button>
           <button class="icon-btn" title="添加设备" @click="openAdd">
             <Icon name="plus" :size="15" />
           </button>
@@ -254,16 +571,54 @@ async function onCtrMenuSelect(id: string): Promise<void> {
           <div v-else-if="!filteredSessions.length" class="empty-hint">
             没有匹配「{{ filter.trim() }}」的设备
           </div>
-          <div
-            v-for="s in filteredSessions"
-            :key="s.id"
-            class="device-block"
-          >
+          <template v-for="row in displayRows" :key="row.kind === 'group' ? `g:${row.name}` : row.s.id">
+            <!-- 分组头：点击折叠/展开（状态落 localStorage），右键重命名/解散；
+                 也是拖拽落点 —— 设备拖上来即进组 -->
+            <div
+              v-if="row.kind === 'group'"
+              class="group-head"
+              :class="{ 'drop-target': dropTarget === `g:${row.name}` }"
+              @click="toggleGroup(row.name)"
+              @contextmenu.prevent="onGroupMenu($event, row.name)"
+              @dragover="onGroupDragOver($event, row.name)"
+              @dragleave="onRowDragLeave($event, `g:${row.name}`)"
+              @drop="onDropOnGroup($event, row.name)"
+            >
+              <span class="group-chevron" :class="{ open: !collapsedGroups.has(row.name) }">
+                <Icon name="chevron-right" :size="12" />
+              </span>
+              <input
+                v-if="renamingGroup === row.name"
+                v-model="renameValue"
+                v-focus
+                class="rename-input"
+                @keydown.enter="!$event.isComposing && submitGroupRename()"
+                @keyup.esc="renamingGroup = null"
+                @blur="submitGroupRename()"
+                @click.stop
+              />
+              <template v-else>
+                <span class="group-name">{{ row.name }}</span>
+                <span class="group-count">{{ row.count }}</span>
+              </template>
+            </div>
+            <div
+              v-else
+              class="device-block"
+              :class="{ 'in-group': !!row.s.group }"
+            >
             <div
               class="device"
-              :class="{ active: isDeviceActive(s) }"
-              :title="`${s.username}@${s.host}:${s.port} — 双击连接`"
-              @dblclick="store.connectSaved(s)"
+              :class="{ active: isDeviceActive(row.s), 'drop-target': dropTarget === row.s.id }"
+              :title="`${row.s.username}@${row.s.host}:${row.s.port} — 双击连接 · 可拖拽归组`"
+              draggable="true"
+              @dragstart="onDeviceDragStart($event, row.s)"
+              @dragend="onDeviceDragEnd"
+              @dragover="onDeviceDragOver($event, row.s)"
+              @dragleave="onRowDragLeave($event, row.s.id)"
+              @drop="onDropOnDevice($event, row.s)"
+              @dblclick="store.connectSaved(row.s)"
+              @contextmenu.prevent="onDeviceMenu($event, row.s)"
             >
               <!--
                 展开容器列表（直连容器，Dev Containers 式）：箭头单独一个按钮，
@@ -271,9 +626,9 @@ async function onCtrMenuSelect(id: string): Promise<void> {
               -->
               <button
                 class="icon-btn device-expand"
-                :class="{ open: store.expandedDevices.has(s.id) }"
-                :title="store.expandedDevices.has(s.id) ? '收起容器列表' : '列出容器（直连进容器）'"
-                @click.stop="store.toggleDeviceContainers(s)"
+                :class="{ open: store.expandedDevices.has(row.s.id) }"
+                :title="store.expandedDevices.has(row.s.id) ? '收起容器列表' : '列出容器（直连进容器）'"
+                @click.stop="store.toggleDeviceContainers(row.s)"
                 @dblclick.stop
               >
                 <Icon name="chevron-right" :size="12" />
@@ -281,61 +636,75 @@ async function onCtrMenuSelect(id: string): Promise<void> {
               <Icon class="device-icon" name="server" :size="15" />
               <span class="device-info">
                 <span class="device-name">
-                  <span v-if="s.jumpHostId" class="jump-badge" title="经跳板机连接">
+                  <span v-if="row.s.jumpHostId" class="jump-badge" title="经跳板机连接">
                     <Icon name="link" :size="12" />
-                  </span>{{ s.name }}
+                  </span>{{ row.s.name }}
                 </span>
-                <span class="device-host">{{ s.username }}@{{ s.host }}:{{ s.port }}</span>
+                <span class="device-host">{{ row.s.username }}@{{ row.s.host }}:{{ row.s.port }}</span>
               </span>
               <!-- 同时拦截 click 与 dblclick：只 stop click 的话，连点两下 × 会
                    触发整行的 dblclick（去连接），看起来就像「删除没反应」 -->
               <span class="device-actions" @dblclick.stop>
-                <button class="icon-btn" title="连接" @click.stop="store.connectSaved(s)">
+                <button class="icon-btn" title="连接" @click.stop="store.connectSaved(row.s)">
                   <Icon name="play" />
                 </button>
-                <button class="icon-btn" title="编辑" @click.stop="openEdit(s)">
+                <button class="icon-btn" title="编辑" @click.stop="openEdit(row.s)">
                   <Icon name="pencil" />
                 </button>
-                <button class="icon-btn danger" title="删除" @click.stop="remove(s)">
+                <button class="icon-btn danger" title="删除" @click.stop="remove(row.s)">
                   <Icon name="x" />
                 </button>
               </span>
             </div>
 
+            <!-- 「新分组…」的就地输入框：挂在发起设备行下面，填名即把该设备移进去 -->
+            <div v-if="newGroupFor === row.s.id" class="group-new-row">
+              <input
+                v-model="newGroupValue"
+                v-focus
+                class="rename-input"
+                placeholder="分组名"
+                spellcheck="false"
+                @keydown.enter="!$event.isComposing && submitNewGroup()"
+                @keyup.esc="newGroupFor = null"
+                @blur="submitNewGroup()"
+              />
+            </div>
+
             <!-- 直连容器：不开宿主机终端标签，点容器名直接进（后台传输会话承载） -->
-            <div v-if="store.expandedDevices.has(s.id)" class="device-containers">
+            <div v-if="store.expandedDevices.has(row.s.id)" class="device-containers">
               <div class="containers-head">
                 <span class="containers-title">容器</span>
                 <button
                   class="icon-btn"
-                  :class="{ dim: store.deviceContainers[s.id]?.status === 'loading' }"
+                  :class="{ dim: store.deviceContainers[row.s.id]?.status === 'loading' }"
                   title="刷新容器列表"
-                  @click="store.loadDeviceContainers(s.id)"
+                  @click="store.loadDeviceContainers(row.s.id)"
                 >
                   <Icon name="refresh" :size="12" />
                 </button>
               </div>
-              <div v-if="store.deviceContainers[s.id]?.status === 'loading'" class="container-hint">
+              <div v-if="store.deviceContainers[row.s.id]?.status === 'loading'" class="container-hint">
                 <Spinner text="正在列出容器…" />
               </div>
-              <div v-else-if="store.deviceContainers[s.id]?.status === 'error'" class="container-hint">
-                <span class="container-error">{{ store.deviceContainers[s.id].error }}</span>
-                <button class="container-retry retry" type="button" @click="store.loadDeviceContainers(s.id)">
+              <div v-else-if="store.deviceContainers[row.s.id]?.status === 'error'" class="container-hint">
+                <span class="container-error">{{ store.deviceContainers[row.s.id].error }}</span>
+                <button class="container-retry retry" type="button" @click="store.loadDeviceContainers(row.s.id)">
                   重试
                 </button>
               </div>
               <template v-else>
-                <div v-if="!store.deviceContainers[s.id]?.list.length" class="container-hint">
+                <div v-if="!store.deviceContainers[row.s.id]?.list.length" class="container-hint">
                   这台设备上没有容器
                 </div>
                 <div
-                  v-for="c in store.deviceContainers[s.id]?.list ?? []"
+                  v-for="c in store.deviceContainers[row.s.id]?.list ?? []"
                   :key="c.id"
                   class="device-container"
                   :class="{ paused: c.state === 'paused' }"
                   :title="`${c.name}\n${c.image}\n${c.status}\n单击进入 · 右键更多操作`"
-                  @click="c.state === 'running' && store.enterContainerDirect(s, c)"
-                  @contextmenu.prevent="onCtrRowMenu($event, s, c)"
+                  @click="c.state === 'running' && store.enterContainerDirect(row.s, c)"
+                  @contextmenu.prevent="onCtrRowMenu($event, row.s, c)"
                 >
                   <span class="dot" :class="[c.state, c.health]"></span>
                   <span class="container-name">{{ c.name }}</span>
@@ -344,6 +713,24 @@ async function onCtrMenuSelect(id: string): Promise<void> {
                 </div>
               </template>
             </div>
+          </div>
+          </template>
+          <!-- ＋分组 的就地输入框：跟在分组区末尾，建出来就是个（可以为空的）组 -->
+          <div v-if="creatingGroup" class="group-head">
+            <span class="group-chevron open">
+              <Icon name="chevron-right" :size="12" />
+            </span>
+            <input
+              v-model="createGroupValue"
+              v-focus
+              class="rename-input"
+              placeholder="分组名"
+              spellcheck="false"
+              @keydown.enter="!$event.isComposing && submitCreateGroup()"
+              @keyup.esc="creatingGroup = false"
+              @blur="submitCreateGroup()"
+              @click.stop
+            />
           </div>
         </div>
       </SidebarSection>
@@ -371,6 +758,30 @@ async function onCtrMenuSelect(id: string): Promise<void> {
       :items="ctrMenuItems"
       @select="onCtrMenuSelect"
       @close="ctrMenu = null"
+    />
+
+    <ContextMenu
+      v-if="deviceMenu"
+      :x="deviceMenu.x"
+      :y="deviceMenu.y"
+      :items="deviceMenuItems"
+      @select="onDeviceMenuSelect"
+      @close="deviceMenu = null"
+    />
+
+    <ContextMenu
+      v-if="groupMenu"
+      :x="groupMenu.x"
+      :y="groupMenu.y"
+      :items="groupMenuItems"
+      @select="onGroupMenuSelect"
+      @close="groupMenu = null"
+    />
+
+    <DockerManager
+      v-if="dockerManagerFor"
+      :saved="dockerManagerFor"
+      @close="dockerManagerFor = null"
     />
   </aside>
 </template>
@@ -712,4 +1123,83 @@ async function onCtrMenuSelect(id: string): Promise<void> {
 }
 /* 空态文案（含 .clickable 那一档）是 styles.css 里的全局 .empty-hint，
    五个面板共用一个定义 —— 之前这里各写一份，padding 有 4px 2px 也有 8px */
+
+/* ---- 设备分组 ---- */
+/*
+ * 组头：比设备行矮、字重小，箭头旋转表达开合（与 device-expand 同一套动效）。
+ * 整行可点（折叠/展开），右键出菜单 —— 不与设备行的双击连接抢手势。
+ */
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  margin-top: var(--sp-1);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  color: var(--fg-muted);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.group-head:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.group-chevron {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.group-chevron.open {
+  transform: rotate(90deg);
+}
+.group-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-count {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  background: var(--bg);
+  border-radius: var(--r-pill);
+  padding: 0 var(--sp-1);
+  min-width: 18px;
+  text-align: center;
+}
+/* 组内设备行整体右缩一档：谁属于哪组一眼可见 */
+.device-block.in-group {
+  margin-left: var(--sp-3);
+}
+/*
+ * 拖拽落点高亮：inset 描边不改布局（outline 在某些缩放比下会糊），
+ * 底色垫一层 accent-soft，组头和设备行共用同一个信号。
+ */
+.group-head.drop-target,
+.device.drop-target {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+/* 「新分组…」的就地输入框：与组头同高、同缩进（它马上就会变成一个新组） */
+.group-new-row {
+  display: flex;
+  align-items: center;
+  padding: var(--sp-1) var(--sp-2);
+}
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  padding: 1px var(--sp-1);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--fg);
+}
 </style>

@@ -62,6 +62,16 @@ export const IpcChannels = {
   agentFsHold: 'agent:fsHold',
   agentFsRelease: 'agent:fsRelease',
   /**
+   * 订阅/退订 agent 目录变更推送（fs_watch 事件经 agent:fsEvent 下行）。
+   * watchFs 带全量目录集合（幂等替换）；updateFsWatch 只更新集合。
+   */
+  agentWatchFs: 'agent:watchFs',
+  agentUnwatchFs: 'agent:unwatchFs',
+  agentUpdateFsWatch: 'agent:updateFsWatch',
+  agentFsEvent: 'agent:fsEvent',
+  /** 本机面板的目录监听（主进程 fs.watch；事件同样经 agent:fsEvent 下行） */
+  localFsWatch: 'localFs:watch',
+  /**
    * 白名单泛通道：method 只允许 agent 0.4.0 起的显式方法（主进程侧校验），
    * 免得每个方法各开一条通道。
    */
@@ -87,6 +97,24 @@ export const IpcChannels = {
   containerIp: 'container:ip',
   /** 容器内 LISTEN 端口（docker exec 读容器 netns 的 /proc；转发建议的静默检测） */
   containerListeners: 'container:listeners',
+  /*
+   * 镜像管理（列表 / df / 拉取 / 删除 / 清理 / 导出）。
+   * 入口在侧栏设备右键「容器管理」抽屉的镜像页；拉取走流式事件 containerImageEvent。
+   */
+  containerImages: 'container:images',
+  containerImageDf: 'container:imageDf',
+  containerImagePull: 'container:imagePull',
+  /** 取消进行中的拉取（一台设备同时只有一个） */
+  containerImagePullCancel: 'container:imagePullCancel',
+  containerImageRemove: 'container:imageRemove',
+  containerImagePrune: 'container:imagePrune',
+  /** 构建缓存清理（docker builder prune -a -f） */
+  containerBuilderPrune: 'container:builderPrune',
+  /** 远端：save 到临时文件返回路径（再走下载通道）；本机：直接 save 到所选路径 */
+  containerImageSave: 'container:imageSave',
+  containerImageSaveLocal: 'container:imageSaveLocal',
+  /** 主进程 → 渲染进程：拉取输出一行（含 \r 进度条，渲染层取最后一行画进度） */
+  containerImageEvent: 'container:imageEvent',
   // 传输队列
   transferPickUpload: 'transfer:pickUpload',
   transferEnqueueDropped: 'transfer:enqueueDropped',
@@ -94,6 +122,10 @@ export const IpcChannels = {
   transferDownloadDir: 'transfer:downloadDir',
   // 选中多项一起下载：只弹一次目录选择框，全部放进所选目录
   transferDownloadMany: 'transfer:downloadMany',
+  // 跨面板粘贴：远端 → 本机当前目录（静默，不弹保存框）
+  transferDownloadTo: 'transfer:downloadTo',
+  // 跨面板粘贴：远端 A → 远端 B 互传（tar 整流中继，两端不落盘）
+  transferServerCopy: 'transfer:serverCopy',
   transferList: 'transfer:list',
   transferCancel: 'transfer:cancel',
   transferClearFinished: 'transfer:clearFinished',

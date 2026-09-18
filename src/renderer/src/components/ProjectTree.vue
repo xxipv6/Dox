@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import type { FileEntry } from '@shared/types'
+import type { DroppedFile, FileEntry } from '@shared/types'
 import { errorText } from '../utils/errors'
+import { useConfirmStore } from '../stores/confirm'
 import { vFocus } from '../directives/focus'
 import Icon from './Icon.vue'
 import FileIcon from './FileIcon.vue'
@@ -12,7 +13,9 @@ import Spinner from './Spinner.vue'
  *   - 根 = 用户选定的项目文件夹（不进树当行，顶栏已经展示了）；
  *   - 目录懒加载：展开才请求，折叠不丢缓存（再展开零往返）；
  *   - 选中即时（不等数据）、spinner 延迟出现（快的时候不闪）；
- *   - 键盘：↑↓ 走可见行、→ 展开/进首子、← 折叠/跳父、Enter 打开。
+ *   - 多选：Ctrl/Cmd 切换、Shift 连选（锚点存路径）、Cmd/Ctrl+A 全选；
+ *   - 键盘：↑↓ 走可见行、→ 展开/进首子、← 折叠/跳父；
+ *     mac 回车=重命名 / ⌘↓=打开 / ⌘⌫=删除；win/linux F2=重命名 / 回车=打开 / Del=删除。
  *
  * 文件操作（删除/重命名/打包/粘贴…）一律不在本组件：菜单与 IPC 归 FileExplorer，
  * 这里只抛意图事件 + 暴露 refresh/reveal 等命令式方法。
@@ -31,12 +34,20 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   select: [entry: FileEntry | null]
+  /** 多选选区快照（按可见行顺序）：每次选区变化时抛出 */
+  selectionChange: [entries: FileEntry[]]
   previewFile: [entry: FileEntry]
   openFile: [entry: FileEntry]
-  rowContextmenu: [payload: { entry: FileEntry; x: number; y: number }]
+  rowContextmenu: [payload: { entry: FileEntry; targets: FileEntry[]; x: number; y: number }]
   blankContextmenu: [payload: { x: number; y: number }]
   renameSubmit: [payload: { entry: FileEntry; name: string }]
   createSubmit: [payload: { dir: string; name: string }]
+  /** 键盘删除（执行归 FileExplorer.removeTargets） */
+  requestDelete: [entries: FileEntry[]]
+  /** 行级 drop：拖到某行上 = 传进那个目录（文件行 = 其父目录，落点已算好） */
+  dropFiles: [payload: { dir: string; files: DroppedFile[] }]
+  /** 可见目录集合变化（展开/折叠/加载）：FileExplorer 据此同步 fs_watch 的监听集合 */
+  dirsChange: []
 }>()
 
 // 每级缩进与参考线位置（命名常量：样式与脚本同一出处）
@@ -55,7 +66,80 @@ const loading = reactive(new Set<string>())
 const slowLoading = reactive(new Set<string>())
 /** 加载失败的目录 → 错误文案（行尾给「失败，重试」） */
 const failed = reactive(new Map<string, string>())
+// ---- 选中与打开 ----
+/** 键盘焦点行（也是方向键导航/粘贴落点的语义）；多选时 = 最后点的那一行 */
 const selectedPath = ref<string | null>(null)
+/** 多选集合（普通点击 = 单元素，与 selectedPath 同步） */
+const selectedPaths = ref<Set<string>>(new Set())
+/** Shift 连选锚点：存路径不存 navRows 下标（展开/折叠会重算下标，路径不会漂） */
+const anchorPath = ref<string | null>(null)
+
+function isSel(path: string): boolean {
+  return selectedPaths.value.has(path)
+}
+
+/** 选区快照（按可见行顺序）：右键菜单/复制/删除的动作对象，开菜单那一刻冻结 */
+function selectionEntries(): FileEntry[] {
+  return navRows.value.filter((r) => selectedPaths.value.has(r.entry.path)).map((r) => r.entry)
+}
+
+/** 唯一选区写入口：焦点行 + 多选集合 + 锚点一起动，两个事件随之抛出 */
+function applySelection(paths: Set<string>, focus: FileEntry | null, keepAnchor = false): void {
+  selectedPaths.value = paths
+  selectedPath.value = focus?.path ?? null
+  if (!keepAnchor) anchorPath.value = focus?.path ?? null
+  emit('select', focus)
+  emit('selectionChange', selectionEntries())
+}
+
+function select(entry: FileEntry | null): void {
+  applySelection(new Set(entry ? [entry.path] : []), entry)
+}
+
+/**
+ * 单击行（与资源管理器/VS Code 一致）：
+ *   普通点击 → 只选中它；目录同时切换展开，文件预览打开
+ *   Ctrl/Cmd  → 切换这一项的选中，不预览不展开
+ *   Shift     → 从锚点连选到这一项（区间外已选项保留，锚点不动），不预览不展开
+ */
+function onRowActivate(e: MouseEvent, entry: FileEntry): void {
+  if (e.ctrlKey || e.metaKey) {
+    const next = new Set(selectedPaths.value)
+    if (next.has(entry.path)) next.delete(entry.path)
+    else next.add(entry.path)
+    applySelection(next, entry)
+    return
+  }
+  if (e.shiftKey && anchorPath.value && anchorPath.value !== entry.path) {
+    const rows = navRows.value
+    const ai = rows.findIndex((r) => r.entry.path === anchorPath.value)
+    const bi = rows.findIndex((r) => r.entry.path === entry.path)
+    if (ai >= 0 && bi >= 0) {
+      const next = new Set(selectedPaths.value)
+      const [from, to] = [Math.min(ai, bi), Math.max(ai, bi)]
+      for (let i = from; i <= to; i++) next.add(rows[i].entry.path)
+      applySelection(next, entry, true)
+      return
+    }
+  }
+  select(entry)
+  if (entry.isDir) void toggleDir(entry)
+  else emit('previewFile', entry)
+}
+
+/** chevron：只切展开（也选中，与 VS Code 一致） */
+function onChevronClick(entry: FileEntry): void {
+  select(entry)
+  void toggleDir(entry)
+}
+
+/** 全选（Cmd/Ctrl+A）；焦点行保持不动，只是集合铺满可见行 */
+function selectAll(): void {
+  const rows = navRows.value
+  if (!rows.length) return
+  const focus = findEntry(selectedPath.value ?? '') ?? rows[rows.length - 1].entry
+  applySelection(new Set(rows.map((r) => r.entry.path)), focus, true)
+}
 /** 按路径的代际号：同一目录连点只认最后一次；不同目录的展开互相独立 */
 const fetchSeq = new Map<string, number>()
 let disposed = false
@@ -171,28 +255,6 @@ async function toggleDir(entry: FileEntry): Promise<void> {
   if (!childrenOf.has(entry.path)) await fetchChildren(entry.path)
 }
 
-// ---- 选中与打开 ----
-function select(entry: FileEntry | null): void {
-  selectedPath.value = entry?.path ?? null
-  emit('select', entry)
-}
-
-/**
- * 单击行：选中；目录同时切换展开（VS Code 语义）；文件预览打开。
- * 预览放这里而不放 select()：键盘导航也调 select()，那不该开编辑器。
- */
-function onRowActivate(entry: FileEntry): void {
-  select(entry)
-  if (entry.isDir) void toggleDir(entry)
-  else emit('previewFile', entry)
-}
-
-/** chevron：只切展开（也选中，与 VS Code 一致） */
-function onChevronClick(entry: FileEntry): void {
-  select(entry)
-  void toggleDir(entry)
-}
-
 function retryDir(entry: FileEntry): void {
   expanded.add(entry.path)
   void fetchChildren(entry.path)
@@ -206,9 +268,13 @@ function scrollRowIntoView(path: string): void {
 }
 
 // ---- 键盘 ----
+/** 平台习惯快捷键（VS Code 式）：mac 重命名=回车、删除=⌘⌫、打开=⌘↓；win/linux 重命名=F2、删除=Del、打开=回车 */
+const isMac = window.api.platform === 'darwin'
+
 function selectNavRow(index: number): void {
   const row = navRows.value[index]
   if (!row) return
+  // 方向键移动 = 焦点走、多选塌缩回单选（与 VS Code 一致）
   select(row.entry)
   scrollRowIntoView(row.entry.path)
 }
@@ -216,6 +282,49 @@ function selectNavRow(index: number): void {
 function onKeydown(e: KeyboardEvent): void {
   // 内联输入框里的按键归输入框自己
   if ((e.target as HTMLElement).tagName === 'INPUT') return
+  // 确认弹窗开着时快捷键归弹窗（Enter=确定 / Esc=取消），树不响应
+  if (useConfirmStore().visible) return
+
+  // 消费掉的组合键一律 stopPropagation —— .tree 的 keydown 会冒泡到
+  // .explorer 根（FileExplorer 的 onKeydown），不拦就被处理两次
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'a') {
+    e.preventDefault()
+    e.stopPropagation()
+    selectAll()
+    return
+  }
+  // 删除：mac = ⌘⌫；win/linux = Del（执行归 FileExplorer.removeTargets）
+  if (
+    (isMac && e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Backspace') ||
+    (!isMac && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Delete')
+  ) {
+    e.preventDefault()
+    e.stopPropagation()
+    const targets = selectionEntries()
+    if (targets.length) emit('requestDelete', targets)
+    return
+  }
+  // 重命名：mac = 回车（Mac 传统，源自 Finder）；win/linux = F2
+  if (
+    (isMac && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Enter') ||
+    (!isMac && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'F2')
+  ) {
+    e.preventDefault()
+    e.stopPropagation()
+    if (selectedPath.value) beginRename(selectedPath.value)
+    return
+  }
+  // mac：⌘↓ = 打开（回车已被重命名占用；对齐 Finder / VS Code mac 的打开方式）
+  if (isMac && e.metaKey && e.key === 'ArrowDown') {
+    e.preventDefault()
+    e.stopPropagation()
+    const row = navRows.value.find((r) => r.entry.path === selectedPath.value)
+    if (!row) return
+    if (row.entry.isDir) void toggleDir(row.entry)
+    else emit('openFile', row.entry)
+    return
+  }
+
   const rows = navRows.value
   if (!rows.length) return
   const idx = rows.findIndex((r) => r.entry.path === selectedPath.value)
@@ -246,7 +355,8 @@ function onKeydown(e: KeyboardEvent): void {
         break
       }
     }
-  } else if (e.key === 'Enter') {
+  } else if (!isMac && e.key === 'Enter') {
+    // win/linux 回车 = 打开/展开（mac 回车是重命名，已在上面消费）
     e.preventDefault()
     const row = rows[idx]
     if (!row) return
@@ -274,26 +384,77 @@ async function beginCreate(dir: string): Promise<void> {
   createValue.value = ''
 }
 
-function submitRename(entry: FileEntry): void {
+function submitRename(entry: FileEntry, refocus = false): void {
   const name = editValue.value.trim()
   editingPath.value = null
   if (name && name !== entry.name) emit('renameSubmit', { entry, name })
+  // 键盘结束（Enter/Escape）要把焦点还给树：输入框卸载会把焦点扔到 body，快捷键全哑。
+  // blur 不叫回焦点 —— 那是用户主动点去了别处，不能把焦点抢回来
+  if (refocus) void nextTick(() => treeEl.value?.focus())
 }
 
-function submitCreate(): void {
+/** Esc 取消重命名：不提交，焦点同样还给树 */
+function cancelRename(): void {
+  editingPath.value = null
+  void nextTick(() => treeEl.value?.focus())
+}
+
+function submitCreate(refocus = false): void {
   const dir = creatingInDir.value
   const name = createValue.value.trim()
   creatingInDir.value = null
   if (dir && name) emit('createSubmit', { dir, name })
+  if (refocus) void nextTick(() => treeEl.value?.focus())
+}
+
+/** Esc 取消新建：不提交，焦点同样还给树 */
+function cancelCreate(): void {
+  creatingInDir.value = null
+  void nextTick(() => treeEl.value?.focus())
 }
 
 // ---- 菜单（构造归 FileExplorer，这里只报坐标与对象）----
 function onRowMenu(e: MouseEvent, entry: FileEntry): void {
-  emit('rowContextmenu', { entry, x: e.clientX, y: e.clientY })
+  // 点在选区外 → 先塌缩成单选（与资源管理器一致）；选区内 → 保持整片选区
+  if (!selectedPaths.value.has(entry.path)) select(entry)
+  // targets 必须冻结进载荷：菜单动作执行时选区可能已变
+  emit('rowContextmenu', { entry, targets: selectionEntries(), x: e.clientX, y: e.clientY })
 }
 
 function onBlankMenu(e: MouseEvent): void {
   emit('blankContextmenu', { x: e.clientX, y: e.clientY })
+}
+
+// ---- 行级 drop（与 browse 行同一口径：文件夹行 → 它里面；文件行 → 其父目录）----
+/** 拖拽悬停的行（高亮用；拖上去 ≠ 选中） */
+const dropRowPath = ref<string | null>(null)
+
+function onRowDragOver(e: DragEvent, entry: FileEntry): void {
+  e.preventDefault()
+  // 自己高亮自己，不让外层面板再画整框虚线
+  e.stopPropagation()
+  dropRowPath.value = entry.path
+}
+
+function onRowDragLeave(e: DragEvent): void {
+  // dragleave 在子元素间移动也会触发，relatedTarget 还在行内就不清高亮（防闪烁）
+  const row = e.currentTarget as HTMLElement
+  if (e.relatedTarget instanceof Node && row.contains(e.relatedTarget)) return
+  dropRowPath.value = null
+}
+
+function onRowDrop(e: DragEvent, entry: FileEntry): void {
+  e.preventDefault()
+  // 关键：不能冒泡到 .explorer 根的 @drop —— 否则一次拖拽入队两批任务
+  e.stopPropagation()
+  dropRowPath.value = null
+  const files: DroppedFile[] = [...(e.dataTransfer?.files ?? [])].map((f) => ({
+    path: window.api.getPathForFile(f),
+    name: f.name,
+    size: f.size
+  }))
+  if (!files.length) return
+  emit('dropFiles', { dir: entry.isDir ? entry.path : parentDirOf(entry.path), files })
 }
 
 // ---- 对外命令（FileExplorer 经 ref 调用）----
@@ -316,6 +477,27 @@ function selectedDirOrRoot(): string {
   const entry = findEntry(p)
   if (!entry) return props.root
   return entry.isDir ? entry.path : parentDirOf(entry.path)
+}
+
+/**
+ * 重命名后选区跟随新路径（含选中集合/焦点行/锚点，目录的子级一起改前缀）。
+ * 不跟的话：重命名完按删除，目标还是那个已不存在的旧路径 —— 静默没反应。
+ * 调用时机归 FileExplorer（rename 成功且刷新完之后，navRows 里才有新路径）。
+ */
+function remapSelection(oldPath: string, newPath: string): void {
+  const sep = props.isWin ? '\\' : '/'
+  const remap = (p: string): string =>
+    p === oldPath ? newPath : p.startsWith(oldPath + sep) ? newPath + p.slice(oldPath.length) : p
+  if (![...selectedPaths.value].some((p) => remap(p) !== p)) return
+  const oldFocus = selectedPath.value ? findEntry(selectedPath.value) : null
+  const focusPath = selectedPath.value ? remap(selectedPath.value) : null
+  // 焦点行的 entry 用新路径合成（刷新后 findEntry 才查得到，但 emit select 只取路径语义）
+  const focus = oldFocus
+    ? { ...oldFocus, path: focusPath!, name: focusPath!.split(/[\\/]/).pop() ?? oldFocus.name }
+    : null
+  const newAnchor = anchorPath.value ? remap(anchorPath.value) : null
+  applySelection(new Set([...selectedPaths.value].map(remap)), focus, true)
+  anchorPath.value = newAnchor
 }
 
 /*
@@ -354,7 +536,30 @@ async function reveal(path: string): Promise<void> {
   scrollRowIntoView(target)
 }
 
-defineExpose({ refreshDir, refreshAll, reveal, selectedDirOrRoot, beginRename, beginCreate })
+/** 已展开且已加载的目录（含根）：fs_watch 的监听集合（「看得见的目录」） */
+function expandedDirs(): string[] {
+  return [props.root, ...[...expanded].filter((p) => childrenOf.has(p))]
+}
+
+// 可见目录集合任何变化（展开/折叠/懒加载到位/换根）都报给 FileExplorer 同步监听。
+// join 成字符串再 watch：getter 每次返回新数组，不这样的话 childrenOf 任何一次
+// set（包括 fs 事件触发的刷新）都会白报一次 dirsChange → 白送一次 SSH 往返
+watch(
+  () => expandedDirs().join('\0'),
+  () => emit('dirsChange')
+)
+
+defineExpose({
+  refreshDir,
+  refreshAll,
+  reveal,
+  selectedDirOrRoot,
+  beginRename,
+  beginCreate,
+  selectAll,
+  remapSelection,
+  expandedDirs
+})
 
 // ---- 生命周期 ----
 function resetTree(): void {
@@ -365,6 +570,8 @@ function resetTree(): void {
   failed.clear()
   fetchSeq.clear()
   selectedPath.value = null
+  selectedPaths.value = new Set()
+  anchorPath.value = null
   editingPath.value = null
   creatingInDir.value = null
   rootReady = false
@@ -417,12 +624,19 @@ onBeforeUnmount(() => {
         v-for="row in visibleRows"
         :key="row.kind === 'entry' ? row.entry.path : `new:${row.dir}`"
         class="tree-row"
-        :class="{ selected: row.kind === 'entry' && row.entry.path === selectedPath }"
+        :class="{
+          selected: row.kind === 'entry' && isSel(row.entry.path),
+          focused: row.kind === 'entry' && row.entry.path === selectedPath,
+          'drop-target': row.kind === 'entry' && row.entry.path === dropRowPath
+        }"
         :style="{ paddingLeft: `${row.depth * INDENT_PX + ROW_PAD_PX}px` }"
         :data-path="row.kind === 'entry' ? row.entry.path : undefined"
-        @click="row.kind === 'entry' ? onRowActivate(row.entry) : undefined"
+        @click="row.kind === 'entry' ? onRowActivate($event, row.entry) : undefined"
         @dblclick="row.kind === 'entry' && !row.entry.isDir ? emit('openFile', row.entry) : undefined"
         @contextmenu.prevent="row.kind === 'entry' ? onRowMenu($event, row.entry) : undefined"
+        @dragover="row.kind === 'entry' ? onRowDragOver($event, row.entry) : undefined"
+        @dragleave="onRowDragLeave"
+        @drop="row.kind === 'entry' ? onRowDrop($event, row.entry) : undefined"
       >
         <!-- 缩进参考线（VS Code 层次感的来源之一）：每级一条，对齐 chevron 中心 -->
         <span
@@ -449,8 +663,8 @@ onBeforeUnmount(() => {
             v-model="editValue"
             v-focus
             class="rename-input"
-            @keyup.enter="submitRename(row.entry)"
-            @keyup.esc="editingPath = null"
+            @keydown.enter="!$event.isComposing && submitRename(row.entry, true)"
+            @keyup.esc="cancelRename"
             @blur="submitRename(row.entry)"
             @click.stop
           />
@@ -471,9 +685,9 @@ onBeforeUnmount(() => {
             v-focus
             class="rename-input"
             placeholder="文件夹名"
-            @keyup.enter="submitCreate"
-            @keyup.esc="creatingInDir = null"
-            @blur="submitCreate"
+            @keydown.enter="!$event.isComposing && submitCreate(true)"
+            @keyup.esc="cancelCreate"
+            @blur="submitCreate()"
             @click.stop
           />
         </template>
@@ -518,12 +732,12 @@ onBeforeUnmount(() => {
   background: var(--bg-active);
   transform: translateY(0.5px);
 }
-/* 选中：块状高亮 + 左侧竖条，与 browse 列表同一读法 */
+/* 选中：块状高亮（多选时整片），左侧竖条只给焦点行（多选里「最后点的那个」） */
 .tree-row.selected {
   background: var(--bg-active);
   transition: background-color var(--dur-base) var(--ease-out);
 }
-.tree-row.selected::before {
+.tree-row.focused::before {
   content: '';
   position: absolute;
   left: 2px;
@@ -532,6 +746,12 @@ onBeforeUnmount(() => {
   width: 2px;
   border-radius: 1px;
   background: var(--accent-text);
+}
+/* 行级 drop 目标：拖到哪个文件夹行上就高亮哪一行（区别于整面板的虚线框） */
+.tree-row.drop-target {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+  background: var(--bg-hover);
 }
 .guide {
   position: absolute;

@@ -9,6 +9,7 @@ import type {
   CliCommandPayload,
   ComposeVerb,
   ContainerControlAction,
+  ContainerImage,
   ContainerProbeResult,
   DiskUsage,
   DownloadRequest,
@@ -18,6 +19,8 @@ import type {
   ForwardRuleInput,
   HostKeyDecision,
   HostKeyVerifyRequest,
+  ImageDfRow,
+  ImagePullEvent,
   LayoutSnapshot,
   LocalShellInfo,
   ProcListResult,
@@ -176,6 +179,42 @@ export interface DoxApi {
     containerName: string
   ): Promise<{ ports: number[]; supported: boolean }>
 
+  // ---- 镜像管理（入口：侧栏设备右键「容器管理」抽屉的镜像页）----
+  /** 列镜像（inUse 标记是否被容器引用；与 listContainers 同口径的「不抛错」返回） */
+  containerImages(
+    parentSessionId: string
+  ): Promise<{ ok: boolean; images?: ContainerImage[]; message?: string }>
+  /** docker system df：清理对话框里「各类能回收多少」 */
+  containerImageDf(
+    parentSessionId: string
+  ): Promise<{ ok: boolean; rows?: ImageDfRow[]; message?: string }>
+  /** 拉取镜像；输出逐行走 onContainerImageEvent 推回来；canceled=true 是用户自己取消的 */
+  containerImagePull(
+    parentSessionId: string,
+    ref: string
+  ): Promise<{ ok: boolean; canceled?: boolean; message?: string }>
+  /** 取消进行中的拉取 */
+  containerImagePullCancel(parentSessionId: string): Promise<void>
+  /** 删除镜像（rmi；force = 被已停容器引用也强删） */
+  containerImageRemove(
+    parentSessionId: string,
+    ids: string[],
+    force: boolean
+  ): Promise<{ ok: boolean; message?: string }>
+  /** 清理镜像：all=false 只清悬空（<none>），all=true 连未使用的也清 */
+  containerImagePrune(parentSessionId: string, all: boolean): Promise<{ ok: boolean; message?: string }>
+  /** 清理构建缓存（docker builder prune -a -f） */
+  containerBuilderPrune(parentSessionId: string): Promise<{ ok: boolean; message?: string }>
+  /** 远端导出：save 到远端临时文件，返回路径（调用方走下载通道拿回本地后删掉临时文件） */
+  containerImageSave(
+    parentSessionId: string,
+    ref: string
+  ): Promise<{ ok: boolean; tmpPath?: string; message?: string }>
+  /** 本机导出：直接 save 到用户选好的路径 */
+  containerImageSaveLocal(ref: string, outPath: string): Promise<{ ok: boolean; message?: string }>
+  /** 拉取输出流（一行一条；docker 进度条用 \r 刷新，取每段最后一行画进度即可） */
+  onContainerImageEvent(cb: (parentSessionId: string, ev: ImagePullEvent) => void): () => void
+
   // ---- 传输队列 ----
   /** 弹出本地文件选择框，选中文件上传到 remoteDir（containerName = 传到容器里） */
   pickUpload(sessionId: string, remoteDir: string, containerName?: string): Promise<TransferTask[]>
@@ -190,6 +229,25 @@ export interface DoxApi {
    * 选中十项弹十次保存框是没法用的。用户取消时返回空数组。
    */
   downloadMany(sessionId: string, items: DownloadRequest[], containerName?: string): Promise<TransferTask[]>
+  /** 跨面板粘贴：远端文件静默下载进本机 localDir（不弹对话框；isDir 的走目录整流/展开） */
+  transferDownloadTo(
+    sessionId: string,
+    items: { remotePath: string; name: string; isDir: boolean }[],
+    localDir: string
+  ): Promise<TransferTask[]>
+  /**
+   * 跨面板粘贴：远端 A 的 paths 互传到远端 B 的 dstDir。
+   * 自动选路：同台机 cp -a（零流量）→ P2P 直传（allowP2p 且能直连，一次性密钥
+   * 用完即删）→ 本机中继（tar 整流，永远可用）。任务的 sessionId 记目的端，
+   * 目标面板传完自动刷新。
+   */
+  transferServerCopy(
+    srcSessionId: string,
+    paths: string[],
+    dstSessionId: string,
+    dstDir: string,
+    allowP2p: boolean
+  ): Promise<TransferTask[]>
   /**
    * 打包：在远端当前目录把选中项 tar 成 .tar.gz（不下载），
    * 返回生成的包路径；失败把 tar 的 stderr 原文抛回。
@@ -241,6 +299,19 @@ export interface DoxApi {
   /** 文件面板持有/释放 agent 通道（面板打开期间通道不被退订收掉） */
   agentFsHold(sessionId: string, containerName?: string): Promise<void>
   agentFsRelease(sessionId: string, containerName?: string): Promise<void>
+  /**
+   * 订阅/退订目录变更推送（远端/容器走 agent fs_watch；本机走主进程 fs.watch）。
+   * watchFs 带全量目录集合（幂等替换）；updateFsWatch 只更新集合；
+   * 本机面板用 localFsWatch（空数组 = 退订）。老 agent 没有 fs_watch 会抛错，调用方降级。
+   */
+  agentWatchFs(sessionId: string, containerName: string | undefined, dirs: string[]): Promise<void>
+  agentUnwatchFs(sessionId: string, containerName?: string): Promise<void>
+  agentUpdateFsWatch(sessionId: string, containerName: string | undefined, dirs: string[]): Promise<void>
+  localFsWatch(sessionId: string, dirs: string[]): Promise<void>
+  /** 目录变更帧（event='fs'、dirs = 变化的目录列表），或 agent_closed（通道死，应降级回手动刷新） */
+  onAgentFsEvent(
+    cb: (sessionId: string, containerName: string | null, data: { event: string; dirs?: string[] }) => void
+  ): () => void
   /**
    * agent 白名单泛通道（0.4.0 起的显式方法：ps_list/ps_kill/exec/fs_usage/fs_*）。
    * method 不在白名单会被主进程拒绝。

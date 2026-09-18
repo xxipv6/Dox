@@ -788,6 +788,43 @@ export const useSessionStore = defineStore('sessions', () => {
     return saved
   }
 
+  /**
+   * 设备分组（group 是 SavedSession 上的字符串标签，分组实体就是从所有
+   * 设备上收集到的 distinct 值）。改组 = 以原凭证原样重存（密码密文
+   * 主进程保留，表单不重逢）—— 所以这三个动作都是「改 group 字段再 save」。
+   */
+
+  /** 设备移入分组（空串/undefined = 移出，回到未分组） */
+  async function moveToGroup(saved: SavedSession, group: string | undefined): Promise<void> {
+    await saveSession({
+      id: saved.id,
+      name: saved.name,
+      host: saved.host,
+      port: saved.port,
+      username: saved.username,
+      authType: saved.authType,
+      privateKeyPath: saved.privateKeyPath,
+      group: group || undefined,
+      jumpHostId: saved.jumpHostId
+    })
+  }
+
+  /** 重命名分组：该组所有设备改挂新名 */
+  async function renameGroup(oldName: string, newName: string): Promise<void> {
+    const trimmed = newName.trim()
+    if (!trimmed || trimmed === oldName) return
+    for (const s of savedSessions.value.filter((x) => x.group === oldName)) {
+      await moveToGroup(s, trimmed)
+    }
+  }
+
+  /** 解散分组：设备回到未分组（设备本身不动） */
+  async function ungroup(name: string): Promise<void> {
+    for (const s of savedSessions.value.filter((x) => x.group === name)) {
+      await moveToGroup(s, undefined)
+    }
+  }
+
   function toggleSftp(): void {
     sftpVisible.value = !sftpVisible.value
   }
@@ -1000,6 +1037,8 @@ export const useSessionStore = defineStore('sessions', () => {
     expandedDevices,
     deviceContainers,
     transports,
+    ensureTransport,
+    releaseTransportIfIdle,
     toggleDeviceContainers,
     loadDeviceContainers,
     connectLocal,
@@ -1014,6 +1053,9 @@ export const useSessionStore = defineStore('sessions', () => {
     closeAllTabs,
     refreshSaved,
     deleteSaved,
-    saveSession
+    saveSession,
+    moveToGroup,
+    renameGroup,
+    ungroup
   }
 })

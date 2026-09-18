@@ -325,6 +325,23 @@ export class SessionManager {
     return this.sessions.get(id)?.client ?? undefined
   }
 
+  /**
+   * 会话的连接目标（host/port/username），服务器互传的 P2P 直传用它
+   * 告诉源机器「往哪里 ssh」。跳板机场景返回 null —— A 到 B 的直连路径
+   * 与跳板拓扑无关，判不了就回退中继，不瞎猜。
+   */
+  sessionTarget(id: string): { host: string; port: number; username: string } | null {
+    const session = this.sessions.get(id)
+    if (!session) return null
+    try {
+      const cfg = session.savedSessionId ? this.resolveSavedSession?.(session.savedSessionId) : session.config
+      if (!cfg || cfg.jumpHostId) return null
+      return { host: cfg.host, port: cfg.port, username: cfg.username }
+    } catch {
+      return null
+    }
+  }
+
   /** 会话结束回调（ForwardManager 借此停止关联规则）；每次断开都会触发 */
   onClosed: ((id: string) => void) | null = null
 

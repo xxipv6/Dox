@@ -10,7 +10,8 @@ import { useEditorStore } from '../stores/editor'
 import { useConfirmStore } from '../stores/confirm'
 import { useComposeStore } from '../stores/compose'
 import { useSettingsStore } from '../stores/settings'
-import { panelClipboard } from '../stores/fileClipboard'
+import { panelClipboard, askP2pConsent } from '../stores/fileClipboard'
+import { pushToast } from '../stores/toast'
 import { errorText } from '../utils/errors'
 import { vFocus } from '../directives/focus'
 import Icon from './Icon.vue'
@@ -42,6 +43,8 @@ const ctrName = computed(() => props.container?.containerName)
  */
 const isLocal = computed(() => !props.container && props.sessionId.startsWith(LOCAL_ID_PREFIX))
 const isWinLocal = computed(() => isLocal.value && window.api.platform === 'win32')
+/** 平台习惯快捷键：mac 重命名=回车、删除=⌘⌫；win/linux 重命名=F2、删除=Del（VS Code 式） */
+const isMacPlatform = window.api.platform === 'darwin'
 
 /** 本机终端的 shell 种类（cmd 不认单引号）：「在终端打开」的引号策略靠它 */
 let localShellKind: string | null = null
@@ -66,6 +69,8 @@ const errorMsg = ref('')
 /** 上次失败的那个动作本身（横幅上的「重试」重跑它，而不是刷新目录） */
 const retryAction = ref<(() => Promise<unknown>) | null>(null)
 const dragOver = ref(false)
+/** 拖拽悬停的行（行级 drop：拖到某个文件夹行上 = 传进那个文件夹） */
+const dropRowPath = ref<string | null>(null)
 /** 容器标签但还没装容器助手：文件面板无米下锅，指路去装 */
 const agentMissing = ref(false)
 /** 容器助手版本过旧（没有 fs_* 方法）：指路去升级（空串 = 不过旧） */
@@ -145,8 +150,10 @@ const renameValue = ref('')
 const mode = ref<'browse' | 'project'>('browse')
 const projectRoot = ref('')
 const treeRef = ref<InstanceType<typeof ProjectTree> | null>(null)
-/** 项目模式下树的单选（右键菜单/复制/键盘的动作对象） */
+/** 项目模式下树的焦点行（cwd 跟踪/「在终端打开」用） */
 const treeSelected = ref<FileEntry | null>(null)
+/** 项目模式下树的多选快照（右键菜单/复制/删除的动作对象，selection-change 事件冻结进来） */
+const treeSelection = ref<FileEntry[]>([])
 /** 全文搜索面板（与树同位切换；树用 v-show 保活，懒加载缓存不能打回冷启动） */
 const searchOpen = ref(false)
 const searchPanelRef = ref<InstanceType<typeof SearchPanel> | null>(null)
@@ -162,10 +169,12 @@ function enterProject(path: string): void {
   mode.value = 'project'
   projectRoot.value = path
   treeSelected.value = null
+  treeSelection.value = []
   searchOpen.value = false
   searchRoot.value = ''
   settings.setProjectRoot(deviceKey.value, path)
   // 与终端 cwd 跟踪保持同步（cwdBySession 的语义 = 「面板在看哪」）
+  panelSetCwd = path
   store.setCwd(props.sessionId, path)
 }
 
@@ -173,6 +182,9 @@ async function exitProject(): Promise<void> {
   mode.value = 'browse'
   projectRoot.value = ''
   treeSelected.value = null
+  treeSelection.value = []
+  // 面板发的 cwd 标记一并清：留着会让 followTerminal 恰好 cd 到同一目录时误判「自己发的」而不跟随
+  panelSetCwd = ''
   searchOpen.value = false
   searchRoot.value = ''
   settings.setProjectRoot(deviceKey.value, null)
@@ -235,8 +247,9 @@ const clearSelection = (): void => {
 // ---- 键盘快捷键（面板聚焦后 Cmd/Ctrl+A/C/V/F）----
 /**
  * 面板内剪贴板，模块级单例：跨标签实例共享（同服务器换个标签也能粘）。
- * key 相同（同会话同容器）才允许粘贴 —— 跨会话/跨面板粘贴的语义
- * （本机绕一圈 or 双连接对传）没定论，v1 给提示不硬做。
+ * key 相同（同会话同容器）走同面板快路（就地 cp / 本机复制）；
+ * 不同则跨面板：远端→本机静默下载、本机→远端上传、远端A→远端B 互传中继
+ * （见 pasteAcrossPanels）。
  */
 const panelKey = computed(() => `${fsSessionId.value}|${ctrName.value ?? ''}`)
 
@@ -250,9 +263,7 @@ const visibleEntries = computed(() => {
   return entries.value.filter((x) => x.name.toLowerCase().includes(q))
 })
 
-const canPaste = computed(
-  () => panelClipboard.value !== null && panelClipboard.value.key === panelKey.value && !props.container
-)
+const canPaste = computed(() => panelClipboard.value !== null && !props.container)
 
 function selectAll(): void {
   selected.value = new Set(visibleEntries.value.map((x) => x.path))
@@ -260,14 +271,14 @@ function selectAll(): void {
 
 function copySelection(): void {
   if (!selected.value.size) return
-  panelClipboard.value = { key: panelKey.value, paths: [...selected.value] }
+  panelClipboard.value = { key: panelKey.value, paths: [...selected.value], isLocal: isLocal.value }
 }
 
 async function pasteClipboard(dir = cwd.value): Promise<void> {
   const clip = panelClipboard.value
   if (!clip) return
   if (clip.key !== panelKey.value) {
-    errorMsg.value = '暂不支持跨会话/跨面板粘贴，请用拖拽或「复制到…」'
+    await pasteAcrossPanels(clip, dir)
     return
   }
   if (props.container) {
@@ -290,6 +301,50 @@ async function pasteClipboard(dir = cwd.value): Promise<void> {
   })
 }
 
+/**
+ * 跨面板粘贴（剪贴板来自另一台设备/另一种面板）：
+ *  - 远端 → 本机：静默下载进当前目录（不弹保存框；本机面板刷新靠 fs.watch）
+ *  - 本机 → 远端：走上传队列（与拖入同路）
+ *  - 远端 A → 远端 B：主进程 tar 整流中继，两端不落盘；任务记目的端会话，
+ *    目标面板「传完自动刷新」零改动生效
+ * 容器相关（源或目标是容器面板）维持 v1 口径：提示不支持。
+ */
+async function pasteAcrossPanels(
+  clip: { key: string; paths: string[]; isLocal: boolean },
+  dir: string
+): Promise<void> {
+  if (props.container) {
+    errorMsg.value = '容器面板暂不支持粘贴'
+    return
+  }
+  const [srcSession, srcCtr] = clip.key.split('|')
+  if (srcCtr) {
+    errorMsg.value = '容器里的内容暂不支持粘到别的面板'
+    return
+  }
+  await guard(async () => {
+    if (isLocal.value) {
+      const stats = await Promise.all(clip.paths.map((p) => window.api.sftpStat(srcSession, p)))
+      const items = clip.paths.map((p, i) => ({
+        remotePath: p,
+        name: p.split('/').filter(Boolean).pop() ?? 'download',
+        isDir: !!stats[i]?.isDir
+      }))
+      await window.api.transferDownloadTo(srcSession, items, dir)
+    } else if (clip.isLocal) {
+      await window.api.enqueueDropped(
+        fsSessionId.value,
+        dir,
+        clip.paths.map((p) => ({ path: p, name: p, size: 0 }))
+      )
+    } else {
+      // clip.paths 是 Vue 响应式代理数组，直接过 IPC 会被结构化克隆拒绝
+      // （"An object could not be cloned"）—— 摊平成普通数组再传
+      await window.api.transferServerCopy(srcSession, [...clip.paths], fsSessionId.value, dir, await askP2pConsent())
+    }
+  })
+}
+
 function openFilter(): void {
   filterOpen.value = true
   void nextTick(() => filterInput.value?.focus())
@@ -301,24 +356,110 @@ function closeFilter(): void {
 }
 
 /**
+ * 复制路径到系统剪贴板（多选换行分隔）。
+ * relative 仅项目模式有意义：相对项目根裁剪前缀，裁不动（根外）回退文件名。
+ */
+async function copyPaths(targets: FileEntry[], relative: boolean): Promise<void> {
+  const sepChar = isWinLocal.value ? '\\' : '/'
+  const text = targets
+    .map((t) => {
+      if (!relative) return t.path
+      const root = projectRoot.value
+      const prefix = root.endsWith(sepChar) ? root : root + sepChar
+      return t.path.startsWith(prefix) ? t.path.slice(prefix.length) : t.name
+    })
+    .join('\n')
+  if (!text) return
+  try {
+    await window.api.writeClipboardText(text)
+    pushToast('已复制路径', 'success', 1600)
+  } catch (err) {
+    pushToast(`复制到剪贴板失败：${errorText(err)}`)
+  }
+}
+
+/** 当前「删除快捷键」的动作对象（browse = selected；项目模式 = 树的多选快照） */
+function keyDeleteTargets(): FileEntry[] {
+  return mode.value === 'project'
+    ? treeSelection.value
+    : entries.value.filter((en) => selected.value.has(en.path))
+}
+
+/** 键盘删除入口：确认弹窗已经开着时不叠加（ask 会顶掉上一个，连按等于自己取消自己） */
+function deleteByKeyboard(e: KeyboardEvent): void {
+  const confirmStore = useConfirmStore()
+  if (confirmStore.visible) return
+  const targets = keyDeleteTargets()
+  if (!targets.length) return
+  e.preventDefault()
+  void removeTargets(targets)
+}
+
+/**
  * 键盘入口挂在 .explorer 根上（tabindex=0，点面板任意处即聚焦）。
- * 输入框（重命名/新建/过滤）里的按键归输入框自己，不拦截。
+ * 输入框（重命名/新建/过滤）里的按键归输入框自己，不拦截 —— 守卫必须在所有分支之前，
+ * 否则裸键（Enter/F2/Delete）根本进不来。
+ *
+ * 平台习惯（VS Code 式）：mac 重命名=回车、删除=⌘⌫、打开=⌘↓；
+ * win/linux 重命名=F2、删除=Del。项目模式的同类按键由 ProjectTree 自己消费
+ * （stopPropagation 到不了这里）；这里是「焦点不在树上」（点过工具栏等）时的兜底。
  */
 function onKeydown(e: KeyboardEvent): void {
-  if (!(e.ctrlKey || e.metaKey)) return
   const tag = (e.target as HTMLElement).tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA') return
+  // 确认弹窗开着时快捷键归弹窗（Enter=确定 / Esc=取消），面板不响应
+  if (useConfirmStore().visible) return
+
+  // ---- 裸键（无修饰）：重命名 / 删除 ----
+  if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+    const isRenameKey = isMacPlatform ? e.key === 'Enter' : e.key === 'F2'
+    if (isRenameKey) {
+      const target =
+        mode.value === 'project'
+          ? treeSelected.value
+          : selected.value.size === 1
+            ? entries.value.find((en) => selected.value.has(en.path))
+            : undefined
+      if (target) {
+        e.preventDefault()
+        startRename(target)
+      }
+      return
+    }
+    // mac 裸 Backspace 不响应（防误删）；win/linux 的 Del 是系统习惯
+    if (!isMacPlatform && e.key === 'Delete') deleteByKeyboard(e)
+    return
+  }
+
+  // mac：⌘⌫ = 删除（系统习惯）；要在通用字母分支之前判断
+  if (isMacPlatform && e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'Backspace') {
+    deleteByKeyboard(e)
+    return
+  }
+
+  // mac：⌘↓ = 打开选中项（对齐 Finder / VS Code mac 打开方式）
+  if (isMacPlatform && e.metaKey && e.key === 'ArrowDown') {
+    if (mode.value === 'browse' && selected.value.size) {
+      const entry = entries.value.find((en) => selected.value.has(en.path))
+      if (entry) {
+        e.preventDefault()
+        openEntry(entry)
+      }
+    }
+    return
+  }
+
+  if (!(e.ctrlKey || e.metaKey)) return
   const key = e.key.toLowerCase()
   if (key === 'a') {
-    // 项目模式没有多选（一期）：全选没有意义
-    if (mode.value === 'project') return
     e.preventDefault()
-    selectAll()
+    if (mode.value === 'project') treeRef.value?.selectAll()
+    else selectAll()
   } else if (key === 'c') {
     e.preventDefault()
     if (mode.value === 'project') {
-      if (treeSelected.value) {
-        panelClipboard.value = { key: panelKey.value, paths: [treeSelected.value.path] }
+      if (treeSelection.value.length) {
+        panelClipboard.value = { key: panelKey.value, paths: treeSelection.value.map((t) => t.path), isLocal: isLocal.value }
       }
     } else {
       copySelection()
@@ -396,9 +537,17 @@ async function load(dir?: string): Promise<void> {
 async function init(): Promise<void> {
   // 容器标签先看助手在不在：没装就是「无米下锅」，指路比报错好
   if (props.container) {
-    const st = await window.api
+    // 状态查询在容器会话刚建立时会偶发失败（通道/运行时还没就绪）——
+    // 一次失败就判「没装」会把面板永久卡死在指路页，重试两次再下结论
+    let st = await window.api
       .agentStatus(props.container.parentSessionId, props.container.containerName)
       .catch(() => null)
+    for (let i = 0; !st?.installed && i < 2; i++) {
+      await new Promise((r) => setTimeout(r, 1200))
+      st = await window.api
+        .agentStatus(props.container.parentSessionId, props.container.containerName)
+        .catch(() => null)
+    }
     if (!st?.installed) {
       agentMissing.value = true
       return
@@ -499,6 +648,12 @@ function openEntry(entry: FileEntry): void {
 }
 
 // ---- 新建文件夹 ----
+/** 内联编辑（新建/重命名）用键盘结束后把焦点还给面板：输入框卸载会把焦点扔到 body，快捷键全哑 */
+const explorerEl = ref<HTMLElement | null>(null)
+function refocusExplorer(): void {
+  void nextTick(() => explorerEl.value?.focus())
+}
+
 /** 在指定目录下建文件夹（browse 传 cwd；项目模式传树的发起目录） */
 async function createDirIn(dir: string, name: string): Promise<void> {
   if (!name) return
@@ -509,10 +664,17 @@ async function createDirIn(dir: string, name: string): Promise<void> {
   })
 }
 
-async function submitNewDir(): Promise<void> {
+async function submitNewDir(refocus = false): Promise<void> {
   await createDirIn(cwd.value, newDirName.value.trim())
   creatingDir.value = false
   newDirName.value = ''
+  if (refocus) refocusExplorer()
+}
+
+function cancelNewDir(): void {
+  creatingDir.value = false
+  newDirName.value = ''
+  refocusExplorer()
 }
 
 // ---- 重命名 ----
@@ -532,12 +694,32 @@ async function renameTo(entry: FileEntry, name: string): Promise<void> {
   await guard(async () => {
     await window.api.sftpRename(fsSessionId.value, entry.path, joinIn(parentOf(entry.path), name), ctrName.value)
     await refreshAfterOp([parentOf(entry.path)])
+    // 选区跟随新路径：不跟的话重命名后按删除/复制，目标还是那个已不存在的旧路径 —— 静默没反应
+    remapSelectionAfterRename(entry.path, joinIn(parentOf(entry.path), name))
   })
 }
 
-async function submitRename(entry: FileEntry): Promise<void> {
+/** 重命名后把两处选区（browse 的 Set、项目树的选中/焦点/锚点）改指新路径 */
+function remapSelectionAfterRename(oldPath: string, newPath: string): void {
+  const sep = isWinLocal.value ? '\\' : '/'
+  const remap = (p: string): string =>
+    p === oldPath ? newPath : p.startsWith(oldPath + sep) ? newPath + p.slice(oldPath.length) : p
+  if ([...selected.value].some((p) => remap(p) !== p)) {
+    selected.value = new Set([...selected.value].map(remap))
+  }
+  treeRef.value?.remapSelection(oldPath, newPath)
+}
+
+async function submitRename(entry: FileEntry, refocus = false): Promise<void> {
   await renameTo(entry, renameValue.value.trim())
   renamingPath.value = null
+  if (refocus) refocusExplorer()
+}
+
+/** Esc 取消重命名：不提交，但焦点同样要还给面板 */
+function cancelRename(): void {
+  renamingPath.value = null
+  refocusExplorer()
 }
 
 // ---- 删除 / 下载 / 上传 ----
@@ -639,11 +821,11 @@ function onRowContextMenu(e: MouseEvent, entry: FileEntry, index: number): void 
   menu.value = { x: e.clientX, y: e.clientY, items: buildRowMenuItems(targets) }
 }
 
-/** 树（项目模式）行右键：单选语义，目标从事件载荷冻结（右键同时改选中，时序不可靠） */
-function onTreeRowContextMenu(p: { entry: FileEntry; x: number; y: number }): void {
+/** 树（项目模式）行右键：目标从事件载荷冻结（右键同时改选中，时序不可靠） */
+function onTreeRowContextMenu(p: { entry: FileEntry; targets: FileEntry[]; x: number; y: number }): void {
   treeSelected.value = p.entry
-  menuTargets = [p.entry]
-  menu.value = { x: p.x, y: p.y, items: buildProjectRowMenuItems(p.entry) }
+  menuTargets = p.targets
+  menu.value = { x: p.x, y: p.y, items: buildProjectRowMenuItems(p.targets) }
 }
 
 /** 树空白处右键 = 项目根的菜单 */
@@ -653,14 +835,30 @@ function onTreeBlankContextMenu(p: { x: number; y: number }): void {
   menu.value = {
     x: p.x,
     y: p.y,
-    items: [
-      { id: 'search-in-folder', label: '从文件夹中查找', icon: 'search' },
-      { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' },
-      { id: 'new-folder', label: '新建文件夹', icon: 'folder-plus' },
-      { id: 'paste', label: '粘贴到项目根', icon: 'paste', disabled: !canPaste.value },
-      { id: 'exit-project', label: '退出项目模式', icon: 'x' }
-    ]
+    items: joinMenuGroups([
+      [
+        { id: 'search-in-folder', label: '从文件夹中查找', icon: 'search' },
+        { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' }
+      ],
+      [
+        { id: 'new-folder', label: '新建文件夹', icon: 'folder-plus' },
+        { id: 'paste', label: '粘贴到项目根', icon: 'paste', disabled: !canPaste.value }
+      ],
+      [{ id: 'exit-project', label: '退出项目模式', icon: 'x' }]
+    ])
   }
+}
+
+/** 菜单分组拼接：非空组之间插分隔线（VS Code 式分组；空组不留下孤线） */
+function joinMenuGroups(groups: ContextMenuItem[][]): ContextMenuItem[] {
+  const out: ContextMenuItem[] = []
+  let n = 0
+  for (const g of groups) {
+    if (!g.length) continue
+    if (out.length) out.push({ id: `sep-${n++}`, label: '', separator: true })
+    out.push(...g)
+  }
+  return out
 }
 
 /**
@@ -669,75 +867,92 @@ function onTreeBlankContextMenu(p: { x: number; y: number }): void {
  */
 function buildRowMenuItems(targets: FileEntry[]): ContextMenuItem[] {
   const many = targets.length > 1
-  return [
-    // 项目模式的入口：正好就是「以这个文件夹为根」
-    ...(!many && targets[0].isDir && mode.value === 'browse'
-      ? [{ id: 'enter-project', label: '进入项目模式', icon: 'folder' as const }]
-      : []),
-    // SFTP⇥终端的显式入口：目录行 → 进那个目录；文件行 → 它所在的当前目录
-    ...(many
-      ? []
-      : [
-          {
-            id: 'open-terminal',
-            label: targets[0].isDir ? '在终端打开此文件夹' : '在终端打开此目录',
-            icon: 'terminal' as const
-          }
-        ]),
-    {
-      id: 'download',
-      // 本机面板没有「下载」：落地动作是复制到另一个目录（主进程走本机复制队列）
-      label: isLocal.value
-        ? many
-          ? `复制这 ${targets.length} 项到…`
-          : '复制到…'
-        : many
-          ? `下载这 ${targets.length} 项`
-          : '下载',
-      icon: 'download'
-    },
-    {
-      // 就地打包：当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」。
-      // 容器里也能打 —— 由容器里的 agent 用 Go 标准库产包，不依赖容器里有 tar
-      id: 'archive',
-      label: many ? `打包这 ${targets.length} 项` : '打包',
-      icon: 'box'
-    },
-    // 复制进面板剪贴板；粘贴只接受同源（同会话同容器），跨面板给提示
-    { id: 'copy', label: many ? `复制这 ${targets.length} 项` : '复制', icon: 'copy' },
-    {
-      id: 'paste',
-      label: mode.value === 'project' ? '粘贴到此目录' : '粘贴到当前目录',
-      icon: 'paste',
-      disabled: !canPaste.value || (mode.value === 'project' && !targets[0].isDir)
-    },
-    // 重命名只能对一项，多选时给个禁用项比整条去掉更好读
-    { id: 'rename', label: '重命名', icon: 'pencil', disabled: many },
-    {
-      id: 'delete',
-      label: many ? `删除这 ${targets.length} 项` : '删除',
-      icon: 'trash',
-      danger: true
-    },
+  return joinMenuGroups([
+    [
+      // 项目模式的入口：正好就是「以这个文件夹为根」
+      ...(!many && targets[0].isDir && mode.value === 'browse'
+        ? [{ id: 'enter-project', label: '进入项目模式', icon: 'folder' as const }]
+        : []),
+      // SFTP⇥终端的显式入口：目录行 → 进那个目录；文件行 → 它所在的当前目录
+      ...(!many
+        ? [
+            {
+              id: 'open-terminal',
+              label: targets[0].isDir ? '在终端打开此文件夹' : '在终端打开此目录',
+              icon: 'terminal' as const
+            }
+          ]
+        : [])
+    ],
+    [
+      {
+        id: 'download',
+        // 本机面板没有「下载」：落地动作是复制到另一个目录（主进程走本机复制队列）
+        label: isLocal.value
+          ? many
+            ? `复制这 ${targets.length} 项到…`
+            : '复制到…'
+          : many
+            ? `下载这 ${targets.length} 项`
+            : '下载',
+        icon: 'download'
+      },
+      {
+        // 就地打包：当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」。
+        // 容器里也能打 —— 由容器里的 agent 用 Go 标准库产包，不依赖容器里有 tar
+        id: 'archive',
+        label: many ? `打包这 ${targets.length} 项` : '打包',
+        icon: 'box'
+      }
+    ],
+    [
+      // 复制进面板剪贴板；粘贴只接受同源（同会话同容器），跨面板给提示
+      { id: 'copy', label: many ? `复制这 ${targets.length} 项` : '复制', icon: 'copy' },
+      {
+        id: 'paste',
+        label: mode.value === 'project' ? '粘贴到此目录' : '粘贴到当前目录',
+        icon: 'paste',
+        disabled: !canPaste.value || (mode.value === 'project' && !(targets.length === 1 && targets[0].isDir))
+      }
+    ],
+    [
+      { id: 'copy-path', label: many ? `复制这 ${targets.length} 项的路径` : '复制路径', icon: 'link' },
+      ...(mode.value === 'project'
+        ? [{ id: 'copy-rel-path', label: '复制相对路径', icon: 'link' as const }]
+        : [])
+    ],
+    [
+      // 重命名只能对一项，多选时给个禁用项比整条去掉更好读
+      { id: 'rename', label: '重命名', icon: 'pencil', disabled: many, hint: isMacPlatform ? '↩' : 'F2' },
+      {
+        id: 'delete',
+        label: many ? `删除这 ${targets.length} 项` : '删除',
+        icon: 'trash',
+        danger: true,
+        hint: isMacPlatform ? '⌘⌫' : 'Del'
+      }
+    ],
     // compose 文件特供：右键直接编排（down 落手前在 runCompose 里确认）。
     // 本机面板没有这一项 —— compose 走的是远端 exec / agent 通道
-    ...(isComposeTarget(targets) && !isLocal.value
+    isComposeTarget(targets) && !isLocal.value
       ? [
           { id: 'compose-up', label: 'Compose: up -d', icon: 'play' as const },
           { id: 'compose-restart', label: 'Compose: restart', icon: 'refresh' as const },
           { id: 'compose-down', label: 'Compose: down', icon: 'square' as const, danger: true }
         ]
-      : [])
-  ]
+      : []
+  ])
 }
 
 /** 项目模式行菜单：共用语义一份，头部加「从文件夹中查找」、尾部加退出 */
-function buildProjectRowMenuItems(entry: FileEntry): ContextMenuItem[] {
-  return [
-    ...(entry.isDir ? [{ id: 'search-in-folder', label: '从文件夹中查找', icon: 'search' as const }] : []),
-    ...buildRowMenuItems([entry]),
-    { id: 'exit-project', label: '退出项目模式', icon: 'x' as const }
-  ]
+function buildProjectRowMenuItems(targets: FileEntry[]): ContextMenuItem[] {
+  return joinMenuGroups([
+    targets.length === 1 && targets[0].isDir
+      ? [{ id: 'search-in-folder', label: '从文件夹中查找', icon: 'search' as const }]
+      : [],
+    buildRowMenuItems(targets),
+    [{ id: 'exit-project', label: '退出项目模式', icon: 'x' as const }]
+  ])
 }
 
 /** 空白处右键：当前目录的菜单（和资源管理器一致，先清掉选区） */
@@ -747,10 +962,13 @@ function onBlankContextMenu(e: MouseEvent): void {
   menu.value = {
     x: e.clientX,
     y: e.clientY,
-    items: [
-      { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' },
-      { id: 'paste', label: '粘贴到当前目录', icon: 'paste', disabled: !canPaste.value }
-    ]
+    items: joinMenuGroups([
+      [
+        { id: 'enter-project', label: '以此处进入项目模式', icon: 'folder' },
+        { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' }
+      ],
+      [{ id: 'paste', label: '粘贴到当前目录', icon: 'paste', disabled: !canPaste.value }]
+    ])
   }
 }
 
@@ -788,7 +1006,8 @@ async function onMenuSelect(id: string): Promise<void> {
   const targets = menuTargets
   closeMenu()
   if (id === 'enter-project') {
-    if (targets[0]) enterProject(targets[0].path)
+    // 行上 = 以该文件夹为根；空白处（targets 为空）= 以当前目录为根
+    enterProject(targets[0]?.path ?? cwd.value)
     return
   }
   if (id === 'search-in-folder') {
@@ -833,10 +1052,12 @@ async function onMenuSelect(id: string): Promise<void> {
     return
   }
   if (!targets.length) return
-  if (id === 'download') await downloadTargets(targets)
+  if (id === 'copy-path') void copyPaths(targets, false)
+  else if (id === 'copy-rel-path') void copyPaths(targets, true)
+  else if (id === 'download') await downloadTargets(targets)
   else if (id === 'archive') await archiveTargets(targets)
   else if (id === 'copy') {
-    panelClipboard.value = { key: panelKey.value, paths: targets.map((t) => t.path) }
+    panelClipboard.value = { key: panelKey.value, paths: targets.map((t) => t.path), isLocal: isLocal.value }
     clearSelection()
   } else if (id === 'rename') startRename(targets[0])
   else if (id === 'delete') await removeTargets(targets)
@@ -941,24 +1162,81 @@ function openInTerminal(dir?: string): void {
 }
 
 // ---- 拖拽上传 ----
-function onDrop(e: DragEvent): void {
-  dragOver.value = false
-  const files: DroppedFile[] = [...(e.dataTransfer?.files ?? [])].map((f) => ({
+/** DataTransfer → DroppedFile（webUtils 解析真实路径；行 drop 与面板 drop 共用） */
+function droppedFilesOf(e: DragEvent): DroppedFile[] {
+  return [...(e.dataTransfer?.files ?? [])].map((f) => ({
     path: window.api.getPathForFile(f),
     name: f.name,
     size: f.size
   }))
-  // 项目模式落到树的选中目录（或根），browse 落当前目录
-  const dir = mode.value === 'project' ? (treeRef.value?.selectedDirOrRoot() ?? projectRoot.value) : cwd.value
+}
+
+function enqueueTo(dir: string, files: DroppedFile[]): void {
   // 会话已断/远端不可写时不能静默失败，否则用户以为拖进去了
   if (files.length) void guard(() => window.api.enqueueDropped(fsSessionId.value, dir, files, ctrName.value))
 }
 
+function onDrop(e: DragEvent): void {
+  dragOver.value = false
+  dropRowPath.value = null
+  const files = droppedFilesOf(e)
+  // 项目模式落到树的选中目录（或根），browse 落当前目录
+  const dir = mode.value === 'project' ? (treeRef.value?.selectedDirOrRoot() ?? projectRoot.value) : cwd.value
+  enqueueTo(dir, files)
+}
+
+// ---- 行级 drop：拖到某个文件夹行上 = 传进那个文件夹（文件行 = 它所在目录）----
+function onRowDragOver(e: DragEvent, entry: FileEntry): void {
+  e.preventDefault()
+  // 自己高亮自己，不让根面板再画整框虚线
+  e.stopPropagation()
+  dropRowPath.value = entry.path
+}
+
+function onRowDragLeave(e: DragEvent): void {
+  // dragleave 在子元素间移动也会触发，relatedTarget 还在行内就不清高亮（防闪烁）
+  const row = e.currentTarget as HTMLElement
+  if (e.relatedTarget instanceof Node && row.contains(e.relatedTarget)) return
+  dropRowPath.value = null
+}
+
+function onRowDrop(e: DragEvent, entry: FileEntry): void {
+  e.preventDefault()
+  // 关键：不能冒泡到 .explorer 根的 @drop —— 否则一次拖拽入队两批任务
+  e.stopPropagation()
+  dragOver.value = false
+  dropRowPath.value = null
+  enqueueTo(entry.isDir ? entry.path : parentOf(entry.path), droppedFilesOf(e))
+}
+
+/** 项目树行抛上来的 drop（树组件不碰 IPC，落点目录已算好） */
+function onTreeDropFiles(p: { dir: string; files: DroppedFile[] }): void {
+  dragOver.value = false
+  enqueueTo(p.dir, p.files)
+}
+
+/** 拖拽中止（Esc / 拖出窗口）没有 drop 事件，残留的悬停高亮靠它兜底清掉 */
+function onDragEnd(): void {
+  dragOver.value = false
+  dropRowPath.value = null
+}
+
 // ---- 项目模式：树的事件回调 ----
-/** 树选中变化：记住单选对象，并把 cwd 跟踪同步过去（「在终端打开」/新标签 cwd 继承靠它） */
+/**
+ * 面板自己同步给终端的 cwd（「在终端打开」/新标签继承靠它）。
+ * followTerminal watch 收到同一个值时必须跳过 —— 否则形成回环：
+ * 点选 → setCwd → watch 当「终端 cd」→ reveal → select 单选 ——
+ * 多选刚点上就被自己的 reveal 塌缩掉（只有开着「跟随终端」才踩得到）。
+ */
+let panelSetCwd = ''
+
+/** 树选中变化：记住焦点行，并把 cwd 跟踪同步过去 */
 function onTreeSelect(entry: FileEntry | null): void {
   treeSelected.value = entry
-  if (entry) store.setCwd(props.sessionId, entry.isDir ? entry.path : parentOf(entry.path))
+  if (entry) {
+    panelSetCwd = entry.isDir ? entry.path : parentOf(entry.path)
+    store.setCwd(props.sessionId, panelSetCwd)
+  }
 }
 
 /** 树单击文件 → 预览打开（斜体标签，会被下一个预览替换） */
@@ -1063,8 +1341,101 @@ function watchTransfers(): void {
   })
 }
 
+// ---- 目录变更推送：终端里建/删文件，面板即时可见（VS Code 同款）----
+/*
+ * 链路：远端/容器 = agent fs_watch（inotify，复用 serve 通道）；本机 = 主进程 fs.watch。
+ * 监听集合 = 「看得见的目录」（browse 的 cwd / 项目树根 + 已展开目录），
+ * cd/展开/折叠时整组替换（幂等）。老 agent 没有这个方法 → 降级回手动刷新。
+ */
+/** 降级标记：agent 太老/没装时不再重试（面板回到点刷新的旧体验） */
+let fsWatchDegraded = false
+let fsWatchArmed = false
+let fsWatchTimer: number | null = null
+let unsubscribeFsWatch: (() => void) | null = null
+/** 组件已卸载：syncFsWatch 的 IPC 在飞时撞上卸载，靠它在 await 后补退订 */
+let disposed = false
+
+/** 当前「看得见的目录」全量集合 */
+function visibleDirs(): string[] {
+  if (mode.value === 'project') return treeRef.value?.expandedDirs() ?? []
+  return cwd.value ? [cwd.value] : []
+}
+
+/** 监听集合同步（300ms 防抖：cd/展开/折叠连串变化只发一次整组替换） */
+function scheduleFsWatchSync(): void {
+  if (fsWatchDegraded) return
+  if (fsWatchTimer !== null) window.clearTimeout(fsWatchTimer)
+  fsWatchTimer = window.setTimeout(() => {
+    fsWatchTimer = null
+    void syncFsWatch()
+  }, 300)
+}
+
+async function syncFsWatch(): Promise<void> {
+  const dirs = visibleDirs()
+  try {
+    if (isLocal.value) {
+      await window.api.localFsWatch(fsSessionId.value, dirs)
+      if (disposed) {
+        // IPC 在飞时组件卸载了：本地监听是 (owner, sessionId) 键控，补退自己这份
+        void window.api.localFsWatch(fsSessionId.value, [])
+        return
+      }
+      fsWatchArmed = true
+      return
+    }
+    if (fsWatchArmed) await window.api.agentUpdateFsWatch(fsSessionId.value, ctrName.value, dirs)
+    else {
+      await window.api.agentWatchFs(fsSessionId.value, ctrName.value, dirs)
+      fsWatchArmed = true
+    }
+    if (disposed) {
+      // 同上：arm 落在死组件上没人会退订，补一发
+      void window.api.agentUnwatchFs(fsSessionId.value, ctrName.value)
+      return
+    }
+  } catch (err) {
+    // 只对「老 agent 没有这个方法」降级（不再重试）；
+    // 重连窗口/通道抖动是瞬时的，保持现状让下次 sync 自然重试
+    if (err instanceof Error && /unknown method/i.test(err.message)) fsWatchDegraded = true
+  }
+}
+
+/** 变更事件 → 走上传刷新同一套防抖：项目模式重列受影响的树目录，browse 重列 cwd */
+function watchFsEvents(): void {
+  unsubscribeFsWatch = window.api.onAgentFsEvent((sid, ctr, data) => {
+    if (sid !== fsSessionId.value) return
+    if ((ctr ?? undefined) !== ctrName.value) return
+    if (data.event === 'agent_closed') {
+      // 通道死了：主进程按订阅意图在重连后自动重建，这里只需下次同步时重发集合
+      fsWatchArmed = false
+      return
+    }
+    if (data.event !== 'fs' || !data.dirs?.length) return
+    if (mode.value === 'project') {
+      if (pendingTreeRefresh !== 'all') for (const d of data.dirs) pendingTreeRefresh.add(d)
+    }
+    // browse 只盯了 cwd，有事件就是它变了（scheduleRefresh 的 browse 分支走 load()）
+    scheduleRefresh()
+  })
+}
+
 // 会话切换时重新加载
-watch(() => props.sessionId, init)
+watch(() => props.sessionId, (newId, oldId) => {
+  // 先退订旧会话的监听（组件不重挂载，旧泳道的 owner 一直占着，
+  // 主进程归零判断永远过不了 → 远端 inotify 挂到窗口销毁）
+  if (oldId && oldId !== newId) {
+    if (oldId.startsWith(LOCAL_ID_PREFIX)) void window.api.localFsWatch(oldId, [])
+    else if (fsWatchArmed) void window.api.agentUnwatchFs(oldId, ctrName.value)
+  }
+  // 新会话的 agent 情况未知：监听状态与降级标记都重来
+  fsWatchArmed = false
+  fsWatchDegraded = false
+  void init()
+})
+
+// cd / 模式切换 → 监听集合跟着换（展开/折叠由树的 dirs-change 事件报上来）
+watch([cwd, mode], scheduleFsWatchSync)
 
 // 在面板开着的时候装上/升级了容器助手：从「无米下锅/版本过旧」进入正常态
 watch(
@@ -1079,6 +1450,8 @@ watch(
   () => (store.followTerminal ? store.cwdBySession[props.sessionId] : undefined),
   (dir) => {
     if (!dir) return
+    // 面板自己同步过去的值：不是终端在 cd，不能绕回去 reveal（会把多选塌缩成单选）
+    if (dir === panelSetCwd) return
     if (mode.value === 'project') {
       // 根外目录不跳：待在项目里是「项目模式」的存在意义（要出去就退出项目模式）
       void treeRef.value?.reveal(dir)
@@ -1090,7 +1463,10 @@ watch(
 
 onMounted(() => {
   window.addEventListener('mousedown', onMouseNav, true)
+  window.addEventListener('dragend', onDragEnd)
   watchTransfers()
+  watchFsEvents()
+  scheduleFsWatchSync()
   // 本机面板：解析终端跑的是哪种 shell（「在终端打开」的引号策略靠它，同 TerminalPanel）
   if (isLocal.value) {
     void window.api
@@ -1104,8 +1480,15 @@ onMounted(() => {
   void init()
 })
 onBeforeUnmount(() => {
+  disposed = true
   window.removeEventListener('mousedown', onMouseNav, true)
+  window.removeEventListener('dragend', onDragEnd)
   unsubscribeTransfers?.()
+  unsubscribeFsWatch?.()
+  if (fsWatchTimer !== null) window.clearTimeout(fsWatchTimer)
+  // 退订目录监听：本机清空集合，远端/容器摘泳道（通道是否收归 AgentManager 归零判断）
+  if (isLocal.value) void window.api.localFsWatch(fsSessionId.value, [])
+  else if (fsWatchArmed) void window.api.agentUnwatchFs(fsSessionId.value, ctrName.value)
   if (refreshTimer !== null) window.clearTimeout(refreshTimer)
   // 只释放真的持有过的通道：版本过旧等路径从没 hold 过，
   // 盲 release 会把别人（终端标签）在用的 agent 通道误关
@@ -1119,12 +1502,13 @@ onBeforeUnmount(() => {
 
 <template>
   <div
+    ref="explorerEl"
     class="explorer"
     :class="{ 'drag-over': dragOver }"
     tabindex="0"
     @keydown="onKeydown"
     @dragover.prevent="dragOver = true"
-    @dragleave.prevent="dragOver = false"
+    @dragleave.prevent="((dragOver = false), (dropRowPath = null))"
     @drop.prevent="onDrop"
   >
     <!-- 工具栏（后退/前进/上一级/过滤是 browse 概念，项目模式下隐藏） -->
@@ -1265,9 +1649,9 @@ onBeforeUnmount(() => {
           v-focus
           class="rename-input"
           placeholder="文件夹名"
-          @keyup.enter="submitNewDir"
-          @keyup.esc="creatingDir = false"
-          @blur="submitNewDir"
+          @keydown.enter="!$event.isComposing && submitNewDir(true)"
+          @keyup.esc="cancelNewDir"
+          @blur="submitNewDir()"
         />
       </div>
 
@@ -1277,10 +1661,13 @@ onBeforeUnmount(() => {
         v-for="(entry, index) in visibleEntries"
         :key="entry.path"
         class="row"
-        :class="{ selected: isSelected(entry) }"
+        :class="{ selected: isSelected(entry), 'drop-target': dropRowPath === entry.path }"
         @click="onRowClick($event, entry, index)"
         @contextmenu.prevent="onRowContextMenu($event, entry, index)"
         @dblclick="openEntry(entry)"
+        @dragover="onRowDragOver($event, entry)"
+        @dragleave="onRowDragLeave"
+        @drop="onRowDrop($event, entry)"
       >
         <FileIcon :entry="entry" :size="15" />
         <input
@@ -1288,8 +1675,8 @@ onBeforeUnmount(() => {
           v-model="renameValue"
           v-focus
           class="rename-input"
-          @keyup.enter="submitRename(entry)"
-          @keyup.esc="renamingPath = null"
+          @keydown.enter="!$event.isComposing && submitRename(entry, true)"
+          @keyup.esc="cancelRename"
           @blur="submitRename(entry)"
         />
         <span v-else class="file-name" :title="entry.path">{{ entry.name }}</span>
@@ -1349,12 +1736,16 @@ onBeforeUnmount(() => {
           :container-name="ctrName"
           :is-win="isWinLocal"
           @select="onTreeSelect"
+          @selection-change="treeSelection = $event"
           @preview-file="onTreePreviewFile"
           @open-file="onTreeOpenFile"
+          @request-delete="removeTargets($event)"
           @row-contextmenu="onTreeRowContextMenu"
           @blank-contextmenu="onTreeBlankContextMenu"
           @rename-submit="renameTo($event.entry, $event.name)"
           @create-submit="createDirIn($event.dir, $event.name)"
+          @drop-files="onTreeDropFiles"
+          @dirs-change="scheduleFsWatchSync"
         />
         <SearchPanel
           v-show="searchOpen"
@@ -1618,6 +2009,12 @@ onBeforeUnmount(() => {
   width: 2px;
   border-radius: 1px;
   background: var(--accent-text);
+}
+/* 行级 drop 目标：拖到哪个文件夹行上就高亮哪一行（区别于整面板的虚线框） */
+.row.drop-target {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+  background: var(--bg-hover);
 }
 /* 按下态统一在上面的 .row:active 里（深一档 + 半像素下沉） */
 .file-name {

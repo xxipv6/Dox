@@ -474,6 +474,21 @@ body {
   cursor: default;
 }
 
+/* 菜单分组分隔线（VS Code 式分组） */
+.menu-separator {
+  height: 1px;
+  margin: var(--sp-1) var(--sp-2);
+  background: var(--border);
+}
+
+/* 菜单项右侧快捷键提示 */
+.menu-hint {
+  margin-left: auto;
+  padding-left: var(--sp-3);
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+
 /* 空态文案：五个面板里原本各写一份，padding 有 4px 2px 也有 8px */
 .empty-hint {
   padding: var(--sp-2);

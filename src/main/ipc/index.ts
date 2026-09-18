@@ -36,6 +36,7 @@ import { createContainerTransferIO } from '../container/containerTransfer'
 import type { ContainerIO } from '../sftp/TransferManager'
 import { agentVersionOlder } from '../../shared/agentVersion'
 import { createAgentStreamIO } from '../agent/agentStream'
+import { LocalFsWatcher } from '../sftp/LocalFsWatcher'
 import type { ProcessService } from '../proc/ProcessService'
 import type { AiUsageService } from '../aiusage/AiUsageService'
 import type { ComposeService } from '../compose/ComposeService'
@@ -232,6 +233,20 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.agentFsRelease, (event, sessionId: string, containerName?: string) =>
     agentManager.releaseChannel(sessionId, containerName, event.sender)
   )
+  // ---- 目录变更推送：远端/容器走 agent fs_watch，本机走主进程 fs.watch（事件同走 agent:fsEvent）----
+  const localFsWatcher = new LocalFsWatcher()
+  ipcMain.handle(IpcChannels.agentWatchFs, (event, sessionId: string, containerName: string | undefined, dirs: string[]) =>
+    agentManager.watchFs(sessionId, containerName, event.sender, dirs)
+  )
+  ipcMain.handle(IpcChannels.agentUnwatchFs, (event, sessionId: string, containerName?: string) =>
+    agentManager.unwatchFs(sessionId, containerName, event.sender)
+  )
+  ipcMain.handle(IpcChannels.agentUpdateFsWatch, (_event, sessionId: string, containerName: string | undefined, dirs: string[]) =>
+    agentManager.updateFsWatch(sessionId, containerName, dirs)
+  )
+  ipcMain.handle(IpcChannels.localFsWatch, (event, sessionId: string, dirs: string[]) =>
+    localFsWatcher.setDirs(event.sender, sessionId, dirs)
+  )
   /*
    * agent 白名单泛通道：进程面板 / 静默执行 / 用量条等共用。
    * 方法必须落在白名单里 —— 泛通道不等于泛权限，渲染层拼什么字符串
@@ -287,6 +302,38 @@ export function registerIpc(
     IpcChannels.containerListeners,
     (_event, parentSessionId: string, containerName: string) =>
       containerManager.containerListeners(parentSessionId, containerName)
+  )
+
+  // ---- 镜像管理（入口：侧栏设备右键「容器管理」抽屉的镜像页）----
+
+  ipcMain.handle(IpcChannels.containerImages, (_event, parentSessionId: string) =>
+    containerManager.listImages(parentSessionId)
+  )
+  ipcMain.handle(IpcChannels.containerImageDf, (_event, parentSessionId: string) =>
+    containerManager.imageDf(parentSessionId)
+  )
+  ipcMain.handle(IpcChannels.containerImagePull, (event, parentSessionId: string, ref: string) =>
+    containerManager.pullImage(parentSessionId, ref, event.sender)
+  )
+  ipcMain.handle(IpcChannels.containerImagePullCancel, (_event, parentSessionId: string) =>
+    containerManager.cancelImagePull(parentSessionId)
+  )
+  ipcMain.handle(
+    IpcChannels.containerImageRemove,
+    (_event, parentSessionId: string, ids: string[], force: boolean) =>
+      containerManager.removeImages(parentSessionId, ids, force)
+  )
+  ipcMain.handle(IpcChannels.containerImagePrune, (_event, parentSessionId: string, all: boolean) =>
+    containerManager.pruneImages(parentSessionId, all)
+  )
+  ipcMain.handle(IpcChannels.containerBuilderPrune, (_event, parentSessionId: string) =>
+    containerManager.pruneBuildCache(parentSessionId)
+  )
+  ipcMain.handle(IpcChannels.containerImageSave, (_event, parentSessionId: string, ref: string) =>
+    containerManager.exportImage(parentSessionId, ref)
+  )
+  ipcMain.handle(IpcChannels.containerImageSaveLocal, (_event, ref: string, outPath: string) =>
+    containerManager.exportImageLocal(ref, outPath)
   )
 
   // ---- 传输队列 ----
@@ -453,6 +500,36 @@ export function registerIpc(
   )
 
   ipcMain.handle(IpcChannels.transferList, () => transferManager.list())
+
+  // 跨面板粘贴：远端 → 本机当前目录（静默入队，不弹任何对话框）
+  ipcMain.handle(
+    IpcChannels.transferDownloadTo,
+    async (
+      _event,
+      sessionId: string,
+      items: { remotePath: string; name: string; isDir: boolean }[],
+      localDir: string
+    ) => {
+      const nested = await Promise.all(
+        items.map((item) =>
+          item.isDir
+            ? transferManager.enqueueDownloadDir(sessionId, item.remotePath, localDir)
+            : transferManager.enqueueDownload(sessionId, item.remotePath, join(localDir, sanitizeWinName(item.name)))
+        )
+      )
+      return nested.flat()
+    }
+  )
+
+  // 跨面板粘贴：远端 A → 远端 B 互传（同台 cp / P2P 直传 / 本机中继，自动选路）
+  ipcMain.handle(
+    IpcChannels.transferServerCopy,
+    (_event, srcSessionId: string, paths: string[], dstSessionId: string, dstDir: string, allowP2p: boolean) =>
+      transferManager.enqueueServerCopy(srcSessionId, paths, dstSessionId, dstDir, {
+        // 用户授权过才解析目标地址去试 P2P；跳板机/未保存会话 sessionTarget 给 null → 直接中继
+        p2pTarget: allowP2p ? (sessionManager.sessionTarget(dstSessionId) ?? undefined) : undefined
+      })
+  )
 
   ipcMain.handle(IpcChannels.transferCancel, (_event, id: string) => transferManager.cancel(id))
   ipcMain.handle(IpcChannels.transferClearFinished, () => transferManager.clearFinished())

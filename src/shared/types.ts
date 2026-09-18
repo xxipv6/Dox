@@ -335,6 +335,33 @@ export interface ContainerInfo {
 /** 容器生命周期操作（白名单之外的动作在主进程不存在入口） */
 export type ContainerControlAction = 'start' | 'stop' | 'unpause' | 'remove'
 
+/** 一个镜像（docker images 的一行） */
+export interface ContainerImage {
+  repository: string
+  tag: string
+  /** 短 id（12 位） */
+  id: string
+  size: string
+  createdSince: string
+  /** 有容器（含已停止）引用它；false 即 1Panel 口径的「未使用」 */
+  inUse: boolean
+}
+
+/** docker system df 的一行（Images/Containers/Local Volumes/Build Cache） */
+export interface ImageDfRow {
+  type: string
+  count: string
+  size: string
+  /** docker 原文，含百分比（"1.2GB (45%)"） */
+  reclaimable: string
+}
+
+/** 镜像拉取的流式输出一行 */
+export interface ImagePullEvent {
+  op: 'pull'
+  line: string
+}
+
 /** 一次容器列表探测的结果 */
 export interface ContainerList {
   runtime: 'docker' | 'podman'

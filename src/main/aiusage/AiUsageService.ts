@@ -171,7 +171,8 @@ function parseGlm(account: AiAccount, data: Record<string, unknown>): AiUsageRes
   if (payload.level) out.membership = String(payload.level).toUpperCase()
 
   const limits = Array.isArray(payload.limits) ? (payload.limits as Record<string, unknown>[]) : []
-  const tokenLimits = limits.filter((item) => item.type === 'TOKENS_LIMIT')
+  // v2 套餐返回 TOKENS_LIMIT，新版套餐（额度制）返回 CREDIT_LIMIT —— 字段含义一致，两种都认
+  const tokenLimits = limits.filter((item) => item.type === 'TOKENS_LIMIT' || item.type === 'CREDIT_LIMIT')
   let fiveHour = tokenLimits.find((item) => item.unit === 3)
   let weekly = tokenLimits.find((item) => item.unit === 6)
   // 兼容没有 unit 字段的旧返回：按重置时间排序，前者 5 小时窗，后者每周窗
