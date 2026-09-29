@@ -51,6 +51,8 @@ export interface ContainerTabInfo {
 export interface SessionTab {
   tabId: string
   title: string
+  /** 用户重命名的标题（布局快照随它持久化）；tabLabel 里它优先于一切推导 */
+  customTitle?: string
   /** ssh = 远端宿主机；local = 本地终端（node-pty）；container = 容器内 shell */
   kind: 'ssh' | 'local' | 'container'
   /** SSH 标签页的连接配置，分屏时用于克隆出新会话；本地标签页为 null */
@@ -735,6 +737,8 @@ export const useSessionStore = defineStore('sessions', () => {
 
   /** 标签标题：本地终端显示当前目录（shell integration 上报），其余用 tab.title */
   function tabLabel(tab: SessionTab): string {
+    // 用户重命名优先：改过的标签不再跟随 cwd 跟踪/默认推导
+    if (tab.customTitle) return tab.customTitle
     const sessionId = tab.panes.find((p) => p.paneId === tab.activePaneId)?.sessionId
     const cwd = sessionId ? cwdBySession[sessionId] : undefined
     if (tab.kind === 'local' && cwd) {
@@ -742,6 +746,12 @@ export const useSessionStore = defineStore('sessions', () => {
       return name ? `本地 · ${name}` : '本地终端'
     }
     return tab.title
+  }
+
+  /** 重命名标签：空串 = 清除自定义名（回到默认推导） */
+  function renameTab(tab: SessionTab, title: string): void {
+    const t = title.trim()
+    tab.customTitle = t || undefined
   }
 
   /*
@@ -1033,6 +1043,7 @@ export const useSessionStore = defineStore('sessions', () => {
     deviceKeyForSession,
     tabStatus,
     tabLabel,
+    renameTab,
     setHome,
     setLastExitCode,
     connect,

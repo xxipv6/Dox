@@ -186,6 +186,8 @@ export interface AppSettings {
 export interface LayoutTabSnapshot {
   kind: 'ssh' | 'local'
   title: string
+  /** 用户重命名过的标题（优先级高于 title 与本地 cwd 推导） */
+  customTitle?: string
   split: 'none' | 'row' | 'column'
   paneCount: number
   active: boolean

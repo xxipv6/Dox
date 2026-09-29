@@ -17,6 +17,7 @@ import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
 import { useUpdaterStore } from './stores/updater'
 import { useWhatsNewStore } from './stores/whatsnew'
+import { vFocus } from './directives/focus'
 import { pushToast } from './stores/toast'
 import SessionSidebar from './components/SessionSidebar.vue'
 import TitleBar from './components/TitleBar.vue'
@@ -261,6 +262,20 @@ const tabsCompact = computed(() => tabbarCompact(store.tabs.length, tabsWidth.va
 
 /** 溢出清单开关 */
 const tabListOpen = ref(false)
+
+/** 标签重命名：双击标题或右键「重命名标签」进入；Enter/失焦提交，Esc 取消 */
+const renamingTabId = ref<string | null>(null)
+const renameValue = ref('')
+
+function startRenameTab(tab: SessionTab): void {
+  renamingTabId.value = tab.tabId
+  renameValue.value = tab.customTitle ?? store.tabLabel(tab)
+}
+
+function commitRenameTab(tab: SessionTab): void {
+  store.renameTab(tab, renameValue.value)
+  renamingTabId.value = null
+}
 /** 被挤出可视区的标签个数（▾ 上那个数字） */
 const hiddenTabCount = ref(0)
 
@@ -352,6 +367,7 @@ const tabMenuItems = computed<ContextMenuItem[]>(() => {
   const others = store.tabs.length - 1
   const right = store.tabs.length - idx - 1
   return [
+    { id: 'rename', label: '重命名标签', icon: 'pencil' },
     { id: 'close', label: '关闭当前标签', icon: 'x' },
     { id: 'others', label: others > 0 ? `关闭其他 ${others} 个` : '关闭其他标签', icon: 'x', disabled: others === 0 },
     { id: 'right', label: right > 0 ? `关闭右侧 ${right} 个` : '关闭右侧标签', icon: 'x', disabled: right === 0 },
@@ -363,7 +379,8 @@ function runTabMenu(id: string): void {
   const tab = tabMenu.value?.tab
   tabMenu.value = null
   if (!tab) return
-  if (id === 'close') store.closeTab(tab)
+  if (id === 'rename') startRenameTab(tab)
+  else if (id === 'close') store.closeTab(tab)
   else if (id === 'others') store.closeOtherTabs(tab)
   else if (id === 'right') store.closeTabsToRight(tab)
   else if (id === 'all') store.closeAllTabs()
@@ -518,7 +535,18 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
             >
               <Icon v-if="store.broadcastTabIds.has(tab.tabId)" name="check" :size="10" />
             </button>
-            <span class="tab-title">{{ store.tabLabel(tab) }}</span>
+            <!-- 双击标题重命名（自定义名随布局快照持久化；置空 = 恢复默认） -->
+            <input
+              v-if="renamingTabId === tab.tabId"
+              v-model="renameValue"
+              v-focus
+              class="tab-rename"
+              @click.stop
+              @keydown.enter="!$event.isComposing && commitRenameTab(tab)"
+              @keydown.esc.stop="renamingTabId = null"
+              @blur="commitRenameTab(tab)"
+            />
+            <span v-else class="tab-title" @dblclick.stop="startRenameTab(tab)">{{ store.tabLabel(tab) }}</span>
             <!-- 上一条命令失败时留个记号：滚屏后也能看出刚才那条命令挂了 -->
             <span
               v-if="activeExitCode(tab)"
@@ -986,6 +1014,18 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+/* 重命名内联输入框：占位与标题一致，不顶开标签宽度 */
+.tab-rename {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-hover);
+  border: 1px solid var(--accent-text);
+  border-radius: var(--r-xs);
+  color: var(--fg);
+  font-size: inherit;
+  padding: 0 var(--sp-1);
+  outline: none;
 }
 .tab .status-dot,
 .tab .tab-bc,

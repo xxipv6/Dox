@@ -505,10 +505,15 @@ const breadcrumbs = computed(() => {
 
 async function load(dir?: string): Promise<void> {
   const seq = ++loadSeq
-  loading.value = true
+  // 只有「换目录」才把列表换成加载中——原位刷新（fs_watch 推送/操作后刷新）
+  // 换列表会把滚动条打回顶部、选区清空，拖滚动条拖到一半被顶回去就是这么来的
+  const navigating = dir !== undefined && dir !== cwd.value
+  if (navigating) {
+    loading.value = true
+    // 换目录后旧路径已经没意义，留着会选中一个看不见的东西
+    clearSelection()
+  }
   errorMsg.value = ''
-  // 换目录后旧路径已经没意义，留着会选中一个看不见的东西
-  clearSelection()
   const prev = cwd.value
   try {
     if (dir) cwd.value = dir
@@ -517,6 +522,11 @@ async function load(dir?: string): Promise<void> {
     // 旧目录列表覆盖当前目录。
     if (seq !== loadSeq) return
     entries.value = nextEntries
+    if (!navigating) {
+      // 原位刷新：选区收缩到仍然存在的条目，不整组清空
+      const live = new Set(nextEntries.map((e) => e.path))
+      selected.value = new Set([...selected.value].filter((p) => live.has(p)))
+    }
     // 与终端的 cwd 跟踪保持同步（作为下次 cd 相对路径的基准）
     store.setCwd(props.sessionId, cwd.value)
   } catch (err) {

@@ -45,6 +45,7 @@ export const useLayoutStore = defineStore('layout', () => {
       tabs: persistable.map((tab) => ({
         kind: tab.kind,
         title: tab.title,
+        customTitle: tab.customTitle,
         split: tab.split,
         paneCount: tab.panes.length,
         active: tab.tabId === store.activeTabId,
@@ -80,7 +81,7 @@ export const useLayoutStore = defineStore('layout', () => {
     const store = useSessionStore()
     watch(
       () => [
-        ...store.tabs.map((t) => [t.tabId, t.split, t.panes.length, t.title, t.tabId === store.activeTabId]),
+        ...store.tabs.map((t) => [t.tabId, t.split, t.panes.length, t.title, t.customTitle, t.tabId === store.activeTabId]),
         Object.values(store.cwdBySession).join('')
       ],
       () => {
@@ -136,6 +137,8 @@ export const useLayoutStore = defineStore('layout', () => {
         const tab = store.tabs.at(-1)
         if (!tab || tab.tabId === before) continue
         restored++
+        // 重命名过的标签把自定义名贴回去
+        if (item.customTitle) tab.customTitle = item.customTitle
 
         // 落回原目录：SSH 会话连上后注入 cd（local 已在 spawn 时落地）。
         // 等半秒让 shell 就绪，否则输入可能被握手期丢掉
