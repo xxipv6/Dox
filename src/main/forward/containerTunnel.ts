@@ -234,8 +234,14 @@ export class ContainerTunnelManager {
     if (ev.op === 'close') {
       const sock = this.sockets.get(connKey)
       if (sock) {
-        sock.destroy()
         this.sockets.delete(connKey)
+        // 不能 destroy：拨号在途（pending）时 destroy 会把已缓冲的写整个丢掉 ——
+        // 容器侧「一接一发即关」的短连接（printf|nc、健康检查）open→data→close
+        // 三帧几乎同时到，data 帧的 sock.write 还缓冲在 connect 队列里，
+        // destroy 一调数据全灭。end() 等 connect 完成后把缓冲冲刷出去再 FIN；
+        // 对端迟迟不关由兜底 destroy 收口。
+        sock.end()
+        setTimeout(() => sock.destroy(), 10_000).unref?.()
       }
     }
   }

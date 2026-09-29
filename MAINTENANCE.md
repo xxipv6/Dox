@@ -284,6 +284,7 @@ node scripts/verify-cli.mjs         # CLI 伴侣：--cli 参数单实例转发�
 node scripts/verify-shell-env.mjs   # 新终端环境解析：POSIX 假 $SHELL / Windows 注册表注入变量，终端里可见
 node scripts/verify-tar-transfer.mjs # tar 整流文件夹传输：格式纯函数 + 2000 文件树双向 sha256 + 取消两条路 + UI 冒烟
 node scripts/verify-csv-table.mjs   # 编辑器 CSV/TSV 表格视图：解析边界、表格↔文本切换撤销保真、渲染截断
+node scripts/verify-container-tunnel.mjs <host> [port] [user] [pass] # 容器端口转发（agent 隧道）：-L/-R 双向字节流 + 短连接不丢数据
 node scripts/verify-search.mjs      # 项目搜索本机路径：纯函数 + e2e（分组/排除/跳行/Aa/正则/范围）
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
