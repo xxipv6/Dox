@@ -19,7 +19,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.7.4"
+var version = "0.8.1"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -82,6 +82,8 @@ func serve() error {
 	// fs_watch 懒创建（inotify fd 按需）；stop / stdin 关闭时随进程收
 	var fsw *fsWatcher
 	var fsWG sync.WaitGroup
+	// 端口隧道（容器转发）：监听与连接挂在 hub 上，stop / 通道断开统一收口
+	tunnels := newTunnelHub(enc)
 	// 文件请求来自传输窗口和多个面板，不能无限制地创建 goroutine。
 	// 8 个并发足够填满 SSH 窗口，同时避免 fs_du/archive 与分块读写一起
 	// 把远端磁盘和内存打满；超出的请求在这里排队，响应仍按 id 对应。
@@ -153,6 +155,7 @@ func serve() error {
 			if fsw != nil {
 				fsw.close()
 			}
+			tunnels.closeAll()
 			// 等待异步文件请求完成再退出，避免 stop 抢在 fs_write_commit /
 			// 回包之前执行，调用方收到一个无响应的 pending 请求。
 			fsWG.Wait()
@@ -190,6 +193,16 @@ func serve() error {
 				case "net_conns":
 					r, err := netConns(req.Params)
 					writeCallResult(enc, req.ID, r, err)
+				case "tunnel_start":
+					r, err := tunnels.start(req.Params)
+					writeCallResult(enc, req.ID, r, err)
+				case "tunnel_connect":
+					r, err := tunnels.dial(req.Params)
+					writeCallResult(enc, req.ID, r, err)
+				case "tunnel_data":
+					writeCallResult(enc, req.ID, map[string]bool{"ok": true}, tunnels.data(req.Params))
+				case "tunnel_close":
+					writeCallResult(enc, req.ID, map[string]bool{"ok": true}, tunnels.closeTunnel(req.Params))
 				default:
 					_ = enc.Encode(response{ID: req.ID, Error: "unknown method: " + req.Method})
 				}
@@ -197,6 +210,7 @@ func serve() error {
 		}
 	}
 	// stdin 关闭 = SSH 通道断了：agent 没有存在的意义，跟着退出
+	tunnels.closeAll()
 	return scanner.Err()
 }
 

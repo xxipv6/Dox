@@ -135,6 +135,17 @@ interface WatchEntry {
   fs: { owners: Set<WebContents>; active: boolean; dirs: string[] }
   /** 文件面板等一次性调用方：持有期间通道不因 watch 退订归零而关闭 */
   holders: Set<WebContents>
+  /** 端口隧道意图（容器转发）：ruleId → 容器内监听地址，重连后按它重建 */
+  tunnels: Map<string, string>
+}
+
+/** 隧道事件载荷（agent 行 {event:'tunnel', data:{…}} 的 data 部分） */
+export interface TunnelEventPayload {
+  id: string
+  conn: number
+  op: 'open' | 'data' | 'close'
+  data?: string
+  err?: string
 }
 
 /**
@@ -396,7 +407,8 @@ export class AgentManager {
         ports: { owners: new Set(), active: false },
         stats: { owners: new Set(), active: false },
         fs: { owners: new Set(), active: false, dirs: [] },
-        holders: new Set()
+        holders: new Set(),
+        tunnels: new Map()
       }
       this.watches.set(key, w)
     }
@@ -411,7 +423,8 @@ export class AgentManager {
       const stale =
         (w.ports.owners.size > 0 && !w.ports.active) ||
         (w.stats.owners.size > 0 && !w.stats.active) ||
-        (w.fs.owners.size > 0 && !w.fs.active)
+        (w.fs.owners.size > 0 && !w.fs.active) ||
+        w.tunnels.size > 0
       if (stale) void this.rebuildWatch(key, w)
     }
   }
@@ -425,7 +438,7 @@ export class AgentManager {
     for (const holder of w.holders) {
       if (holder.isDestroyed()) w.holders.delete(holder)
     }
-    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size === 0) {
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size + w.tunnels.size === 0) {
       if (this.watches.get(key) === w) this.watches.delete(key)
       return
     }
@@ -447,6 +460,8 @@ export class AgentManager {
         await this.callOn(ch, 'fs_watch', { dirs: w.fs.dirs })
         w.fs.active = true
       }
+      // 隧道意图在这里只保证通道存活：真正的 tunnel_start 由 ForwardManager
+      // 的 restartBySession 重新发起（规则生命周期单一归属，两边都开会撞 id）
     } catch {
       // 重建失败：留在降级态（渲染层轮询顶着），下次重连/重试再试
       this.broadcast(w, { event: 'agent_closed' })
@@ -486,6 +501,8 @@ export class AgentManager {
     for (const p of ch.pending.values()) p.reject(new Error('agent 通道已断开'))
     ch.pending.clear()
     try { ch.stream.close() } catch { /* 已死 */ }
+    // 隧道连接全部随通道死掉：通知隧道管理器收口（意图保留，重连后重建监听）
+    this.tunnelHandlers.get(key)?.({ closed: true })
     const w = this.watches.get(key)
     if (w) {
       w.ports.active = false
@@ -493,6 +510,44 @@ export class AgentManager {
       w.fs.active = false
       this.broadcast(w, { event: 'agent_closed' })
     }
+  }
+
+  // ---- 端口隧道（容器转发）的挂钩：意图登记 + 事件回调（消费者是主进程自己）----
+
+  /** 隧道事件/通道死亡回调；null 注销 */
+  private tunnelHandlers = new Map<string, (ev: TunnelEventPayload | { closed: true }) => void>()
+
+  setTunnelHandler(
+    sessionId: string,
+    containerName: string | undefined,
+    cb: ((ev: TunnelEventPayload | { closed: true }) => void) | null
+  ): void {
+    const key = keyOf(sessionId, containerName)
+    if (cb) this.tunnelHandlers.set(key, cb)
+    else this.tunnelHandlers.delete(key)
+  }
+
+  /**
+   * 登记隧道意图：通道不被 watch 归零收掉 + 重连后自动重建监听。
+   * 实际的 tunnel_start 调用由 ContainerTunnelManager 发（它要等回包报错）。
+   */
+  addTunnelIntent(sessionId: string, containerName: string | undefined, ruleId: string, listenAddr: string): void {
+    this.watchEntry(sessionId, containerName).tunnels.set(ruleId, listenAddr)
+  }
+
+  removeTunnelIntent(sessionId: string, containerName: string | undefined, ruleId: string): void {
+    const key = keyOf(sessionId, containerName)
+    const w = this.watches.get(key)
+    if (!w) return
+    w.tunnels.delete(ruleId)
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size + w.tunnels.size > 0) return
+    this.watches.delete(key)
+    const ch = this.channels.get(key)
+    if (!ch) return
+    void this.callOn(ch, 'stop', {}).catch(() => undefined)
+    setTimeout(() => {
+      try { ch.stream.close() } catch { /* 已死 */ }
+    }, 500).unref?.()
   }
 
   /**
@@ -565,6 +620,13 @@ export class AgentManager {
           continue
         }
         if (msg.event) {
+          // 隧道帧的消费者是主进程里的 ContainerTunnelManager，不是渲染层 ——
+          // 别落进 broadcast（未知事件会被归到 ports 泳道，白白广播给界面）
+          if (msg.event === 'tunnel') {
+            const h = this.tunnelHandlers.get(key)
+            if (h) h(((msg as { data?: TunnelEventPayload }).data)!)
+            continue
+          }
           // 意图表必须现查：通道可能是 agentCall 先建的（彼时还没有任何
           // watch 条目），闭包捕获会把之后订阅的帧全部静默丢掉
           const wcur = this.watches.get(key)
@@ -698,7 +760,7 @@ export class AgentManager {
       const ch = this.channels.get(key)
       if (ch) void this.callOn(ch, 'fs_watch', { dirs: [] }).catch(() => undefined)
     }
-    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size > 0) return
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size + w.tunnels.size > 0) return
     this.watches.delete(key)
     const ch = this.channels.get(key)
     if (!ch) return
@@ -714,7 +776,7 @@ export class AgentManager {
     const w = this.watches.get(key)
     if (!w) return
     w[lane].owners.delete(owner)
-    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size > 0) return
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size + w.tunnels.size > 0) return
     this.watches.delete(key)
     const ch = this.channels.get(key)
     if (!ch) return
@@ -746,7 +808,7 @@ export class AgentManager {
     const w = this.watches.get(key)
     if (!w) return
     w.holders.delete(owner)
-    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size > 0) return
+    if (w.ports.owners.size + w.stats.owners.size + w.fs.owners.size + w.holders.size + w.tunnels.size > 0) return
     this.watches.delete(key)
     const ch = this.channels.get(key)
     if (!ch) return

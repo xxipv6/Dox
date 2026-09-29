@@ -37,6 +37,17 @@ if (goVersion !== bundledVersion) {
 // 与 app.asar 是同一次打包（Windows 覆盖安装的「新旧混合」会在这里现形）
 writeFileSync(`${outDir}/version.txt`, `${goVersion}\n`)
 
+// 更新公告守卫：发版必须带「本次更新了什么」（src/shared/whatsnew.ts 首条
+// 对齐 package.json 版本）。漏写的话用户更新完打开没有任何公告，而且再也补不上。
+const pkgVersion = JSON.parse(readFileSync('package.json', 'utf8')).version
+const whatsNewTop = readFileSync('src/shared/whatsnew.ts', 'utf8')
+  .match(/WHATS_NEW[^=]*=\s*\[\s*\{\s*version:\s*'([^']+)'/)?.[1]
+if (whatsNewTop !== pkgVersion) {
+  throw new Error(
+    `更新公告缺失：package.json 是 ${pkgVersion}，whatsnew.ts 首条是 ${whatsNewTop ?? '（解析失败）'} —— 往 WHATS_NEW 顶部加一条再发版`
+  )
+}
+
 for (const target of TARGETS) {
   const [goos, goarch] = target.split('/')
   const out = `${outDir}/dox-agent-${goos}-${goarch}`

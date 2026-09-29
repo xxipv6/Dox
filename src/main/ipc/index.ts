@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { IpcChannels } from '../../shared/ipc'
+import { whatsNewFor, type WhatsNewPayload } from '../../shared/whatsnew'
 import type {
   AiAccountInput,
   AppSettings,
@@ -90,6 +91,8 @@ export function registerIpc(
     (event, config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
       sessionManager.connect(config, event.sender, term, opts)
   )
+  // 取消进行中的连接（添加设备弹窗连接中也能点取消）
+  ipcMain.on(IpcChannels.sshConnectCancel, (event) => sessionManager.cancelConnect(event.sender))
   /*
    * 传输会话（直连容器的承载）：只收已保存设备 id，凭证不出主进程。
    * 渲染层拿不到也不该拿到这条后台连接的认证信息 —— 它只是容器/文件
@@ -643,6 +646,21 @@ export function registerIpc(
   })
 
   /*
+   * 在系统文件管理器中显示/打开本地路径（本地面板右键菜单）。
+   * 路径来自本机面板自己的条目，是用户机器上的本地路径，无需远端那类白名单。
+   */
+  ipcMain.handle(IpcChannels.shellRevealItem, (_event, path: unknown) => {
+    if (typeof path !== 'string' || !path.trim()) return
+    shell.showItemInFolder(path)
+  })
+  ipcMain.handle(IpcChannels.shellOpenPath, async (_event, path: unknown) => {
+    if (typeof path !== 'string' || !path.trim()) return
+    // openPath 失败时返回错误描述字符串（成功是空串），抛给渲染层走 toast
+    const err = await shell.openPath(path)
+    if (err) throw new Error(err)
+  })
+
+  /*
    * 剪贴板：走 Electron 的 clipboard 模块，不用渲染层的 navigator.clipboard。
    *
    * 后者在 Electron 里要求文档处于焦点，失败时只是 reject 一个没人接的 promise ——
@@ -695,4 +713,24 @@ export function registerIpc(
   ipcMain.on(IpcChannels.updaterQuitAndInstall, () => updaterQuitAndInstall())
   // 安装完整性（覆盖安装新旧混合 → 警告文案，渲染层 toast 展示，不用原生弹窗）
   ipcMain.handle(IpcChannels.bundleIntegrityCheck, () => checkBundledAgentIntegrity())
+
+  /*
+   * 更新公告：判定收口在主进程（版本只有一个权威来源 app.getVersion()）。
+   * 首次运行（lastSeenVersion 为 null）不弹 —— 新用户没有「上次」，直接记住。
+   * 当前版本没有公告条目也不弹，但同样记住，免得下个版本把旧公告再弹一遍。
+   */
+  ipcMain.handle(IpcChannels.whatsNewGet, (): WhatsNewPayload | null => {
+    const current = app.getVersion()
+    const seen = settingsStore.getLastSeenVersion()
+    if (seen === current) return null
+    const entry = whatsNewFor(current)
+    if (seen === null || !entry) {
+      settingsStore.setLastSeenVersion(current)
+      return null
+    }
+    return { version: current, notes: entry.notes }
+  })
+  ipcMain.handle(IpcChannels.whatsNewSeen, () => {
+    settingsStore.setLastSeenVersion(app.getVersion())
+  })
 }

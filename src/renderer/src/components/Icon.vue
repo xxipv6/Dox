@@ -21,6 +21,8 @@ export type IconName =
   // 自绘标题栏的窗口按钮（macOS 用系统红绿灯，不会用到这两个）
   | 'square' | 'restore'
   | 'search'
+  // 「在 Finder/资源管理器中显示」—— 跳出应用的那类动作
+  | 'external'
 
 const props = withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 14 })
 
@@ -112,6 +114,7 @@ const PATHS: Record<IconName, string[]> = {
 
   // 搜索：放大镜
   search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'M21 21l-4.35-4.35'],
+  external: ['M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6', 'M15 3h6v6', 'M10 14L21 3'],
 
   // 广播：一路进、三路出（告诉用户「这条会发给好几个会话」）
   broadcast: ['M3 12h5', 'M8 12 18 5', 'M8 12h10', 'M8 12l10 7'],

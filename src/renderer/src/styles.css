@@ -144,6 +144,9 @@
   --danger: #ef4444; /* 珊瑚红 */
   --danger-text: #dc2626; /* 白底 4.8:1 */
   --danger-soft: #fdecec;
+  /* 容器转发徽标（L/R/D 之外的第四种）：紫，与状态语义无关 */
+  --purple-text: #7c3aed; /* 白底 5.6:1 */
+  --purple-soft: #f3e8fd;
 
   --overlay: rgba(15, 23, 42, 0.35);
 
@@ -222,6 +225,8 @@
   --danger: #f87171;
   --danger-text: var(--danger);
   --danger-soft: rgba(248, 113, 113, 0.14);
+  --purple-text: #c4b5fd;
+  --purple-soft: rgba(167, 139, 250, 0.16);
 
   --overlay: rgba(0, 0, 0, 0.55);
 

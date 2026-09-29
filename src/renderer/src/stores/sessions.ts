@@ -509,17 +509,23 @@ export const useSessionStore = defineStore('sessions', () => {
     chain?: string[]
   ): Promise<void> {
     const chainKey = (t: SessionTab): string => (t.container?.chain ?? []).join('▸')
-    const live = tabs.value.find(
+    /*
+     * 同一个容器允许开多个 shell 标签（与同一台主机开多个 SSH 标签同理）——
+     * 活着的不再抢焦点复用。
+     * 但「已断开的同容器标签」仍复用重连：双击/连点的第二下落在 connecting 态上
+     * 才聚焦（防重复开），死标签复用防止关了就多一条尸体。
+     */
+    const connecting = tabs.value.find(
       (t) =>
         t.kind === 'container' &&
         !t.container?.logs &&
         t.container?.parentSessionId === parentSessionId &&
         t.container.containerName === box.name &&
         chainKey(t) === (chain ?? []).join('▸') &&
-        t.panes.some((p) => p.status === 'connected' || p.status === 'connecting')
+        t.panes.some((p) => p.status === 'connecting')
     )
-    if (live) {
-      activeTabId.value = live.tabId
+    if (connecting) {
+      activeTabId.value = connecting.tabId
       return
     }
     const dead = tabs.value.find(

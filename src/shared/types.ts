@@ -280,6 +280,8 @@ export interface ForwardRule {
   listenPort: number
   targetHost: string
   targetPort: number
+  /** 容器转发：容器名（local = 本机监听/容器内拨目标，remote = 容器内监听/本机拨目标） */
+  container?: string
   status: 'active' | 'error' | 'stopped'
   error?: string
 }
@@ -291,6 +293,9 @@ export interface ForwardRuleInput {
   targetHost: string
   targetPort: number
   listenHost?: string
+  /** 容器转发：容器名（sessionId 是承载它的父会话，本机容器 = 'local' 哨兵）。
+   *  此时 local = 本机监听/容器内拨目标，remote = 容器内监听/本机拨目标（经容器助手隧道） */
+  container?: string
 }
 
 /** 快捷命令片段 */

@@ -521,6 +521,18 @@ node scripts/generate-icon.mjs --preview   # 另出 shots/icon-sizes.png（16/32
 - 真机验证只能在 Windows：装旧版 → 设置 → 检查更新 → 下载 → 重启安装。
   mac 本机（未签名）永远是 supported=false，验不了链路。
 
+### 更新公告（「本次更新了什么」）
+
+更新后第一次打开会弹公告。数据源是 `src/shared/whatsnew.ts` 的 `WHATS_NEW`
+（应用内数据，不走 updater 的 releaseNotes —— generic 镜像源只解析 latest.yml，
+那里面没有 notes 字段）。**发版前往数组顶部加一条，version 对齐 package.json**；
+`scripts/build-agent.mjs` 会校验首条版本，忘写直接构建失败。
+
+判定与已读状态在主进程（`whatsnew:get` / `whatsnew:seen`，已读版本存
+settingsStore 顶层 `lastSeenVersion` —— **不能进 AppSettings**，渲染层 persist()
+整体覆盖会把它抹掉，公告就变成每次都弹）。首次运行（从没记过版本）不弹；
+当前版本没有条目也不弹，但都照样记已读。验证：`node scripts/verify-whatsnew.mjs`。
+
 ---
 
 ## 7. 踩过的坑（环境相关）

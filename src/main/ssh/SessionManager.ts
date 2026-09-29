@@ -136,11 +136,36 @@ export class SessionManager {
   private sessions = new Map<string, ActiveSession>()
   /** requestId → 等待用户决策的 hostVerifier Promise resolve */
   private pendingVerify = new Map<string, (decision: HostKeyDecision) => void>()
+  /** owner → 进行中的连接尝试（取消用：密码输错撞上慢服务器时用户能立刻收手） */
+  private pendingConnects = new Map<WebContents, Set<{ abort: () => void }>>()
 
   constructor(
     private readonly resolveSavedSession?: SavedSessionResolver,
     private readonly knownHosts?: KnownHostsStore
   ) {}
+
+  /** 取消某个窗口名下全部进行中的连接（添加设备弹窗的「取消」在连接中也可点） */
+  cancelConnect(owner: WebContents): number {
+    const set = this.pendingConnects.get(owner)
+    if (!set?.size) return 0
+    for (const e of [...set]) e.abort()
+    return set.size
+  }
+
+  /** 登记一次连接尝试的取消入口，返回撤销函数（settle 后调用） */
+  private trackConnect(owner: WebContents, abort: () => void): () => void {
+    let set = this.pendingConnects.get(owner)
+    if (!set) {
+      set = new Set()
+      this.pendingConnects.set(owner, set)
+    }
+    const entry = { abort }
+    set.add(entry)
+    return () => {
+      set.delete(entry)
+      if (!set.size) this.pendingConnects.delete(owner)
+    }
+  }
 
   /**
    * 建立连接并打开交互式 shell，返回会话 id（失败抛错）。
@@ -420,17 +445,31 @@ export class SessionManager {
 
     return new Promise((resolve, reject) => {
       let settled = false
-      client.on('ready', () => {
+      // 取消入口：用户主动收手（密码错了不想等慢服务器）→ 掐连接 + 拒绝 Promise
+      const untrack = this.trackConnect(owner, () => {
+        if (settled) return
         settled = true
-        resolve({ client, jumps })
+        for (const jump of jumps) jump.end()
+        client.end()
+        reject(new Error('已取消连接'))
+      })
+      const settle = (fn: () => void): void => {
+        settled = true
+        untrack()
+        fn()
+      }
+      client.on('ready', () => {
+        if (settled) return
+        settle(() => resolve({ client, jumps }))
       })
       // 必须持久监听：settle 之后到 wireSession/wireTransport 接管之前，
       // 以及会话中途的 error，都需要有监听者，否则 Node 会直接抛出打崩主进程
       client.on('error', (err: Error) => {
         if (!settled) {
-          settled = true
-          for (const jump of jumps) jump.end()
-          reject(err)
+          settle(() => {
+            for (const jump of jumps) jump.end()
+            reject(err)
+          })
         }
       })
       client.connect(connectConfig)
@@ -454,14 +493,29 @@ export class SessionManager {
 
     return new Promise((resolve, reject) => {
       let settled = false
+      // shell 阶段的取消入口：ready 之后 openClient 的登记已撤销，这里重新挂
+      const untrack = this.trackConnect(owner, () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        cleanupJumps()
+        client.end()
+        reject(new Error('已取消连接'))
+      })
+      const settle = (fn: () => void): void => {
+        settled = true
+        untrack()
+        fn()
+      }
       // shell 通道可能一直不响应（远端 MaxSessions 打满等），readyTimeout 覆盖不到，
       // 这里加整体超时，避免 UI 永远停在「正在连接」
       const timer = setTimeout(() => {
         if (settled) return
-        settled = true
-        cleanupJumps()
-        client.end()
-        reject(new Error('连接超时：SSH 已建立但未能在 30 秒内打开 shell 通道'))
+        settle(() => {
+          cleanupJumps()
+          client.end()
+          reject(new Error('连接超时：SSH 已建立但未能在 30 秒内打开 shell 通道'))
+        })
       }, SHELL_TIMEOUT_MS)
 
       client.shell(
@@ -472,12 +526,12 @@ export class SessionManager {
             client.end()
             cleanupJumps()
             if (!settled) {
-              settled = true
-              reject(err)
+              settle(() => reject(err))
             }
             return
           }
           settled = true
+          untrack()
           resolve({ client, shell: stream, jumps })
         }
       )

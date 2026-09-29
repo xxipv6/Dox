@@ -13,6 +13,7 @@ import { SettingsStore } from './store/settingsStore'
 import { SftpService } from './sftp/SftpService'
 import { TransferManager } from './sftp/TransferManager'
 import { ForwardManager } from './forward/ForwardManager'
+import { ContainerTunnelManager } from './forward/containerTunnel'
 import { ContainerManager } from './container/ContainerManager'
 import { LocalPtyManager } from './local/LocalPtyManager'
 import { AgentManager } from './agent/AgentManager'
@@ -87,14 +88,6 @@ const transferManager = new TransferManager(
   // tar 整流传输要在连接上开 exec 通道
   (sessionId) => sessionManager.getClient(sessionId)
 )
-const forwardManager = new ForwardManager(
-  (sessionId) => sessionManager.getClient(sessionId),
-  (rules) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(IpcChannels.forwardUpdate, rules)
-    }
-  }
-)
 /*
  * 容器终端：跑在父 SSH 连接上的一条 docker exec 通道。
  *
@@ -104,6 +97,16 @@ const forwardManager = new ForwardManager(
 const containerManager = new ContainerManager((id) => sessionManager.getClient(id))
 const agentManager = new AgentManager(sessionManager, (id) => containerManager.runtimeBinary(id))
 agentFsHolder.bridge = agentManager
+const containerTunnels = new ContainerTunnelManager(agentManager)
+const forwardManager = new ForwardManager(
+  (sessionId) => sessionManager.getClient(sessionId),
+  (rules) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IpcChannels.forwardUpdate, rules)
+    }
+  },
+  containerTunnels
+)
 const processService = new ProcessService((id) => sessionManager.getClient(id), agentManager)
 // AI 容量速览：主进程常驻轮询（5 分钟一轮），结果缓存 + 广播
 const aiUsageService = new AiUsageService(configStore)

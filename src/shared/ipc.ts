@@ -2,6 +2,8 @@
 export const IpcChannels = {
   // SSH 会话
   sshConnect: 'ssh:connect',
+  /** 取消进行中的连接（密码输错撞上慢服务器时，用户不该被弹窗卡到超时） */
+  sshConnectCancel: 'ssh:connectCancel',
   /** 传输会话：不开 shell 的后台连接（直连容器的承载，入参为已保存设备 id） */
   sshConnectTransport: 'ssh:connectTransport',
   sshInput: 'ssh:input',
@@ -148,6 +150,10 @@ export const IpcChannels = {
   zmodemWriteFile: 'zmodem:writeFile',
   /** 用系统浏览器打开外部链接（终端里的 URL；主进程侧只放行 http/https） */
   shellOpenExternal: 'shell:openExternal',
+  /** 在系统文件管理器中显示该条目并选中（本地面板右键用，路径是本机的） */
+  shellRevealItem: 'shell:revealItem',
+  /** 用系统文件管理器打开一个本地目录（本地面板右键用） */
+  shellOpenPath: 'shell:openPath',
   /*
    * 剪贴板读写走主进程的 Electron clipboard 模块，不用渲染层的
    * navigator.clipboard：后者在 Electron 里要求文档处于焦点，失败是 reject 到
@@ -213,5 +219,12 @@ export const IpcChannels = {
   /** 主进程 → 渲染进程：更新状态快照（整体替换） */
   updaterEvent: 'updater:event',
   /** 安装完整性自检（resources/agent 与 asar 同包）：有警告返回文案，无则 null */
-  bundleIntegrityCheck: 'app:bundleIntegrityCheck'
+  bundleIntegrityCheck: 'app:bundleIntegrityCheck',
+  /*
+   * 更新公告：版本有变化且有对应条目时返回 {version, notes}，否则 null。
+   * 首次运行（从没记过版本）静默记住当前版本，不弹 —— 新用户没有「上次」。
+   */
+  whatsNewGet: 'whatsnew:get',
+  /** 公告关闭后调用，把当前版本记成「已读」 */
+  whatsNewSeen: 'whatsnew:seen'
 } as const

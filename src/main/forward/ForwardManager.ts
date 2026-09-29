@@ -3,6 +3,7 @@ import net from 'node:net'
 import type { Client, ClientChannel, TcpConnectionDetails } from 'ssh2'
 import type { ForwardRule, ForwardRuleInput } from '../../shared/types'
 import { handleSocks5 } from './socks'
+import type { ContainerTunnelManager } from './containerTunnel'
 
 interface InternalRule extends ForwardRule {
   /** 本地转发的 TCP server */
@@ -29,7 +30,9 @@ export class ForwardManager {
 
   constructor(
     private readonly getClient: (sessionId: string) => Client | undefined,
-    private readonly onUpdate: (rules: ForwardRule[]) => void
+    private readonly onUpdate: (rules: ForwardRule[]) => void,
+    /** 容器转发（type=container）委托给它：监听在容器里（agent），目标由本机拨 */
+    private readonly tunnels: ContainerTunnelManager
   ) {}
 
   list(): ForwardRule[] {
@@ -37,21 +40,29 @@ export class ForwardManager {
   }
 
   async add(input: ForwardRuleInput): Promise<ForwardRule> {
-    const client = this.getClient(input.sessionId)
-    if (!client) throw new Error('会话不存在或已断开')
+    // 容器转发不经 SSH client（数据面是 agent 通道）；容器上 SOCKS 没有意义
+    if (input.container && input.type === 'socks') throw new Error('容器转发不支持 SOCKS5')
+    const client = input.container ? undefined : this.getClient(input.sessionId)
+    if (!input.container && !client) throw new Error('会话不存在或已断开')
 
     const rule: InternalRule = {
       id: randomUUID(),
-      listenHost: input.listenHost || '127.0.0.1',
       status: 'stopped',
-      ...input
+      ...input,
+      /*
+       * 默认值必须放在 ...input 之后：渲染层会显式传 listenHost: undefined
+       * （「默认就不落库」的约定），展开在后面会把前面的默认值盖成 undefined ——
+       * forwardIn(undefined, …) 直接绑定失败。
+       */
+      listenHost: input.listenHost || '127.0.0.1'
     }
     this.rules.set(rule.id, rule)
 
     try {
-      if (rule.type === 'local') await this.startLocal(rule, client)
+      if (rule.container) await this.tunnels.start(rule)
+      else if (rule.type === 'local') await this.startLocal(rule, client!)
       else if (rule.type === 'socks') await this.startSocks(rule)
-      else await this.startRemote(rule, client)
+      else await this.startRemote(rule, client!)
       rule.status = 'active'
     } catch (err) {
       rule.status = 'error'
@@ -79,7 +90,7 @@ export class ForwardManager {
       if (rule.sessionId === sessionId && rule.status === 'active') {
         // 必须先 await 停止再改状态：否则监听端口可能仍在 listen，
         // 同端口重新添加必然 EADDRINUSE，只有重启应用才能恢复
-        const promise = this.stop(rule).then(() => {
+        const promise = (rule.container ? this.tunnels.stop(rule) : this.stop(rule)).then(() => {
           rule.status = 'stopped'
           this.emit()
         })
@@ -113,7 +124,8 @@ export class ForwardManager {
       }
       rule.error = undefined
       try {
-        if (rule.type === 'local') await this.startLocal(rule, client)
+        if (rule.container) await this.tunnels.start(rule)
+        else if (rule.type === 'local') await this.startLocal(rule, client)
         else await this.startRemote(rule, client)
         rule.status = 'active'
       } catch (err) {
@@ -206,7 +218,10 @@ export class ForwardManager {
         if (err) return reject(err)
 
         const handler = (info: TcpConnectionDetails, accept: () => ClientChannel): void => {
-          if (info.destPort !== rule.listenPort || info.destIP !== rule.listenHost) return
+          if (info.destPort !== rule.listenPort) return
+          // 通配监听（0.0.0.0 / ::）：destIP 是连接实际到达的网卡地址，不会是通配符本身，
+          // 逐条比对会把所有连接全漏掉 —— 通配时只按端口分发
+          if (rule.listenHost !== '0.0.0.0' && rule.listenHost !== '::' && info.destIP !== rule.listenHost) return
           const stream = accept()
           const socket = net.connect(rule.targetPort, rule.targetHost)
           stream.pipe(socket).pipe(stream)
@@ -221,6 +236,11 @@ export class ForwardManager {
   }
 
   private async stop(rule: InternalRule): Promise<void> {
+    // 容器转发：监听与 socket 都在 ContainerTunnelManager 手里
+    if (rule.container) {
+      await this.tunnels.stop(rule)
+      return
+    }
     if (rule.server) {
       const server = rule.server
       // 先销毁所有已建立的连接：net.Server.close() 只是停止接受新连接，

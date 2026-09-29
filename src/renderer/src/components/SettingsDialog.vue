@@ -2,6 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { FONT_PRESETS, UI_THEME_OPTIONS, useSettingsStore, type SettingsTab } from '../stores/settings'
 import { useUpdaterStore } from '../stores/updater'
+import { useWhatsNewStore } from '../stores/whatsnew'
+import { whatsNewFor } from '@shared/whatsnew'
 import { AUTO_THEME_ID, TERMINAL_THEMES } from '../utils/themes'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
 import { errorText } from '../utils/errors'
@@ -28,6 +30,17 @@ const tab = computed({
 
 function openRepo(): void {
   void window.api.openExternal('https://github.com/xxipv6/Dox')
+}
+
+/** 「关于」页的更新内容入口：不受已读状态影响，当前版本有公告条目才出按钮 */
+const currentNotes = computed(() => {
+  const v = updater.state?.currentVersion
+  return v ? (whatsNewFor(v)?.notes ?? null) : null
+})
+
+function showWhatsNew(): void {
+  const v = updater.state?.currentVersion
+  if (v && currentNotes.value) useWhatsNewStore().show({ version: v, notes: currentNotes.value })
 }
 
 useEscapeToClose(
@@ -427,6 +440,7 @@ function checkUpdates(): void {
           <label>版本</label>
           <div class="dir-pick-row">
             <span class="dir-pick-value">Dox v{{ updater.state?.currentVersion ?? '—' }}</span>
+            <button v-if="currentNotes" class="dir-pick-btn" @click="showWhatsNew">更新内容</button>
             <button class="dir-pick-btn" @click="openRepo">GitHub 仓库</button>
           </div>
           <p class="sub-note">MIT License · 问题与建议请到仓库提 Issue。</p>

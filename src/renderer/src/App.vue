@@ -16,6 +16,7 @@ import { useCloseTabShortcut } from './composables/useCloseTabShortcut'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
 import { useUpdaterStore } from './stores/updater'
+import { useWhatsNewStore } from './stores/whatsnew'
 import { pushToast } from './stores/toast'
 import SessionSidebar from './components/SessionSidebar.vue'
 import TitleBar from './components/TitleBar.vue'
@@ -24,6 +25,7 @@ import FileExplorer from './components/FileExplorer.vue'
 import TransferQueue from './components/TransferQueue.vue'
 import ComposeDrawer from './components/ComposeDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import WhatsNewDialog from './components/WhatsNewDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import Icon from './components/Icon.vue'
@@ -121,6 +123,9 @@ onMounted(async () => {
   void window.api.bundleIntegrityCheck().then((warn) => {
     if (warn) pushToast(warn, 'error', 0)
   })
+
+  // 更新公告：版本变了且有公告条目才弹（判定在主进程，首次运行不弹）
+  void useWhatsNewStore().check()
 
   /*
    * 量 .terminal-stack 的宽度决定平铺开几列。窗口缩放、侧栏收展、SFTP 面板
@@ -811,6 +816,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
     </div>
 
     <SettingsDialog />
+    <WhatsNewDialog />
     <HostKeyDialog />
     <ConfirmDialog />
     <ToastHost />

@@ -26,6 +26,7 @@ import type {
 const api: DoxApi = {
   connect: (config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
     ipcRenderer.invoke(IpcChannels.sshConnect, config, term, opts),
+  connectCancel: () => ipcRenderer.send(IpcChannels.sshConnectCancel),
   connectTransport: (savedSessionId: string) =>
     ipcRenderer.invoke(IpcChannels.sshConnectTransport, savedSessionId),
   connectLocal: (term: TermSize, shellId?: string, cwd?: string) =>
@@ -253,6 +254,9 @@ const api: DoxApi = {
 
   /* 终端里的 URL 交给系统浏览器打开；渲染层的 window.open 被主进程一律 deny */
   openExternal: (url) => ipcRenderer.invoke(IpcChannels.shellOpenExternal, url),
+  /* 本地面板右键：系统文件管理器显示/打开本地路径 */
+  revealItem: (path) => ipcRenderer.invoke(IpcChannels.shellRevealItem, path),
+  openPath: (path) => ipcRenderer.invoke(IpcChannels.shellOpenPath, path),
   /* 剪贴板走主进程：渲染层的 navigator.clipboard 在 Electron 里会静默失败 */
   writeClipboardText: (text) => ipcRenderer.invoke(IpcChannels.clipboardWriteText, text),
   readClipboardText: () => ipcRenderer.invoke(IpcChannels.clipboardReadText),
@@ -315,7 +319,10 @@ const api: DoxApi = {
     ipcRenderer.on(IpcChannels.updaterEvent, listener)
     return () => ipcRenderer.removeListener(IpcChannels.updaterEvent, listener)
   },
-  bundleIntegrityCheck: () => ipcRenderer.invoke(IpcChannels.bundleIntegrityCheck)
+  bundleIntegrityCheck: () => ipcRenderer.invoke(IpcChannels.bundleIntegrityCheck),
+  // ---- 更新公告 ----
+  whatsNewGet: () => ipcRenderer.invoke(IpcChannels.whatsNewGet),
+  whatsNewSeen: () => ipcRenderer.invoke(IpcChannels.whatsNewSeen)
 }
 
 contextBridge.exposeInMainWorld('api', api)

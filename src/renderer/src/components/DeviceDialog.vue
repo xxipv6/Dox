@@ -4,6 +4,7 @@ import type { SavedSession } from '@shared/types'
 import { useSessionStore } from '../stores/sessions'
 import { errorText } from '../utils/errors'
 import { useEscapeToClose } from '../composables/useEscapeToClose'
+import { readKnownGroups } from '../utils/groups'
 import Spinner from './Spinner.vue'
 
 const store = useSessionStore()
@@ -29,16 +30,19 @@ const busy = ref(false)
 const running = ref<null | 'save' | 'connect' | 'saveAndConnect'>(null)
 const errorMsg = ref('')
 
-/** 连接/保存进行中时保留弹窗，避免用户误以为请求已取消。 */
+/**
+ * 连接/保存进行中也能关：此时关闭 = 取消连接（主进程掐掉进行中的握手）。
+ * 密码输错撞上慢服务器/防火墙 tarpit 时，不该把用户卡到 readyTimeout（60s）。
+ */
 function requestClose(): void {
-  if (!busy.value) emit('close')
+  if (busy.value) window.api.connectCancel()
+  emit('close')
 }
 
-// 正在连接时不让 Esc 关掉：请求已经发出去了，关掉弹窗会让用户
-// 以为操作被取消了，实际连接还在后台建
+// 连接中 Esc = 取消连接（不再是「关不掉」——关不掉的取消键比错误本身更让人恼火）
 useEscapeToClose(
-  () => props.visible && !busy.value,
-  () => emit('close')
+  () => props.visible,
+  () => requestClose()
 )
 
 const form = reactive({
@@ -57,18 +61,49 @@ const form = reactive({
 const isEdit = computed(() => !!props.editing)
 const isJumpTarget = (s: SavedSession): boolean => s.id === props.editing?.id
 
-/** 已有分组名（datalist 提示用）：分组由设备反推，distinct 值即全部组 */
+/*
+ * 已有分组名：设备上的 distinct 值 ∪ 侧栏显式创建的空分组（只列已存在的组）。
+ * localStorage 不触发重算，所以每次弹窗打开时重读一遍（watch 里）——
+ * 侧栏刚建的空组，打开设备弹窗就该在候选里。
+ */
+const knownGroups = ref<string[]>([])
 const existingGroups = computed(() => {
   const names = new Set<string>()
   for (const s of store.savedSessions) if (s.group) names.add(s.group)
+  for (const g of knownGroups.value) if (g) names.add(g)
   return [...names]
 })
+
+/** 分组候选下拉：只列已存在的分组（不能自填，也就不需要按输入过滤） */
+const groupOpen = ref(false)
+const groupOptions = computed(() => existingGroups.value)
+
+function toggleGroupList(): void {
+  groupOpen.value = !groupOpen.value
+}
+
+function pickGroup(name: string): void {
+  form.group = name
+  groupOpen.value = false
+}
+
+/** 下拉展开时 Esc 只关下拉（全局的 Esc 关弹窗会被 .stop 拦在这里） */
+function onGroupKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && groupOpen.value) {
+    e.stopPropagation()
+    groupOpen.value = false
+  } else if (e.key === 'ArrowDown' && groupOptions.value.length) {
+    groupOpen.value = true
+  }
+}
 
 watch(
   () => [props.visible, props.editing, props.prefill] as const,
   ([visible]) => {
     if (!visible) return
     errorMsg.value = ''
+    groupOpen.value = false
+    knownGroups.value = readKnownGroups()
     const e = props.editing
     const p = props.prefill
     form.name = e?.name ?? ''
@@ -140,7 +175,8 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
     if (action === 'saveAndConnect') await store.connectSaved(saved)
     emit('close')
   } catch (err) {
-    errorMsg.value = errorText(err)
+    // 用户主动取消的回落（弹窗多半已关）：不摆红字
+    if (errorText(err) !== '已取消连接') errorMsg.value = errorText(err)
   } finally {
     busy.value = false
     running.value = null
@@ -155,7 +191,7 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
       <div class="dialog pop-surface">
         <div class="dialog-header">
           <span>{{ isEdit ? '编辑设备' : '添加设备' }}</span>
-          <button class="close-btn" :disabled="busy" @click="requestClose">×</button>
+          <button class="close-btn" @click="requestClose">×</button>
         </div>
 
         <div class="grid">
@@ -163,10 +199,50 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
           <input v-model="form.name" placeholder="留空则用 用户名@主机" />
 
           <label>分组</label>
-          <input v-model="form.group" list="dox-device-groups" placeholder="留空则不分组" />
-          <datalist id="dox-device-groups">
-            <option v-for="g in existingGroups" :key="g" :value="g" />
-          </datalist>
+          <!-- 只能从已存在的分组里选（分组在侧栏「＋分组」建），不许自己填 ——
+               能自填的话「运维」/「运维区」两个组就悄悄并存了 -->
+          <div class="group-combo">
+            <input
+              :value="form.group"
+              readonly
+              :placeholder="existingGroups.length ? '留空则不分组' : '还没有分组（侧栏「＋」创建）'"
+              @click="existingGroups.length && (groupOpen = !groupOpen)"
+              @keydown="onGroupKeydown"
+              @blur="groupOpen = false"
+            />
+            <button
+              v-if="form.group"
+              type="button"
+              class="combo-toggle"
+              title="移出分组"
+              tabindex="-1"
+              @mousedown.prevent="pickGroup('')"
+            >
+              ×
+            </button>
+            <button
+              v-else-if="existingGroups.length"
+              type="button"
+              class="combo-toggle"
+              tabindex="-1"
+              @mousedown.prevent="toggleGroupList"
+            >
+              ▾
+            </button>
+            <Transition name="pop" appear>
+              <div v-if="groupOpen && groupOptions.length" class="combo-list pop-surface">
+                <button
+                  v-for="g in groupOptions"
+                  :key="g"
+                  type="button"
+                  class="menu-item"
+                  @mousedown.prevent="pickGroup(g)"
+                >
+                  {{ g }}
+                </button>
+              </div>
+            </Transition>
+          </div>
 
           <label>主机地址</label>
           <div class="row">
@@ -231,7 +307,7 @@ async function run(action: 'save' | 'connect' | 'saveAndConnect'): Promise<void>
         <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
 
         <div class="actions">
-          <button class="btn" :disabled="busy" @click="requestClose">取消</button>
+          <button class="btn" @click="requestClose">{{ busy ? '取消连接' : '取消' }}</button>
           <button v-if="!isEdit" class="btn" :disabled="!valid || busy" @click="run('connect')">
             <Spinner v-if="running === 'connect'" :size="12" />
             {{ running === 'connect' ? '正在连接…' : '仅连接' }}
@@ -329,6 +405,48 @@ input.invalid {
 }
 .segmented input {
   display: none;
+}
+/* 分组 combobox：input + ▾ + 候选浮层（候选只列已存在的分组） */
+.group-combo {
+  position: relative;
+  display: flex;
+}
+.group-combo > input {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+.group-combo > input[readonly]:focus {
+  /* 只读选择框：聚焦态仍给主色描边，与可输入框同一反馈 */
+  border-color: var(--accent-text);
+}
+.combo-toggle {
+  position: absolute;
+  right: var(--sp-2);
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  padding: 0 var(--sp-1);
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.combo-toggle:hover {
+  color: var(--fg);
+}
+.combo-list {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  right: 0;
+  z-index: var(--z-menu);
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-1);
+  max-height: 180px;
+  overflow-y: auto;
 }
 .error {
   color: var(--danger-text);

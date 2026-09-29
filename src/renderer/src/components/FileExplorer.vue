@@ -45,6 +45,9 @@ const isLocal = computed(() => !props.container && props.sessionId.startsWith(LO
 const isWinLocal = computed(() => isLocal.value && window.api.platform === 'win32')
 /** 平台习惯快捷键：mac 重命名=回车、删除=⌘⌫；win/linux 重命名=F2、删除=Del（VS Code 式） */
 const isMacPlatform = window.api.platform === 'darwin'
+/** 系统文件管理器的叫法（本机面板右键菜单文案）：Finder / 资源管理器 / 文件管理器 */
+const fmName =
+  window.api.platform === 'darwin' ? 'Finder' : window.api.platform === 'win32' ? '资源管理器' : '文件管理器'
 
 /** 本机终端的 shell 种类（cmd 不认单引号）：「在终端打开」的引号策略靠它 */
 let localShellKind: string | null = null
@@ -838,7 +841,8 @@ function onTreeBlankContextMenu(p: { x: number; y: number }): void {
     items: joinMenuGroups([
       [
         { id: 'search-in-folder', label: '从文件夹中查找', icon: 'search' },
-        { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' }
+        { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' },
+        ...(isLocal.value ? [{ id: 'reveal-cwd', label: `在${fmName}中显示此目录`, icon: 'external' as const }] : [])
       ],
       [
         { id: 'new-folder', label: '新建文件夹', icon: 'folder-plus' },
@@ -881,6 +885,15 @@ function buildRowMenuItems(targets: FileEntry[]): ContextMenuItem[] {
               label: targets[0].isDir ? '在终端打开此文件夹' : '在终端打开此目录',
               icon: 'terminal' as const
             }
+          ]
+        : []),
+      // 本机面板：系统文件管理器直达（远端面板的路径不在本机，没有这项）
+      ...(isLocal.value && !many
+        ? [
+            { id: 'reveal', label: `在${fmName}中显示`, icon: 'external' as const },
+            ...(targets[0].isDir
+              ? [{ id: 'open-folder', label: `在${fmName}中打开`, icon: 'folder' as const }]
+              : [])
           ]
         : [])
     ],
@@ -965,7 +978,8 @@ function onBlankContextMenu(e: MouseEvent): void {
     items: joinMenuGroups([
       [
         { id: 'enter-project', label: '以此处进入项目模式', icon: 'folder' },
-        { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' }
+        { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' },
+        ...(isLocal.value ? [{ id: 'reveal-cwd', label: `在${fmName}中显示此目录`, icon: 'external' as const }] : [])
       ],
       [{ id: 'paste', label: '粘贴到当前目录', icon: 'paste', disabled: !canPaste.value }]
     ])
@@ -1038,6 +1052,19 @@ async function onMenuSelect(id: string): Promise<void> {
           ? targets[0].path
           : cwd.value
     openInTerminal(dir)
+    return
+  }
+  if (id === 'reveal-cwd') {
+    // 空白处菜单：browse = 当前目录；项目模式 = 项目根
+    void revealLocal(mode.value === 'project' ? projectRoot.value : cwd.value)
+    return
+  }
+  if (id === 'reveal') {
+    void revealLocal(targets[0].path)
+    return
+  }
+  if (id === 'open-folder') {
+    void openLocalPath(targets[0].path)
     return
   }
   if (id === 'paste') {
@@ -1159,6 +1186,23 @@ function openInTerminal(dir?: string): void {
   // 否则点了像没反应（SFTP 面板开着时终端可能在别的标签）
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
   if (tab) store.activeTabId = tab.tabId
+}
+
+// ---- 系统文件管理器直达（仅本机面板；路径是本机的，不经 SFTP）----
+async function revealLocal(path: string): Promise<void> {
+  try {
+    await window.api.revealItem(path)
+  } catch (err) {
+    errorMsg.value = `在${fmName}中显示失败：${errorText(err)}`
+  }
+}
+
+async function openLocalPath(path: string): Promise<void> {
+  try {
+    await window.api.openPath(path)
+  } catch (err) {
+    errorMsg.value = `在${fmName}中打开失败：${errorText(err)}`
+  }
 }
 
 // ---- 拖拽上传 ----

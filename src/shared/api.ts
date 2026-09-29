@@ -39,6 +39,7 @@ import type {
   WindowState,
   ZmodemFile
 } from './types'
+import type { WhatsNewPayload } from './whatsnew'
 
 /** preload 通过 contextBridge 暴露给渲染进程的 API（window.api） */
 export interface DoxApi {
@@ -51,6 +52,8 @@ export interface DoxApi {
     term: TermSize,
     opts?: { savedSessionId?: string }
   ): Promise<string>
+  /** 取消本窗口进行中的连接尝试（连接中的弹窗「取消」按钮用；send 不等回执） */
+  connectCancel(): void
   /**
    * 建立传输会话（不开 shell、不开终端标签的后台连接），返回会话 id。
    * 直连容器的承载：容器列表/容器标签/容器文件操作都借它的 client。
@@ -364,6 +367,11 @@ export interface DoxApi {
    */
   openExternal(url: string): Promise<void>
 
+  /** 在系统文件管理器中显示该本地路径并选中（本地面板右键用） */
+  revealItem(path: string): Promise<void>
+  /** 用系统文件管理器打开一个本地目录，失败抛错（本地面板右键用） */
+  openPath(path: string): Promise<void>
+
   /**
    * 写系统剪贴板。
    *
@@ -462,4 +470,10 @@ export interface DoxApi {
   onUpdaterEvent(cb: (state: UpdaterState) => void): () => void
   /** 安装完整性自检：覆盖安装新旧混合时返回警告文案，正常返回 null（渲染层挂载后问一次） */
   bundleIntegrityCheck(): Promise<string | null>
+
+  // ---- 更新公告 ----
+  /** 版本变了且有公告条目时返回 {version, notes}；首次运行/无条目/已读过都返回 null */
+  whatsNewGet(): Promise<WhatsNewPayload | null>
+  /** 公告关闭后调用，把当前版本记成「已读」 */
+  whatsNewSeen(): Promise<void>
 }
