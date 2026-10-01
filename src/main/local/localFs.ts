@@ -82,11 +82,11 @@ export async function realpath(p: string): Promise<string> {
   return fs.promises.realpath(p)
 }
 
-/** 探路径类型（终端 Ctrl+点击的分发依据）。跟随符号链接；不存在返回 null */
-export async function stat(p: string): Promise<{ isDir: boolean } | null> {
+/** 探路径类型与元数据（终端 Ctrl+点击分发 / 编辑器外部修改检测）。跟随符号链接；不存在返回 null */
+export async function stat(p: string): Promise<{ isDir: boolean; mtime: number; size: number } | null> {
   try {
     const st = await fs.promises.stat(p)
-    return { isDir: st.isDirectory() }
+    return { isDir: st.isDirectory(), mtime: mtimeSec(st), size: st.size }
   } catch {
     return null
   }

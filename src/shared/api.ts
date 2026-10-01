@@ -100,7 +100,7 @@ export interface DoxApi {
   sftpList(sessionId: string, dir: string, containerName?: string): Promise<FileEntry[]>
   sftpRealpath(sessionId: string, path: string, containerName?: string): Promise<string>
   /** 探路径是文件还是目录；不存在/不可读返回 null（终端路径点击用） */
-  sftpStat(sessionId: string, path: string, containerName?: string): Promise<{ isDir: boolean } | null>
+  sftpStat(sessionId: string, path: string, containerName?: string): Promise<{ isDir: boolean; mtime: number; size: number } | null>
   sftpMkdir(sessionId: string, path: string, containerName?: string): Promise<void>
   sftpRename(sessionId: string, from: string, to: string, containerName?: string): Promise<void>
   sftpDelete(sessionId: string, path: string, isDir: boolean, containerName?: string): Promise<void>

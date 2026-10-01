@@ -132,20 +132,29 @@ export class SftpService {
   }
 
   /**
-   * 探一下路径是文件还是目录（终端里 Ctrl+点击路径的「智能分发」用）。
+   * 探路径类型与元数据（终端里 Ctrl+点击路径的「智能分发」、编辑器的外部
+   * 修改检测用）。mtime 三路统一为秒（SFTP 精度，与 readText/writeText 同源）。
    * 不存在 / 不可读 / 已断开都返回 null —— 终端输出里的路径可能只是长得像，
    * 点开没有结果不算错误，不值得抛给用户。
    */
-  async stat(sessionId: string, path: string, containerName?: string): Promise<{ isDir: boolean } | null> {
+  async stat(
+    sessionId: string,
+    path: string,
+    containerName?: string
+  ): Promise<{ isDir: boolean; mtime: number; size: number } | null> {
     if (isLocalId(sessionId)) return localFs.stat(path)
     try {
       if (containerName) {
-        const res = (await this.fs(sessionId, containerName, 'fs_stat', { path })) as { is_dir: boolean }
-        return { isDir: res.is_dir }
+        const res = (await this.fs(sessionId, containerName, 'fs_stat', { path })) as {
+          is_dir: boolean
+          size: number
+          mtime: number
+        }
+        return { isDir: res.is_dir, mtime: res.mtime, size: res.size }
       }
       const sftp = await this.sessions.sftp(sessionId)
       const attrs = await statP(sftp, path)
-      return { isDir: attrs.isDirectory() }
+      return { isDir: attrs.isDirectory(), mtime: attrs.mtime, size: attrs.size }
     } catch {
       return null
     }

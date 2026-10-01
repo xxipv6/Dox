@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Compartment, EditorState, StateEffect, type Extension } from '@codemirror/state'
 import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import { indentLess, indentMore, insertTab } from '@codemirror/commands'
@@ -452,13 +452,8 @@ async function forceSave(): Promise<void> {
 async function discardReload(): Promise<void> {
   const file = active.value
   if (!file) return
-  if (!(await store.reload(props.sessionId, file.path, { discard: true }))) return
-  // 确认重读成功才拆视图：失败（掉线等）时编辑器和撤销历史原样保留
-  teardown()
-  deleteEditorState(props.sessionId, file.path)
-  dirtyBytes.delete(file.path)
-  await nextTick()
-  sync()
+  // 视图重建统一由 reloadSeq watch 做；失败（掉线等）时编辑器和撤销历史原样保留
+  await store.reload(props.sessionId, file.path, { discard: true })
 }
 
 /** 普通保存错误横幅的关闭：错误看完就散，编辑器本来就没动 */
@@ -467,24 +462,68 @@ function dismissError(): void {
   if (file) file.error = ''
 }
 
+/** 外部修改横幅的「忽略」：同一个变化不再弹（保存时的 mtime 冲突检测仍兜底） */
+function dismissExternal(): void {
+  const file = active.value
+  if (file) store.dismissExternal(props.sessionId, file.path)
+}
+
 async function reload(): Promise<void> {
   const file = active.value
   if (!file) return
-  // 重读成功才拆视图删缓存（取消确认/读取失败 = 原样保留）。
-  // teardown 会回存 state，顺序不能反 —— 删完再拆等于没删，
-  // sync() 捡起旧 state 建视图，「重载」点了内容不变就是这么来的
-  if (!(await store.reload(props.sessionId, file.path))) return
-  teardown()
-  deleteEditorState(props.sessionId, file.path)
-  dirtyBytes.delete(file.path)
-  await nextTick()
-  sync()
+  // 视图重建统一由 reloadSeq watch 做（重读成功才 bump seq；
+  // 取消确认/读取失败 = seq 不动，视图与撤销历史原样保留）
+  await store.reload(props.sessionId, file.path)
 }
 
 /** 保存提示显示 1.5 秒 */
 const justSaved = computed(() => Date.now() - savedAt.value < 1500)
 
 onBeforeUnmount(teardown)
+
+/*
+ * 重读代际号 → 视图重建：缓存的 EditorState 还是旧文档，必须废弃重建。
+ * 必须认「同一个文件的 seq 变了」——切文件标签也会碰到不同的 seq 值，
+ * 不设防的话每次切标签都删缓存，撤销历史全灭。
+ * （「重载点完内容不变」的老 bug 就是 teardown 回存 state 抢在删缓存后面，
+ *  所以这里统一收口：任何来源的重读都走这一个重建点。）
+ */
+watch(
+  () => (active.value ? `${active.value.path}\n${active.value.reloadSeq}` : ''),
+  (key, prev) => {
+    const file = active.value
+    if (!file || !prev || key === prev) return
+    if (prev.split('\n')[0] !== file.path) return // 只是切了文件标签，不是重读
+    teardown()
+    deleteEditorState(props.sessionId, file.path)
+    dirtyBytes.delete(file.path)
+    void nextTick(sync)
+  }
+)
+
+/*
+ * 外部修改跟进：干净文件自动重载，dirty 文件出横幅（逻辑在 store 的
+ * checkExternalChanges）。3s 轮询（窗口失焦时歇着）+ 聚焦/挂载即查——
+ * 切走再切回组件会重挂载，挂载这次即查正好覆盖「离开期间被改」。
+ */
+const EXTERNAL_POLL_MS = 3000
+let externalTimer: number | null = null
+function onWindowFocus(): void {
+  void store.checkExternalChanges(props.sessionId)
+}
+
+onMounted(() => {
+  void store.checkExternalChanges(props.sessionId)
+  externalTimer = window.setInterval(() => {
+    if (document.hasFocus()) void store.checkExternalChanges(props.sessionId)
+  }, EXTERNAL_POLL_MS)
+  window.addEventListener('focus', onWindowFocus)
+})
+
+onBeforeUnmount(() => {
+  if (externalTimer !== null) window.clearInterval(externalTimer)
+  window.removeEventListener('focus', onWindowFocus)
+})
 
 // savedAt 变化后需要一个计时器把提示收掉
 watch(savedAt, () => {
@@ -561,6 +600,13 @@ function dirty(file: OpenFile | null | undefined): boolean {
         <span class="banner-actions">
           <button class="banner-btn danger" :disabled="active.saving" @click="forceSave">强制覆盖</button>
           <button class="banner-btn" :disabled="active.saving" @click="discardReload">放弃本地并重新加载</button>
+        </span>
+      </div>
+      <div v-else-if="active?.externalChanged" class="editor-banner conflict">
+        <span class="banner-text">「{{ active.name }}」已在别处被修改（你的改动未受影响）。</span>
+        <span class="banner-actions">
+          <button class="banner-btn" @click="discardReload">放弃本地并重新加载</button>
+          <button class="banner-btn" @click="dismissExternal">忽略</button>
         </span>
       </div>
       <div v-else-if="active?.error" class="editor-banner">

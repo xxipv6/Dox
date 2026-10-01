@@ -81,6 +81,49 @@ try {
   check('切标签后 ⌘Z 仍能撤销（stateCache 不回归）',
     afterUndo.includes('version-C') && !afterUndo.includes('edited-C'), afterUndo.slice(0, 30))
 
+  // ---- D. 干净文件：磁盘改了，不点任何东西，轮询应自动重载 ----
+  // mtime 是秒级精度：等过秒边界再写，且内容长度不同（size 是第二信号）
+  await win.waitForTimeout(1200)
+  fs.writeFileSync(filePath, 'version-D-auto-reloaded')
+  let autoText = ''
+  for (let i = 0; i < 10; i++) {
+    await win.waitForTimeout(700)
+    autoText = await cmText()
+    if (autoText.includes('version-D-auto-reloaded')) break
+  }
+  check('干净文件自动重载成新内容', autoText.includes('version-D-auto-reloaded'), autoText.slice(0, 40))
+
+  // ---- E. dirty 文件：磁盘改了不自动动内容，出横幅；忽略→再改→再弹；放弃重载生效 ----
+  await win.locator('.cm-content').click()
+  await win.keyboard.type(' LOCAL')
+  await win.waitForTimeout(1200)
+  fs.writeFileSync(filePath, 'version-E-remotely-changed-again')
+  let banner = false
+  for (let i = 0; i < 10; i++) {
+    await win.waitForTimeout(700)
+    banner = (await win.locator('.editor-banner', { hasText: '已在别处被修改' }).count()) > 0
+    if (banner) break
+  }
+  check('dirty 文件出「已在别处被修改」横幅', banner)
+  check('本地改动未被覆盖', (await cmText()).includes('LOCAL'))
+  await win.locator('.banner-btn', { hasText: '忽略' }).click()
+  await win.waitForTimeout(400)
+  check('「忽略」后横幅消失', (await win.locator('.editor-banner').count()) === 0)
+  // 同一个变化不重复弹；新变化（mtime 再变）要重新弹
+  await win.waitForTimeout(1200)
+  fs.writeFileSync(filePath, 'version-F-final-remote-state')
+  let banner2 = false
+  for (let i = 0; i < 10; i++) {
+    await win.waitForTimeout(700)
+    banner2 = (await win.locator('.editor-banner', { hasText: '已在别处被修改' }).count()) > 0
+    if (banner2) break
+  }
+  check('新变化重新弹横幅', banner2)
+  await win.locator('.banner-btn', { hasText: '放弃本地并重新加载' }).click()
+  await win.waitForTimeout(1500)
+  check('放弃本地并重新加载显示新内容',
+    (await cmText()).includes('version-F-final-remote-state'), (await cmText()).slice(0, 40))
+
   await win.screenshot({ path: 'shots/102-editor-reload.png' })
 } finally {
   await app.close().catch(() => undefined)

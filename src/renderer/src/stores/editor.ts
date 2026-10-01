@@ -32,6 +32,13 @@ export interface OpenFile {
    * 界面据此给「强制覆盖 / 重新加载」而不是一句普通错误。
    */
   conflict: boolean
+  /** 成功重读（reload）的代际号：FileEditor 据此重建视图（手动/自动重载共用） */
+  reloadSeq: number
+  /** dirty 文件检测到外部修改：不自动动内容，置横幅让用户选（干净文件直接静默重载） */
+  externalChanged: boolean
+  /** 最近一次探到的远端 mtime（「忽略」记住它，同一个变化不重复弹） */
+  externalMtime?: number
+  externalIgnoredMtime?: number | null
   /**
    * 打开后跳到指定行（搜索结果点击）。seq 单调递增是关键：
    * 同一行点两次也要能重新触发（行号相同 seq 不同）；
@@ -119,6 +126,9 @@ export const useEditorStore = defineStore('editor', () => {
       saving: false,
       error: '',
       conflict: false,
+      reloadSeq: 0,
+      externalChanged: false,
+      externalIgnoredMtime: null,
       revealLine: opts?.line ? { line: opts.line, seq: ++revealSeq } : null
     })
 
@@ -189,6 +199,10 @@ export const useEditorStore = defineStore('editor', () => {
       file.savedContent = res.content
       file.mtime = res.mtime
       file.size = res.size
+      // 代际号推动：FileEditor 据此重建视图（缓存的 state 还是旧文档，不能接着用）
+      file.reloadSeq++
+      file.externalChanged = false
+      file.externalIgnoredMtime = null
       return true
     } catch (err) {
       file.error = errorText(err)
@@ -196,6 +210,39 @@ export const useEditorStore = defineStore('editor', () => {
     } finally {
       file.loading = false
     }
+  }
+
+  /**
+   * 探一遍打开的文件有没有被外部改过（FileEditor 轮询 + 窗口聚焦时调）。
+   * 干净文件直接静默重载；dirty 文件不动内容，置 externalChanged 横幅。
+   * 自己的保存会把 mtime 回写成服务器新值，不会误判成外部修改。
+   */
+  async function checkExternalChanges(sessionId: string): Promise<void> {
+    const list = filesOf(sessionId)
+    await Promise.allSettled(
+      list.map(async (file) => {
+        if (file.loading || file.saving) return
+        const stat = await window.api.sftpStat(file.fsSessionId ?? sessionId, file.path, file.containerName)
+        if (!stat) return // 文件没了：保存时自会报错，这里不抢戏
+        if (stat.mtime === file.mtime && stat.size === file.size) return
+        if (isDirty(file)) {
+          // 「忽略」记住的那个变化不重复弹；又有新变化（mtime 再变）重新弹
+          if (stat.mtime === file.externalIgnoredMtime) return
+          file.externalMtime = stat.mtime
+          file.externalChanged = true
+          return
+        }
+        await reload(sessionId, file.path)
+      })
+    )
+  }
+
+  /** 「忽略」本次外部修改：记住这次远端 mtime，同一个变化不再弹（保存时的 mtime 冲突检测仍会兜底） */
+  function dismissExternal(sessionId: string, path: string): void {
+    const file = filesOf(sessionId).find((f) => f.path === path)
+    if (!file) return
+    file.externalIgnoredMtime = file.externalMtime ?? null
+    file.externalChanged = false
   }
 
   /**
@@ -314,6 +361,8 @@ export const useEditorStore = defineStore('editor', () => {
     hasDirty,
     open,
     reload,
+    checkExternalChanges,
+    dismissExternal,
     save,
     close,
     setActive,
