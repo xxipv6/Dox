@@ -4,7 +4,6 @@ import { existsSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { IpcChannels } from '../../shared/ipc'
-import { whatsNewFor, type WhatsNewPayload } from '../../shared/whatsnew'
 import type {
   AiAccountInput,
   AppSettings,
@@ -713,24 +712,4 @@ export function registerIpc(
   ipcMain.on(IpcChannels.updaterQuitAndInstall, () => updaterQuitAndInstall())
   // 安装完整性（覆盖安装新旧混合 → 警告文案，渲染层 toast 展示，不用原生弹窗）
   ipcMain.handle(IpcChannels.bundleIntegrityCheck, () => checkBundledAgentIntegrity())
-
-  /*
-   * 更新公告：判定收口在主进程（版本只有一个权威来源 app.getVersion()）。
-   * 首次运行（lastSeenVersion 为 null）不弹 —— 新用户没有「上次」，直接记住。
-   * 当前版本没有公告条目也不弹，但同样记住，免得下个版本把旧公告再弹一遍。
-   */
-  ipcMain.handle(IpcChannels.whatsNewGet, (): WhatsNewPayload | null => {
-    const current = app.getVersion()
-    const seen = settingsStore.getLastSeenVersion()
-    if (seen === current) return null
-    const entry = whatsNewFor(current)
-    if (seen === null || !entry) {
-      settingsStore.setLastSeenVersion(current)
-      return null
-    }
-    return { version: current, notes: entry.notes }
-  })
-  ipcMain.handle(IpcChannels.whatsNewSeen, () => {
-    settingsStore.setLastSeenVersion(app.getVersion())
-  })
 }

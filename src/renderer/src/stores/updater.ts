@@ -9,6 +9,8 @@ import type { UpdaterState } from '@shared/types'
  */
 export const useUpdaterStore = defineStore('updater', () => {
   const state = ref<UpdaterState | null>(null)
+  /** 「新版本 vX」对话框（更新内容 + 安装动作）：标题栏 pill / 设置页共用 */
+  const dialogOpen = ref(false)
   let off: (() => void) | null = null
 
   /** App.vue 挂载时调一次；重复调用安全（幂等） */
@@ -29,5 +31,5 @@ export const useUpdaterStore = defineStore('updater', () => {
     }
   }
 
-  return { state, init }
+  return { state, dialogOpen, init }
 })

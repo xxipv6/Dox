@@ -1,47 +1,35 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useSettingsStore } from '../stores/settings'
 import { useUpdaterStore } from '../stores/updater'
 
 /*
  * 标题栏的更新提示点。
  *
- * 只在「有事可干」时出现：下好了（点它打开设置 → 重启安装）、
- * 正在下载（给个小进度，点不开任何东西，纯告知）。
+ * 只在「有事可干」时出现：发现新版 / 下好了（点它弹「更新内容」对话框，
+ * 看完条目再决定装不装）、正在下载（给个小进度，点不开任何东西，纯告知）。
  * 其余阶段（idle/checking/up-to-date/error）不打扰 —— 更新不该是常驻噪音。
  */
 const updater = useUpdaterStore()
-const settings = useSettingsStore()
 
 const phase = computed(() => updater.state?.phase)
 const percent = computed(() => Math.floor(updater.state?.percent ?? 0))
 
-/** 不支持自动更新的构建（未签名 mac）：提示点直接打开镜像下载页 */
-const manualUrl = computed(() =>
-  updater.state && !updater.state.supported ? updater.state.manualUrl : undefined
+/** 有内容可看/有动作可做的阶段（发现新版含「不支持自动更新」的手动下载支路） */
+const actionable = computed(
+  () =>
+    phase.value === 'downloaded' ||
+    (phase.value === 'available' && !updater.state?.supported && updater.state?.manualUrl)
 )
-
-function openManual(): void {
-  if (manualUrl.value) void window.api.openExternal(manualUrl.value)
-}
 </script>
 
 <template>
   <button
-    v-if="phase === 'downloaded'"
+    v-if="actionable"
     class="upd-pill ready"
-    title="新版本已下载，点击打开设置重启安装"
-    @click="settings.openDialog('about')"
+    :title="phase === 'downloaded' ? '新版本已下载，点击查看更新内容并安装' : '发现新版本，点击查看更新内容'"
+    @click="updater.dialogOpen = true"
   >
-    重启更新 v{{ updater.state?.version }}
-  </button>
-  <button
-    v-else-if="phase === 'available' && manualUrl"
-    class="upd-pill ready"
-    title="发现新版本，点击下载（当前构建不支持自动更新）"
-    @click="openManual"
-  >
-    新版 v{{ updater.state?.version }}
+    {{ phase === 'downloaded' ? `重启更新 v${updater.state?.version}` : `新版 v${updater.state?.version}` }}
   </button>
   <span v-else-if="phase === 'downloading'" class="upd-pill" title="正在下载更新">
     下载 v{{ updater.state?.version }} · {{ percent }}%

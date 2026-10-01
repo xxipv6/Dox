@@ -53,6 +53,8 @@ let state: UpdaterState = {
 const triedSources = new Set<UpdaterSource>()
 /** 发现/下载中的新版本号：广播与手动下载链接都要用 */
 let pendingVersion: string | undefined
+/** 新版本的更新内容（fetchReleaseNotes 拉到的 release 资产；拉不到就缺省） */
+let pendingNotes: string[] | undefined
 /** 下载停滞看门狗（见 STALL_TIMEOUT_MS） */
 let stallTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -101,6 +103,31 @@ function manualUrlFor(version?: string): string {
   return RELEASES_PAGE
 }
 
+/**
+ * 拉新版本的更新内容（release 资产 whatsnew.json，CI 发版时上传）。
+ * 镜像 → GitHub 直连两源都试；版本号对不上（资产比 latest.yml 晚传了几秒、
+ * 或拉到了下一轮发版的内容）就当没有 —— 没 notes 不阻塞更新。
+ */
+async function fetchReleaseNotes(version: string): Promise<void> {
+  for (const base of [MIRROR_FEED, GITHUB_FEED_BASE]) {
+    try {
+      const res = await fetch(`${base}whatsnew.json`, { signal: AbortSignal.timeout(10_000) })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = (await res.json()) as { version?: unknown; notes?: unknown }
+      if (json.version !== version || !Array.isArray(json.notes)) return
+      pendingNotes = json.notes.filter((n): n is string => typeof n === 'string')
+      // 拉回来时状态机可能已走远（下载中/已下完）：只要还指着同一版本就补进 state
+      if (state.version === version) {
+        state = { ...state, notes: pendingNotes }
+        broadcast()
+      }
+      return
+    } catch (err) {
+      console.warn(`[updater] 拉更新说明 ${base} 失败:`, err instanceof Error ? err.message : err)
+    }
+  }
+}
+
 async function check(manual = false): Promise<void> {
   // 进行中不叠检查；已下好的不动 —— 再查只会把「待安装」状态刷掉
   if (state.phase === 'checking' || state.phase === 'downloading') return
@@ -108,7 +135,8 @@ async function check(manual = false): Promise<void> {
   disarmStallWatchdog()
   triedSources.clear()
   pendingVersion = undefined
-  setPhase('checking', { error: undefined })
+  pendingNotes = undefined
+  setPhase('checking', { error: undefined, notes: undefined })
   if (!state.supported) {
     await lightweightCheck(manual)
     return
@@ -133,6 +161,7 @@ async function lightweightCheck(manual: boolean): Promise<void> {
       if (agentVersionOlder(state.currentVersion, version)) {
         pendingVersion = version
         setPhase('available', { version, manualUrl: manualUrlFor(version) })
+        void fetchReleaseNotes(version)
       } else {
         setPhase('up-to-date')
       }
@@ -224,6 +253,7 @@ export function setupAutoUpdater(): void {
     pendingVersion = info.version
     armStallWatchdog() // autoDownload 即刻开始下载，首个进度事件前也可能吊死
     setPhase('available', { version: info.version, error: undefined })
+    void fetchReleaseNotes(info.version)
   })
   autoUpdater.on('update-not-available', () => setPhase('up-to-date'))
   autoUpdater.on('download-progress', (p) => {

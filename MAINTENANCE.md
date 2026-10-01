@@ -524,15 +524,17 @@ node scripts/generate-icon.mjs --preview   # 另出 shots/icon-sizes.png（16/32
 
 ### 更新公告（「本次更新了什么」）
 
-更新后第一次打开会弹公告。数据源是 `src/shared/whatsnew.ts` 的 `WHATS_NEW`
-（应用内数据，不走 updater 的 releaseNotes —— generic 镜像源只解析 latest.yml，
-那里面没有 notes 字段）。**发版前往数组顶部加一条，version 对齐 package.json**；
-`scripts/build-agent.mjs` 会校验首条版本，忘写直接构建失败。
+**更新前展示**：发现新版时主进程拉 release 资产 `whatsnew.json`（CI package job 的
+linux  lane 在 electron-builder 发布后 `gh release upload`，镜像与 GitHub 的
+`latest/download/` 同址），条目进 `UpdaterState.notes`；标题栏 pill 与设置「关于」页的
+「新版内容」弹出 UpdateDialog —— 看完条目再决定「重启并安装 / 下载安装包 / 稍后」。
+拉不到 notes 不阻塞更新（降级成「该版本没有附带更新说明」）。更新后不再自动弹公告。
 
-判定与已读状态在主进程（`whatsnew:get` / `whatsnew:seen`，已读版本存
-settingsStore 顶层 `lastSeenVersion` —— **不能进 AppSettings**，渲染层 persist()
-整体覆盖会把它抹掉，公告就变成每次都弹）。首次运行（从没记过版本）不弹；
-当前版本没有条目也不弹，但都照样记已读。验证：`node scripts/verify-whatsnew.mjs`。
+数据源是 `src/shared/whatsnew.json`（应用内数据，不走 updater 的 releaseNotes ——
+generic 镜像源只解析 latest.yml，那里面没有 notes 字段）。**发版前往数组顶部加一条，
+version 对齐 package.json**；`scripts/build-agent.mjs` 会校验首条版本，忘写直接构建失败。
+设置「关于」页的「更新内容」按钮可随时重看当前版本的条目（`WhatsNewDialog`，无已读概念）。
+验证：`node scripts/verify-whatsnew.mjs`。
 
 ---
 

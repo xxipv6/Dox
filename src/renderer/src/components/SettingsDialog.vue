@@ -451,6 +451,13 @@ function checkUpdates(): void {
           <div class="dir-pick-row">
             <span class="dir-pick-value" :title="updateLine">{{ updateLine }}</span>
             <button
+              v-if="updater.state?.version && ['available', 'downloading', 'downloaded'].includes(updater.state.phase)"
+              class="dir-pick-btn"
+              @click="updater.dialogOpen = true"
+            >
+              新版内容
+            </button>
+            <button
               v-if="updater.state?.phase === 'downloaded'"
               class="dir-pick-btn"
               :class="{ 'upd-confirm': confirmInstall }"

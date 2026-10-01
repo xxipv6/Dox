@@ -39,7 +39,6 @@ import type {
   WindowState,
   ZmodemFile
 } from './types'
-import type { WhatsNewPayload } from './whatsnew'
 
 /** preload 通过 contextBridge 暴露给渲染进程的 API（window.api） */
 export interface DoxApi {
@@ -470,10 +469,4 @@ export interface DoxApi {
   onUpdaterEvent(cb: (state: UpdaterState) => void): () => void
   /** 安装完整性自检：覆盖安装新旧混合时返回警告文案，正常返回 null（渲染层挂载后问一次） */
   bundleIntegrityCheck(): Promise<string | null>
-
-  // ---- 更新公告 ----
-  /** 版本变了且有公告条目时返回 {version, notes}；首次运行/无条目/已读过都返回 null */
-  whatsNewGet(): Promise<WhatsNewPayload | null>
-  /** 公告关闭后调用，把当前版本记成「已读」 */
-  whatsNewSeen(): Promise<void>
 }

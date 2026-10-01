@@ -219,12 +219,5 @@ export const IpcChannels = {
   /** 主进程 → 渲染进程：更新状态快照（整体替换） */
   updaterEvent: 'updater:event',
   /** 安装完整性自检（resources/agent 与 asar 同包）：有警告返回文案，无则 null */
-  bundleIntegrityCheck: 'app:bundleIntegrityCheck',
-  /*
-   * 更新公告：版本有变化且有对应条目时返回 {version, notes}，否则 null。
-   * 首次运行（从没记过版本）静默记住当前版本，不弹 —— 新用户没有「上次」。
-   */
-  whatsNewGet: 'whatsnew:get',
-  /** 公告关闭后调用，把当前版本记成「已读」 */
-  whatsNewSeen: 'whatsnew:seen'
+  bundleIntegrityCheck: 'app:bundleIntegrityCheck'
 } as const

@@ -16,7 +16,6 @@ import { useCloseTabShortcut } from './composables/useCloseTabShortcut'
 import { useEditorStore } from './stores/editor'
 import { useLayoutStore } from './stores/layout'
 import { useUpdaterStore } from './stores/updater'
-import { useWhatsNewStore } from './stores/whatsnew'
 import { vFocus } from './directives/focus'
 import { pushToast } from './stores/toast'
 import SessionSidebar from './components/SessionSidebar.vue'
@@ -27,6 +26,7 @@ import TransferQueue from './components/TransferQueue.vue'
 import ComposeDrawer from './components/ComposeDrawer.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import WhatsNewDialog from './components/WhatsNewDialog.vue'
+import UpdateDialog from './components/UpdateDialog.vue'
 import HostKeyDialog from './components/HostKeyDialog.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import Icon from './components/Icon.vue'
@@ -125,8 +125,8 @@ onMounted(async () => {
     if (warn) pushToast(warn, 'error', 0)
   })
 
-  // 更新公告：版本变了且有公告条目才弹（判定在主进程，首次运行不弹）
-  void useWhatsNewStore().check()
+  // 更新内容在更新**前**展示（UpdaterPill/设置页 → UpdateDialog），
+  // 更新后不再自动弹公告；「关于」页的「更新内容」按钮可手动重看
 
   /*
    * 量 .terminal-stack 的宽度决定平铺开几列。窗口缩放、侧栏收展、SFTP 面板
@@ -845,6 +845,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
 
     <SettingsDialog />
     <WhatsNewDialog />
+    <UpdateDialog />
     <HostKeyDialog />
     <ConfirmDialog />
     <ToastHost />

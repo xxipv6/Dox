@@ -636,6 +636,12 @@ export interface UpdaterState {
   source?: UpdaterSource
   /** 自动更新走不通时的手动下载地址（镜像直链或 Release 页） */
   manualUrl?: string
+  /**
+   * 新版本的更新内容条目（更新前展示的数据源）。来自 release 资产
+   * whatsnew.json（CI 发版时上传；镜像/直连同址），拉不到就缺省 ——
+   * 没notes 不阻塞更新，UI 降级成「该版本未附更新说明」。
+   */
+  notes?: string[]
   /** false = 此构建不支持自动更新（未打包 / 未签名的 macOS 构建） */
   supported: boolean
 }
