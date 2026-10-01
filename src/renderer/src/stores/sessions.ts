@@ -4,14 +4,57 @@ import { AUTH_DECRYPT_FAILED } from '@shared/types'
 import type {
   ContainerInfo,
   CliCommandPayload,
+  FileEntry,
   SavedSession,
   SaveSessionInput,
+  SearchEngine,
+  SearchMatch,
   SessionStatus,
   SshSessionConfig
 } from '@shared/types'
 import { useSettingsStore } from './settings'
 import { errorText } from '../utils/errors'
 import { seedTermSize } from '../utils/termSize'
+
+/** 搜索面板跨重挂载要保住的快照（FileExplorer 经 SearchPanel.snapshot() 采集） */
+export interface ExplorerSearchState {
+  /** 面板是否停在搜索视图 */
+  open: boolean
+  /** 搜索范围（'' = 项目根） */
+  root: string
+  query: string
+  ignoreCase: boolean
+  isRegex: boolean
+  /** 结果即快照：恢复后原样展示，不自动重搜（内容过期由用户手动刷新/重搜） */
+  results: SearchMatch[]
+  doneInfo: {
+    engine: SearchEngine
+    matchCount: number
+    filesSearched: number
+    elapsedMs: number
+    truncated: boolean
+    canceled: boolean
+  } | null
+  /** 折叠的结果组（文件路径） */
+  collapsed: string[]
+}
+
+/**
+ * 文件面板跨重挂载要保住的界面状态。App.vue 按 sessionId 作 key，切标签
+ * 销毁重建 FileExplorer，组件内状态（目录/历史/滚动/树展开/搜索）随之蒸发，
+ * 全部收进这里按会话恢复。
+ */
+export interface ExplorerUiState {
+  /** 上次浏览的目录（browse 模式）。不能用 cwdBySession 当恢复源：OSC 7 会把它刷成终端的 cwd */
+  dir?: string
+  /** 后退/前进栈 */
+  hist?: { back: string[]; fwd: string[] }
+  /** 文件列表 scrollTop（browse 模式，卸载时采集） */
+  scroll?: number
+  /** 项目模式：树展开集合 + 子级缓存（恢复后零往返；过期项由 fs_watch 重挂后自愈） */
+  tree?: { root: string; expanded: string[]; children: Record<string, FileEntry[]> }
+  search?: ExplorerSearchState
+}
 
 export interface PaneState {
   paneId: string
@@ -113,6 +156,20 @@ export const useSessionStore = defineStore('sessions', () => {
   const followTerminal = ref(true)
   /** sessionId → 终端当前目录（由 TerminalPanel 的 cd 跟踪维护） */
   const cwdBySession = reactive<Record<string, string>>({})
+  /**
+   * sessionId → 文件面板的界面状态（结构见 ExplorerUiState）。
+   * 恢复源必须独立：cwdBySession 会被终端 OSC 7 持续刷成终端的 cwd。
+   */
+  const explorerUiBySession = reactive<Record<string, ExplorerUiState>>({})
+
+  function patchExplorerUi(sessionId: string, patch: Partial<ExplorerUiState>): void {
+    // 已关闭的会话不新建条目：closeTab 同步跑 clearSessionState，而 FileExplorer 的
+    // beforeUnmount（卸载采集）要等下一个 Vue flush —— 不设防的话它会把刚清掉的
+    // 记录又建回来，死会话的状态就此常住
+    const alive = tabs.value.some((t) => t.panes.some((p) => p.sessionId === sessionId))
+    if (!alive && !explorerUiBySession[sessionId]) return
+    explorerUiBySession[sessionId] = { ...explorerUiBySession[sessionId], ...patch }
+  }
   /** sessionId → 远端 home 目录 */
   const homeBySession = reactive<Record<string, string>>({})
   /** sessionId → 上一条命令的退出码（shell integration，OSC 133） */
@@ -371,6 +428,7 @@ export const useSessionStore = defineStore('sessions', () => {
   /** 标签/窗格关闭时清掉该会话的附属状态，避免长期运行下无界增长 */
   function clearSessionState(sessionId: string): void {
     delete cwdBySession[sessionId]
+    delete explorerUiBySession[sessionId]
     delete homeBySession[sessionId]
     delete exitCodeBySession[sessionId]
     pendingStatus.delete(sessionId)
@@ -1037,6 +1095,8 @@ export const useSessionStore = defineStore('sessions', () => {
     followTerminal,
     toggleFollowTerminal,
     cwdBySession,
+    explorerUiBySession,
+    patchExplorerUi,
     homeBySession,
     exitCodeBySession,
     setCwd,

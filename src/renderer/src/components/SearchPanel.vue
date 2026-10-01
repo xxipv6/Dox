@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { SearchEngine, SearchEvent, SearchMatch } from '@shared/types'
+import type { ExplorerSearchState } from '../stores/sessions'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
 
@@ -10,7 +11,13 @@ import Spinner from './Spinner.vue'
  * 引擎链 agent → rg → grep → node 全部在主进程 SearchService，这里只认
  * 一种 SearchEvent 协议。连续输入：300ms 防抖 + 新搜索取消旧 runId；
  * 旧 run 的迟到事件一律按 runId 丢弃。
+ *
+ * v-show 只在同一个 FileExplorer 挂载内保活；切标签整个面板树重挂载，
+ * 查询与结果经 initial 传入原样恢复（快照语义：恢复后不自动重搜）。
  */
+
+/** 快照里归本组件的部分（root/open 归 FileExplorer 采） */
+type SearchSnapshot = Omit<ExplorerSearchState, 'root' | 'open'>
 
 const props = defineProps<{
   /** 搜索范围（项目根，或右键「从文件夹中查找」缩到的子目录） */
@@ -26,6 +33,8 @@ const props = defineProps<{
    * 预算，白占远端/本机 CPU；已出的结果留在内存，重新打开还在。
    */
   active: boolean
+  /** 上一个挂载实例留下的快照（切标签重挂载恢复）；缺省 = 全新面板 */
+  initial?: SearchSnapshot
 }>()
 
 const emit = defineEmits<{
@@ -38,23 +47,16 @@ const emit = defineEmits<{
 /** 输入防抖（命名常量：HIG 守卫只扫带单位的字面量） */
 const SEARCH_DEBOUNCE_MS = 300
 
-const query = ref('')
+const query = ref(props.initial?.query ?? '')
 /** 默认忽略大小写（与 VS Code 一致）：「Aa」按钮点亮 = 大小写敏感 */
-const ignoreCase = ref(true)
-const isRegex = ref(false)
+const ignoreCase = ref(props.initial?.ignoreCase ?? true)
+const isRegex = ref(props.initial?.isRegex ?? false)
 
 const inputEl = ref<HTMLInputElement>()
-const results = ref<SearchMatch[]>([])
+const results = ref<SearchMatch[]>(props.initial?.results ?? [])
 const searching = ref(false)
 const errorMsg = ref('')
-const doneInfo = ref<{
-  engine: SearchEngine
-  matchCount: number
-  filesSearched: number
-  elapsedMs: number
-  truncated: boolean
-  canceled: boolean
-} | null>(null)
+const doneInfo = ref<SearchSnapshot['doneInfo']>(props.initial?.doneInfo ?? null)
 
 let activeRunId: string | null = null
 /** 调用代际号：两次 startSearch 的 invoke 会交错返回，只有最新一代允许认养 runId */
@@ -165,7 +167,7 @@ function onSearchEvent(ev: SearchEvent): void {
 }
 
 // ---- 结果分组（首次出现序；组可折叠）----
-const collapsed = ref<Set<string>>(new Set())
+const collapsed = ref<Set<string>>(new Set(props.initial?.collapsed ?? []))
 
 const groups = computed(() => {
   const out: { path: string; rel: string; matches: SearchMatch[] }[] = []
@@ -201,7 +203,19 @@ function focusInput(): void {
   inputEl.value?.select()
 }
 
-defineExpose({ focusInput })
+/** FileExplorer 在面板销毁前采集（数组拷一份，别让快照跟着后续编辑继续变） */
+function snapshot(): SearchSnapshot {
+  return {
+    query: query.value,
+    ignoreCase: ignoreCase.value,
+    isRegex: isRegex.value,
+    results: [...results.value],
+    doneInfo: doneInfo.value,
+    collapsed: [...collapsed.value]
+  }
+}
+
+defineExpose({ focusInput, snapshot })
 
 onMounted(() => {
   unsubscribe = window.api.onSearchEvent(onSearchEvent)

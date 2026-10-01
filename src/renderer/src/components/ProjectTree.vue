@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { DroppedFile, FileEntry } from '@shared/types'
+import type { ExplorerUiState } from '../stores/sessions'
 import { errorText } from '../utils/errors'
 import { useConfirmStore } from '../stores/confirm'
 import { vFocus } from '../directives/focus'
@@ -549,6 +550,30 @@ watch(
   () => emit('dirsChange')
 )
 
+// ---- 快照（FileExplorer 在树销毁前采集，重挂载/重进项目根时还原）----
+/**
+ * 展开集合 + 子级缓存是这棵树最贵的状态（逐目录 SSH 往返堆出来的）。
+ * 组件随 FileExplorer 按 sessionId 重挂载而销毁，不采快照的话切一次标签
+ * 树就打回冷启动：展开全塌、逐层重拉。
+ */
+function snapshot(): NonNullable<ExplorerUiState['tree']> {
+  return {
+    root: props.root,
+    expanded: [...expanded],
+    children: Object.fromEntries(childrenOf)
+  }
+}
+
+/** 还原快照（根不匹配说明换了项目，直接丢）。过期条目靠 fs_watch 重挂后自愈 */
+function restore(snap: ExplorerUiState['tree']): void {
+  if (!snap || snap.root !== props.root) return
+  for (const p of snap.expanded) expanded.add(p)
+  // 已加载的（如根目录刚拉的新鲜数据）不覆盖：快照只是兜底，新数据优先
+  for (const [dir, children] of Object.entries(snap.children)) {
+    if (!childrenOf.has(dir)) childrenOf.set(dir, children)
+  }
+}
+
 defineExpose({
   refreshDir,
   refreshAll,
@@ -558,7 +583,9 @@ defineExpose({
   beginCreate,
   selectAll,
   remapSelection,
-  expandedDirs
+  expandedDirs,
+  snapshot,
+  restore
 })
 
 // ---- 生命周期 ----

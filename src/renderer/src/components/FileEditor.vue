@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Compartment, EditorState, StateEffect, type Extension } from '@codemirror/state'
 import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view'
 import { indentLess, indentMore, insertTab } from '@codemirror/commands'
@@ -7,6 +7,14 @@ import { basicSetup } from 'codemirror'
 import { useEditorStore, type OpenFile } from '../stores/editor'
 import { useSettingsStore } from '../stores/settings'
 import { languageFor } from '../editor/languages'
+import {
+  csvTablePref,
+  deleteEditorState,
+  getEditorState,
+  pruneSessionStates,
+  setCsvTablePref,
+  setEditorState
+} from '../editor/stateCache'
 import { vscodeDarkSyntax, vscodeLightSyntax } from '../editor/vscodeSyntax'
 import { formatMtime, formatSize } from '../utils/format'
 import { maxCols, parseDelimited } from '../utils/csv'
@@ -28,10 +36,11 @@ let view: EditorView | null = null
 let mountedPath: string | null = null
 
 /**
- * 每个文件保留自己的 EditorState，切换标签时来回 setState。
+ * 每个文件保留自己的 EditorState，切换文件标签时来回 setState。
  * 只用一个 EditorView 重建文档的话，切走再切回来撤销历史就没了。
+ * 缓存住模块级（editor/stateCache）：本组件按 ed-<sessionId> 作 key，
+ * 切**应用**标签也会重挂载，组件内的缓存活不下来（撤销历史曾因此蒸发）。
  */
-const cachedStates = new Map<string, EditorState>()
 
 /**
  * 保存成功后的短暂提示。用时间戳而不是布尔量，
@@ -69,8 +78,7 @@ const fileSize = computed(() => {
 const mtimeText = computed(() => formatMtime(active.value?.mtime ?? 0))
 
 // ---- CSV/TSV 表格视图（默认表格，工具栏可切回文本编辑）----
-/** 每个文件的视图偏好（true=表格）。关标签时随 cachedStates 一起清；重载不清（偏好跨重载存活） */
-const csvTableByPath = reactive<Record<string, boolean>>({})
+// 视图偏好随 EditorState 一起住模块级缓存（关文件标签清；重载不清，偏好跨重载存活）
 const CSV_DELIMS: Record<string, string> = { csv: ',', tsv: '\t' }
 /** 按扩展名给分隔符；非 csv/tsv 返回 null。name 是 basename，不会踩 Windows 路径反斜杠 */
 function csvDelimiter(file: OpenFile | null): string | null {
@@ -80,7 +88,7 @@ function csvDelimiter(file: OpenFile | null): string | null {
 const isCsvActive = computed(() => csvDelimiter(active.value) !== null)
 const tableMode = computed(() => {
   const file = active.value
-  return !!file && csvDelimiter(file) !== null && (csvTableByPath[file.path] ?? true)
+  return !!file && csvDelimiter(file) !== null && (csvTablePref(props.sessionId, file.path) ?? true)
 })
 /** 表格态才解析（状态栏的 N 行 × M 列 与 CsvTable 共用这一份）；切回文本时归 null 释放中间结构 */
 const parsedRows = computed<string[][] | null>(() => {
@@ -91,14 +99,14 @@ const parsedRows = computed<string[][] | null>(() => {
 
 function toggleViewMode(): void {
   const file = active.value
-  if (file && csvDelimiter(file)) csvTableByPath[file.path] = !tableMode.value
+  if (file && csvDelimiter(file)) setCsvTablePref(props.sessionId, file.path, !tableMode.value)
 }
 
 /**
  * 语法着色的**唯一**会变的部分，所以单独放进 Compartment。
  *
  * 为什么不直接把主题塞进 buildExtensions：EditorState 是按文件缓存下来保留
- * 撤销历史的（见 cachedStates），扩展在 state 建好那一刻就冻住了 —— 用户切一次
+ * 撤销历史的（见 editor/stateCache），扩展在 state 建好那一刻就冻住了 —— 用户切一次
  * 深浅色就得重建 state，代价是他所有文件的撤销历史一起清空。
  * Compartment 支持就地 reconfigure，历史不动。
  */
@@ -320,7 +328,7 @@ function buildExtensions(path: string): Extension[] {
 }
 
 function teardown(): void {
-  if (view && mountedPath) cachedStates.set(mountedPath, view.state)
+  if (view && mountedPath) setEditorState(props.sessionId, mountedPath, view.state)
   view?.destroy()
   view = null
   mountedPath = null
@@ -340,7 +348,7 @@ function sync(): void {
 
   teardown()
   const state =
-    cachedStates.get(file.path) ??
+    getEditorState(props.sessionId, file.path) ??
     EditorState.create({ doc: file.content, extensions: buildExtensions(file.path) })
   view = new EditorView({ state, parent: hostEl.value })
   // 缓存下来的 state 里冻着**当时**的语法主题，用户中途切过深浅色的话已经过期了，
@@ -371,7 +379,7 @@ watch(
     // view 为空时早退且**不消费 seq**，所以这里先改模式、再走原流程正好接上。
     const f = active.value
     if (f && tableMode.value && f.revealLine && f.revealLine.seq !== lastRevealedSeq) {
-      csvTableByPath[f.path] = false
+      setCsvTablePref(props.sessionId, f.path, false)
       await nextTick()
     }
     await nextTick()
@@ -384,7 +392,7 @@ watch(
 /*
  * 搜索结果点进来：跳到指定行。
  *
- * 必须 dispatch（selection + 滚动效果）不能重建 state —— cachedStates 保
+ * 必须 dispatch（selection + 滚动效果）不能重建 state —— stateCache 保
  * 撤销历史是本组件的头号设计承诺，跳行不碰文档与历史。
  * lastRevealedSeq 防重放：切走再切回标签会因 path 变化重跑 watch，
  * 不能把早就消费过的跳转再放一遍（用户可能早已滚到别处）。
@@ -409,12 +417,7 @@ watch(
   () => files.value.map((f) => f.path).join('\n'),
   () => {
     const alive = new Set(files.value.map((f) => f.path))
-    for (const path of cachedStates.keys()) {
-      if (!alive.has(path)) cachedStates.delete(path)
-    }
-    for (const path of Object.keys(csvTableByPath)) {
-      if (!alive.has(path)) delete csvTableByPath[path]
-    }
+    pruneSessionStates(props.sessionId, alive)
     for (const path of dirtyBytes.keys()) {
       if (!alive.has(path)) dirtyBytes.delete(path)
     }
@@ -445,7 +448,7 @@ async function forceSave(): Promise<void> {
 async function discardReload(): Promise<void> {
   const file = active.value
   if (!file) return
-  cachedStates.delete(file.path)
+  deleteEditorState(props.sessionId, file.path)
   dirtyBytes.delete(file.path)
   teardown()
   await store.reload(props.sessionId, file.path, { discard: true })
@@ -462,7 +465,7 @@ function dismissError(): void {
 async function reload(): Promise<void> {
   const file = active.value
   if (!file) return
-  cachedStates.delete(file.path)
+  deleteEditorState(props.sessionId, file.path)
   dirtyBytes.delete(file.path)
   teardown()
   await store.reload(props.sessionId, file.path)

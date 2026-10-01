@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import type { RemoteFileContent } from '@shared/types'
+import { dropSessionStates } from '../editor/stateCache'
 import { errorText } from '../utils/errors'
 import { useConfirmStore } from './confirm'
 
@@ -264,6 +265,8 @@ export const useEditorStore = defineStore('editor', () => {
   function dropSession(sessionId: string): void {
     delete filesBySession[sessionId]
     delete activePathBySession[sessionId]
+    // 模块级的 EditorState 缓存（撤销历史等）一并清，别留在那等下一个同 id 会话
+    dropSessionStates(sessionId)
   }
 
   /**

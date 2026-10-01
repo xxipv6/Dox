@@ -37,6 +37,18 @@ const fsSessionId = computed(() => props.container?.parentSessionId ?? props.ses
 const ctrName = computed(() => props.container?.containerName)
 
 /**
+ * 上一个挂载实例留下的界面状态（目录/历史/滚动/树/搜索；结构见 store 的
+ * ExplorerUiState）。patchExplorerUi 每次整体替换记录，这里拿到的是冻结快照，
+ * 本实例之后的写不会把它带跑 —— 这正是「恢复源」该有的语义。
+ */
+const uiSnapshot = store.explorerUiBySession[props.sessionId]
+/** browse 文件列表的滚动容器（卸载时采 scrollTop，恢复目录后写回） */
+const fileListEl = ref<HTMLDivElement | null>(null)
+/** 树/搜索的最新快照：初始来自 store，之后在这些子组件每次销毁前更新（见 captureSubs） */
+const treeSnap = ref(uiSnapshot?.tree)
+const searchSnap = ref(uiSnapshot?.search)
+
+/**
  * 本机面板（本地终端标签）：同一套 IPC，主进程按 local- 前缀分流到 node:fs。
  * 与远端面板的差别都在这一处收口：路径是原生形态（Windows 盘符反斜杠）、
  * 「下载/上传」= 复制、没有 compose / du 分解（那俩是远端 agent 的能力）。
@@ -158,30 +170,49 @@ const treeSelected = ref<FileEntry | null>(null)
 /** 项目模式下树的多选快照（右键菜单/复制/删除的动作对象，selection-change 事件冻结进来） */
 const treeSelection = ref<FileEntry[]>([])
 /** 全文搜索面板（与树同位切换；树用 v-show 保活，懒加载缓存不能打回冷启动） */
-const searchOpen = ref(false)
+const searchOpen = ref(searchSnap.value?.open ?? false)
 const searchPanelRef = ref<InstanceType<typeof SearchPanel> | null>(null)
 /** 搜索范围（右键「从文件夹中查找」缩到子目录；空 = 项目根） */
-const searchRoot = ref('')
+const searchRoot = ref(searchSnap.value?.root ?? '')
 /** 设备级持久化 key：同一台设备重连/新开标签算出同一个（规则见 sessions store） */
 const deviceKey = computed(() => store.deviceKeyForSession(props.sessionId))
 /** 顶部栏展示的根名（完整路径放 title） */
 const rootName = computed(() => projectRoot.value.split(/[\\/]/).filter(Boolean).pop() ?? projectRoot.value)
 
-function enterProject(path: string): void {
+/** 树/搜索组件销毁前把状态采进本地快照（exitProject / 本组件卸载两条路径都走这里） */
+function captureSubs(): void {
+  if (mode.value !== 'project') return
+  const tree = treeRef.value
+  if (tree) treeSnap.value = tree.snapshot()
+  const panel = searchPanelRef.value
+  if (panel) searchSnap.value = { ...panel.snapshot(), root: searchRoot.value, open: searchOpen.value }
+}
+
+function enterProject(path: string, opts?: { restore?: boolean }): void {
   closeFilter()
   mode.value = 'project'
   projectRoot.value = path
   treeSelected.value = null
   treeSelection.value = []
-  searchOpen.value = false
-  searchRoot.value = ''
+  // 恢复路径（重挂载）：searchOpen/searchRoot 已在 setup 从快照初始化，不能抹掉
+  if (!opts?.restore) {
+    searchOpen.value = false
+    searchRoot.value = ''
+  }
   settings.setProjectRoot(deviceKey.value, path)
   // 与终端 cwd 跟踪保持同步（cwdBySession 的语义 = 「面板在看哪」）
   panelSetCwd = path
   store.setCwd(props.sessionId, path)
+  // 树展开与子级缓存从快照还原（根匹配才认；过期项靠 fs_watch 重挂后自愈）
+  void nextTick(() => {
+    const ts = treeSnap.value
+    if (ts && ts.root === path) treeRef.value?.restore(ts)
+  })
 }
 
 async function exitProject(): Promise<void> {
+  // 树/搜索随 mode 翻转销毁：先采快照，重进同一项目根时还原
+  captureSubs()
   mode.value = 'browse'
   projectRoot.value = ''
   treeSelected.value = null
@@ -529,6 +560,9 @@ async function load(dir?: string): Promise<void> {
     }
     // 与终端的 cwd 跟踪保持同步（作为下次 cd 相对路径的基准）
     store.setCwd(props.sessionId, cwd.value)
+    // 面板自己浏览到的位置另记一份：切标签重挂载后从它恢复（cwdBySession
+    // 会被终端 OSC 7 刷走，不能当恢复源）
+    store.patchExplorerUi(props.sessionId, { dir: cwd.value })
   } catch (err) {
     if (seq !== loadSeq) return
     // 进不去目标目录：回滚路径、保留旧列表 —— 否则面包屑指着新路径、
@@ -583,13 +617,40 @@ async function init(): Promise<void> {
   try {
     // 以远端 home 目录为起点（容器落地 /，由主进程 realpath 分路处理）
     const home = await window.api.sftpRealpath(fsSessionId.value, '.', ctrName.value)
-    // 这台设备上次停在项目模式：直接恢复（cwd 先备好 home，退出项目模式时从那里继续）。
-    // 恢复是热路径 —— 切标签会重挂载本组件（App.vue 按 sessionId 作 key）
+    // 切标签会重挂载本组件（App.vue 按 sessionId 作 key）：恢复上次浏览的目录，
+    // 切走再切回才落在原处而不是 home。项目模式同理备好 cwd，退出时从那里继续。
+    const last = uiSnapshot?.dir
+    // 这台设备上次停在项目模式：直接恢复
     const savedRoot = settings.projectRoots[deviceKey.value]
     if (savedRoot) {
-      cwd.value = home
-      enterProject(savedRoot)
+      cwd.value = last || home
+      enterProject(savedRoot, { restore: true })
       return
+    }
+    if (last && last !== home) {
+      await load(last)
+      // load 自己吞错误（回滚 cwd + 错误横幅）：恢复的目录进不去（被删/掉权限）
+      // 就清掉横幅落回 home，别把旧目录的错误糊在刚挂载的面板上
+      if (cwd.value === last) {
+        // 滚动位置随目录一起回来（load 换目录本来会回顶部，这里是「回到离开时的样子」）
+        const scroll = uiSnapshot?.scroll
+        if (scroll) {
+          // 两次写入都要核对还在原目录：用户在等待间隙点进别的目录的话，
+          // 迟到的 scrollTop 会串进新目录的列表
+          const applyScroll = (): void => {
+            if (fileListEl.value && cwd.value === last) fileListEl.value.scrollTop = scroll
+          }
+          void nextTick(() => {
+            applyScroll()
+            // 用量条等异步块晚到会把列表撑高（视口变矮、最大滚动变大），
+            // 此刻写的 scrollTop 会被钳小 —— 等布局安定后补一枪
+            window.setTimeout(applyScroll, 150)
+          })
+        }
+        return
+      }
+      errorMsg.value = ''
+      retryAction.value = null
     }
     await load(home)
   } catch {
@@ -598,25 +659,36 @@ async function init(): Promise<void> {
 }
 
 // ---- 目录历史：主动导航才入栈（load() 无参刷新 / 后退前进本身不入栈）----
-const historyBack = ref<string[]>([])
-const historyFwd = ref<string[]>([])
+// 栈存 sessions store（按 sessionId）：切标签重挂载本组件后，后退/前进不该失忆
+const savedHist = uiSnapshot?.hist
+const historyBack = ref<string[]>(savedHist ? [...savedHist.back] : [])
+const historyFwd = ref<string[]>(savedHist ? [...savedHist.fwd] : [])
+
+function persistHistory(): void {
+  store.patchExplorerUi(props.sessionId, {
+    hist: { back: [...historyBack.value], fwd: [...historyFwd.value] }
+  })
+}
 
 function nav(dir: string): void {
   if (dir === cwd.value) return
   historyBack.value.push(cwd.value)
   historyFwd.value = []
+  persistHistory()
   void load(dir)
 }
 function historyGoBack(): void {
   const dir = historyBack.value.pop()
   if (dir === undefined) return
   historyFwd.value.push(cwd.value)
+  persistHistory()
   void load(dir)
 }
 function historyGoForward(): void {
   const dir = historyFwd.value.pop()
   if (dir === undefined) return
   historyBack.value.push(cwd.value)
+  persistHistory()
   void load(dir)
 }
 
@@ -1535,6 +1607,14 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   disposed = true
+  // 重挂载（切标签）前的最后采集：树展开/搜索结果/滚动位置入 store，
+  // 下一个实例经 uiSnapshot 捡起来。beforeUnmount 时子组件还活着，快照是新鲜的
+  captureSubs()
+  store.patchExplorerUi(props.sessionId, {
+    tree: treeSnap.value,
+    search: searchSnap.value,
+    scroll: fileListEl.value?.scrollTop
+  })
   window.removeEventListener('mousedown', onMouseNav, true)
   window.removeEventListener('dragend', onDragEnd)
   unsubscribeTransfers?.()
@@ -1692,6 +1772,7 @@ onBeforeUnmount(() => {
     <!-- 文件列表；点空白处取消选中（和资源管理器一致） -->
     <div
       v-else-if="mode === 'browse'"
+      ref="fileListEl"
       class="file-list"
       @click.self="clearSelection"
       @contextmenu.self.prevent="onBlankContextMenu($event)"
@@ -1810,6 +1891,7 @@ onBeforeUnmount(() => {
           :container-name="ctrName"
           :is-win="isWinLocal"
           :active="searchOpen"
+          :initial="searchSnap"
           @close="searchOpen = false"
           @open-match="onSearchOpenMatch"
           @reset-scope="searchRoot = ''"
