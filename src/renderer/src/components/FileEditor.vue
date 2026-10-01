@@ -328,7 +328,11 @@ function buildExtensions(path: string): Extension[] {
 }
 
 function teardown(): void {
-  if (view && mountedPath) setEditorState(props.sessionId, mountedPath, view.state)
+  // 只给仍然开着的文件留 state：刚关闭的文件（列表里已没有）缓存下来，
+  // 重开时会从缓存复活成关闭前的旧内容 —— 关掉再打开还是老内容就是这么来的
+  if (view && mountedPath && store.filesOf(props.sessionId).some((f) => f.path === mountedPath)) {
+    setEditorState(props.sessionId, mountedPath, view.state)
+  }
   view?.destroy()
   view = null
   mountedPath = null
@@ -448,10 +452,11 @@ async function forceSave(): Promise<void> {
 async function discardReload(): Promise<void> {
   const file = active.value
   if (!file) return
+  if (!(await store.reload(props.sessionId, file.path, { discard: true }))) return
+  // 确认重读成功才拆视图：失败（掉线等）时编辑器和撤销历史原样保留
+  teardown()
   deleteEditorState(props.sessionId, file.path)
   dirtyBytes.delete(file.path)
-  teardown()
-  await store.reload(props.sessionId, file.path, { discard: true })
   await nextTick()
   sync()
 }
@@ -465,10 +470,13 @@ function dismissError(): void {
 async function reload(): Promise<void> {
   const file = active.value
   if (!file) return
+  // 重读成功才拆视图删缓存（取消确认/读取失败 = 原样保留）。
+  // teardown 会回存 state，顺序不能反 —— 删完再拆等于没删，
+  // sync() 捡起旧 state 建视图，「重载」点了内容不变就是这么来的
+  if (!(await store.reload(props.sessionId, file.path))) return
+  teardown()
   deleteEditorState(props.sessionId, file.path)
   dirtyBytes.delete(file.path)
-  teardown()
-  await store.reload(props.sessionId, file.path)
   await nextTick()
   sync()
 }

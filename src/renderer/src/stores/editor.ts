@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import type { RemoteFileContent } from '@shared/types'
-import { dropSessionStates } from '../editor/stateCache'
+import { dropSessionStates, deleteEditorState } from '../editor/stateCache'
 import { errorText } from '../utils/errors'
 import { useConfirmStore } from './confirm'
 
@@ -166,14 +166,15 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   /**
-   * 丢弃本地修改，重新从远端读取。
+   * 丢弃本地修改，重新从远端读取。返回是否真的重读了（取消/失败 = false，
+   * 调用方据此决定要不要重建编辑器视图 —— 视图和撤销历史不能随便拆）。
    * 不能复用 open()：它发现文件已在列表中就直接切过去，不会真的重读。
    * discard=true 跳过未保存确认（冲突横幅的「重新加载」——用户已经在横幅里做过选择了）。
    */
-  async function reload(sessionId: string, path: string, opts?: { discard?: boolean }): Promise<void> {
+  async function reload(sessionId: string, path: string, opts?: { discard?: boolean }): Promise<boolean> {
     const file = filesOf(sessionId).find((f) => f.path === path)
-    if (!file) return
-    if (!opts?.discard && isDirty(file) && !(await useConfirmStore().ask(`「${file.name}」有未保存的修改，重新加载将丢弃它们，确定？`))) return
+    if (!file) return false
+    if (!opts?.discard && isDirty(file) && !(await useConfirmStore().ask(`「${file.name}」有未保存的修改，重新加载将丢弃它们，确定？`))) return false
 
     file.loading = true
     file.error = ''
@@ -182,14 +183,16 @@ export const useEditorStore = defineStore('editor', () => {
       const res = await window.api.sftpReadText(file.fsSessionId ?? sessionId, path, file.containerName)
       if (res.binary) {
         file.error = '这是二进制文件，无法以文本方式编辑。请使用「下载」后在本地打开。'
-      } else {
-        file.content = res.content
-        file.savedContent = res.content
-        file.mtime = res.mtime
-        file.size = res.size
+        return false
       }
+      file.content = res.content
+      file.savedContent = res.content
+      file.mtime = res.mtime
+      file.size = res.size
+      return true
     } catch (err) {
       file.error = errorText(err)
+      return false
     } finally {
       file.loading = false
     }
@@ -241,6 +244,9 @@ export const useEditorStore = defineStore('editor', () => {
 
     const idx = list.indexOf(file)
     list.splice(idx, 1)
+    // 缓存的 EditorState 随关闭立刻作废：不关的话 FileEditor 卸载时还会把
+    // 视图里那份旧 state 再塞回缓存，重开文件看到的就是关闭前的旧内容
+    deleteEditorState(sessionId, path)
 
     if (activePathBySession[sessionId] === path) {
       // 关掉当前标签后落到右邻，没有则左邻（编辑器里的常见行为）
