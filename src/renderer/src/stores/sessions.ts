@@ -157,6 +157,14 @@ export const useSessionStore = defineStore('sessions', () => {
   /** sessionId → 终端当前目录（由 TerminalPanel 的 cd 跟踪维护） */
   const cwdBySession = reactive<Record<string, string>>({})
   /**
+   * sessionId → 终端自己报的 cwd（只有 TerminalPanel 写：OSC 7 / cd 跟踪确认值）。
+   * 与 cwdBySession 分开是因为后者是双向的 —— 文件面板浏览/点选也会写
+   * （语义 = 「面板在看哪」，用于面板跟随、新标签继承）。而标签标题、布局快照、
+   * 断线重连 cd 要的是「终端在哪」：面板一开就 load(home)，用 cwdBySession 会把
+   * 本地标签标题刷成 C:\Users\<name> 而不是终端真实所在目录。
+   */
+  const termCwdBySession = reactive<Record<string, string>>({})
+  /**
    * sessionId → 文件面板的界面状态（结构见 ExplorerUiState）。
    * 恢复源必须独立：cwdBySession 会被终端 OSC 7 持续刷成终端的 cwd。
    */
@@ -428,6 +436,7 @@ export const useSessionStore = defineStore('sessions', () => {
   /** 标签/窗格关闭时清掉该会话的附属状态，避免长期运行下无界增长 */
   function clearSessionState(sessionId: string): void {
     delete cwdBySession[sessionId]
+    delete termCwdBySession[sessionId]
     delete explorerUiBySession[sessionId]
     delete homeBySession[sessionId]
     delete exitCodeBySession[sessionId]
@@ -793,12 +802,14 @@ export const useSessionStore = defineStore('sessions', () => {
     return worst
   }
 
-  /** 标签标题：本地终端显示当前目录（shell integration 上报），其余用 tab.title */
+  /** 标签标题：本地终端显示终端当前目录（shell integration 上报），其余用 tab.title */
   function tabLabel(tab: SessionTab): string {
     // 用户重命名优先：改过的标签不再跟随 cwd 跟踪/默认推导
     if (tab.customTitle) return tab.customTitle
     const sessionId = tab.panes.find((p) => p.paneId === tab.activePaneId)?.sessionId
-    const cwd = sessionId ? cwdBySession[sessionId] : undefined
+    // 用 termCwdBySession 而非 cwdBySession：后者文件面板也会写，
+    // 面板浏览/开文件会把标题拽去面板目录（甚至 home）
+    const cwd = sessionId ? termCwdBySession[sessionId] : undefined
     if (tab.kind === 'local' && cwd) {
       const name = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
       return name ? `本地 · ${name}` : '本地终端'
@@ -1032,6 +1043,10 @@ export const useSessionStore = defineStore('sessions', () => {
     cwdBySession[sessionId] = path
   }
 
+  function setTermCwd(sessionId: string, path: string): void {
+    termCwdBySession[sessionId] = path
+  }
+
   /*
    * 文件面板「项目模式」持久化用的设备标识：同一台设备（重连、新开标签）
    * 必须算出同一个 key。规则：
@@ -1095,11 +1110,13 @@ export const useSessionStore = defineStore('sessions', () => {
     followTerminal,
     toggleFollowTerminal,
     cwdBySession,
+    termCwdBySession,
     explorerUiBySession,
     patchExplorerUi,
     homeBySession,
     exitCodeBySession,
     setCwd,
+    setTermCwd,
     deviceKeyForSession,
     tabStatus,
     tabLabel,

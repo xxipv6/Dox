@@ -596,6 +596,7 @@ function applyCwd(next: string): void {
   cwdTracker.advance(sid, next)
   if (!isPlainSshId(sid)) {
     store.setCwd(sid, next)
+    store.setTermCwd(sid, next)
     return
   }
   const seq = ++cdVerifySeq
@@ -603,7 +604,10 @@ function applyCwd(next: string): void {
     .sftpStat(sid, next)
     .then((stat) => {
       if (seq !== cdVerifySeq) return // 期间又敲了别的 cd，这趟结果作废
-      if (stat?.isDir) store.setCwd(sid, next)
+      if (stat?.isDir) {
+        store.setCwd(sid, next)
+        store.setTermCwd(sid, next)
+      }
       // 远端明确说「不存在/不是目录」：这条 cd 没生效，基准退回最后一个确认值，
       // 免得后面每条相对 cd 都挂在一条不存在的路径上继续错
       else cwdTracker.rollback(sid, store.cwdBySession[sid])
@@ -842,7 +846,11 @@ const dropTarget = computed<
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
   if (!tab) return null
   if (tab.kind === 'local') return { kind: 'local' }
-  const dir = store.cwdBySession[props.sessionId] ?? store.homeBySession[props.sessionId] ?? '/'
+  const dir =
+    store.termCwdBySession[props.sessionId] ??
+    store.cwdBySession[props.sessionId] ??
+    store.homeBySession[props.sessionId] ??
+    '/'
   if (tab.kind === 'container' && tab.container) {
     if (tab.container.chain?.length) {
       return { kind: 'unsupported', reason: '嵌套容器暂不支持文件传输' }
@@ -1036,6 +1044,7 @@ onMounted(() => {
       if (path) {
         cwdFromIntegration = true
         store.setCwd(props.sessionId, path)
+        store.setTermCwd(props.sessionId, path)
       }
     } catch (err) {
       console.warn('[terminal] 解析 OSC 7 失败', err)
@@ -1217,8 +1226,8 @@ onMounted(() => {
       reconnect.value = null
       if (!e.reconnected) return
       // 尽力回到断线前的目录。cwd 只来自本地跟踪（OSC 7 或解析用户敲的 cd），
-      // 也就是说全程不依赖远端装任何东西。
-      const cwd = store.cwdBySession[props.sessionId]
+      // 也就是说全程不依赖远端装任何东西。termCwd 优先：cwdBySession 会被面板刷走
+      const cwd = store.termCwdBySession[props.sessionId] ?? store.cwdBySession[props.sessionId]
       if (cwd) {
         separator(`已重新连接 · 回到 ${cwd}`, '36')
         window.api.input(props.sessionId, `cd ${quoteShellPath(cwd)}\r`)
@@ -1256,7 +1265,10 @@ onMounted(() => {
       .sftpRealpath(props.sessionId, '.')
       .then((home) => {
         store.setHome(props.sessionId, home)
-        if (!store.cwdBySession[props.sessionId]) store.setCwd(props.sessionId, home)
+        if (!store.cwdBySession[props.sessionId]) {
+          store.setCwd(props.sessionId, home)
+          store.setTermCwd(props.sessionId, home)
+        }
       })
       .catch(() => undefined)
   }

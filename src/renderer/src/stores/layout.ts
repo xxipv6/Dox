@@ -56,7 +56,8 @@ export const useLayoutStore = defineStore('layout', () => {
         port: tab.savedSessionId ? undefined : tab.config?.port,
         username: tab.savedSessionId ? undefined : tab.config?.username,
         // 恢复时落回原目录（cd 跟踪只在 shell integration 活着时有值，没有就回家目录）
-        cwd: (tab.panes[0]?.sessionId && store.cwdBySession[tab.panes[0].sessionId]) || undefined
+        // 用 termCwdBySession：cwdBySession 会被文件面板刷成面板目录
+        cwd: (tab.panes[0]?.sessionId && store.termCwdBySession[tab.panes[0].sessionId]) || undefined
       }))
     }
   }
@@ -82,7 +83,8 @@ export const useLayoutStore = defineStore('layout', () => {
     watch(
       () => [
         ...store.tabs.map((t) => [t.tabId, t.split, t.panes.length, t.title, t.customTitle, t.tabId === store.activeTabId]),
-        Object.values(store.cwdBySession).join('')
+        Object.values(store.cwdBySession).join(''),
+        Object.values(store.termCwdBySession).join('')
       ],
       () => {
         if (restoring.value) return
