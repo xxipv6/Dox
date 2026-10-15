@@ -615,10 +615,12 @@ async function init(): Promise<void> {
     }
   }
   try {
-    // 以远端 home 目录为起点（容器落地 /，由主进程 realpath 分路处理）
+    // 以远端 home 目录为起点（容器落地 /，由主进程 realpath 分路处理）；
+    // 本地会话优先落在设置里的「默认目录」，和新开本地终端的落点一致
     const home = await window.api.sftpRealpath(fsSessionId.value, '.', ctrName.value)
+    const landing = isLocal.value && settings.localDefaultDir ? settings.localDefaultDir : home
     // 切标签会重挂载本组件（App.vue 按 sessionId 作 key）：恢复上次浏览的目录，
-    // 切走再切回才落在原处而不是 home。项目模式同理备好 cwd，退出时从那里继续。
+    // 切走再切回才落在原处而不是落地目录。项目模式同理备好 cwd，退出时从那里继续。
     const last = uiSnapshot?.dir
     // 「跟随终端」开着且终端已有 cwd：恢复源换成终端当前目录 —— 面板浏览历史是
     // 「跟随终端：关」语义下的记忆，开着时用户预期是面板镜像终端（issue #6）。
@@ -628,12 +630,12 @@ async function init(): Promise<void> {
     // 这台设备上次停在项目模式：直接恢复
     const savedRoot = settings.projectRoots[deviceKey.value]
     if (savedRoot) {
-      cwd.value = last || home
+      cwd.value = last || landing
       enterProject(savedRoot, { restore: true })
       return
     }
     const restoreDir = followCwd ?? last
-    if (restoreDir && restoreDir !== home) {
+    if (restoreDir && restoreDir !== landing) {
       await load(restoreDir)
       // load 自己吞错误（回滚 cwd + 错误横幅）：恢复的目录进不去（被删/掉权限）
       // 就清掉横幅落回 home，别把旧目录的错误糊在刚挂载的面板上
@@ -658,7 +660,7 @@ async function init(): Promise<void> {
       errorMsg.value = ''
       retryAction.value = null
     }
-    await load(home)
+    await load(landing)
   } catch {
     await load('/')
   }
