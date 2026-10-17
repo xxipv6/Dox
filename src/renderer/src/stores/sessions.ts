@@ -100,6 +100,8 @@ export interface SessionTab {
   kind: 'ssh' | 'local' | 'container'
   /** SSH 标签页的连接配置，分屏时用于克隆出新会话；本地标签页为 null */
   config: SshSessionConfig | null
+  /** 本地标签显式指定的 Shell（例如从侧栏打开的 WSL）；缺省跟随全局默认 */
+  localShellId?: string
   /**
    * 该标签对应的已保存设备 id（临时连接为 undefined）。
    * 主进程凭它重新解密凭证做断线重连；布局快照也靠它判断重启后能否自动连接。
@@ -457,7 +459,11 @@ export const useSessionStore = defineStore('sessions', () => {
       const size = seedTermSize()
       const sessionId =
         tab.kind === 'local'
-          ? await window.api.connectLocal(size, useSettingsStore().localShellId || undefined, cwd)
+          ? await window.api.connectLocal(
+              size,
+              tab.localShellId || useSettingsStore().localShellId || undefined,
+              cwd
+            )
           : tab.kind === 'container'
             ? tab.container!.logs
               ? await window.api.connectContainerLogs(
@@ -492,6 +498,9 @@ export const useSessionStore = defineStore('sessions', () => {
       pane.sessionId = sessionId
       pane.status = buffered?.status ?? 'connected'
       pane.error = buffered?.error
+      // 本地 shell 的启动目录不经过 xterm 输入跟踪；布局恢复后也要继续把它当作
+      // 终端 cwd，否则下一次自动保存会把快照里的目录抹掉。
+      if (tab.kind === 'local' && cwd) setTermCwd(sessionId, cwd)
     } catch (err) {
       pane.status = 'error'
       pane.error = errorText(err)
@@ -543,18 +552,27 @@ export const useSessionStore = defineStore('sessions', () => {
     activeTabId.value = tab.tabId
   }
 
-  /** 打开本地终端标签页（Wave 形态：应用启动的默认视图）。cwd：布局恢复指定初始目录 */
-  async function connectLocal(cwd?: string): Promise<void> {
-    // 没指定目录（布局恢复之外的普通新开）：设置里的「默认目录」，没设就回家目录（spawn 兜底）
-    if (!cwd) {
-      cwd = useSettingsStore().localDefaultDir || undefined
+  /**
+   * 打开本地终端标签页（Wave 形态：应用启动的默认视图）。
+   * cwd 用于布局恢复指定初始目录；localShellId 只由 WSL 等显式入口传入，
+   * 普通新标签不保存覆盖，仍跟随设置里的默认 Shell。
+   */
+  async function connectLocal(cwd?: string, localShellId?: string): Promise<void> {
+    const settings = useSettingsStore()
+    const effectiveShellId = localShellId || settings.localShellId || undefined
+    const isWsl = effectiveShellId?.startsWith('wsl:') ?? false
+    // Windows 的默认目录不能塞进 WSL；WSL 由主进程用 --cd ~ 或布局里的 POSIX cwd 启动
+    if (!cwd && !isWsl) {
+      cwd = settings.localDefaultDir || undefined
     }
+    const wslDistro = effectiveShellId?.startsWith('wsl:') ? effectiveShellId.slice(4) : ''
     const pane = newPane()
     const tab = reactive<SessionTab>({
       tabId: `tab-${++tabSeq}`,
-      title: '本地终端',
+      title: wslDistro ? `WSL · ${wslDistro}` : '本地终端',
       kind: 'local',
       config: null,
+      localShellId,
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -812,6 +830,8 @@ export const useSessionStore = defineStore('sessions', () => {
     const cwd = sessionId ? termCwdBySession[sessionId] : undefined
     if (tab.kind === 'local' && cwd) {
       const name = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
+      // 侧栏打开的 WSL 标签即使跟踪到 cwd，也要保留发行版身份
+      if (tab.localShellId?.startsWith('wsl:')) return name ? `${tab.title} · ${name}` : tab.title
       return name ? `本地 · ${name}` : '本地终端'
     }
     return tab.title
@@ -1047,6 +1067,12 @@ export const useSessionStore = defineStore('sessions', () => {
     termCwdBySession[sessionId] = path
   }
 
+  /** 当前本地会话实际使用的 Shell：标签显式覆盖优先，否则跟随全局默认 */
+  function localShellIdForSession(sessionId: string): string | undefined {
+    const tab = tabs.value.find((t) => t.panes.some((p) => p.sessionId === sessionId))
+    return tab?.localShellId || useSettingsStore().localShellId || undefined
+  }
+
   /*
    * 文件面板「项目模式」持久化用的设备标识：同一台设备（重连、新开标签）
    * 必须算出同一个 key。规则：
@@ -1060,7 +1086,10 @@ export const useSessionStore = defineStore('sessions', () => {
   function deviceKeyForSession(sessionId: string): string {
     const tab = tabs.value.find((t) => t.panes.some((p) => p.sessionId === sessionId))
     if (!tab) return `session:${sessionId}`
-    if (tab.kind === 'local') return '@local'
+    if (tab.kind === 'local') {
+      const shellId = localShellIdForSession(sessionId)
+      return shellId?.startsWith('wsl:') ? `@wsl:${shellId.slice(4)}` : '@local'
+    }
     if (tab.kind === 'container') {
       const base = tab.container?.originSavedId ? `saved:${tab.container.originSavedId}` : '@local'
       return `${base}#ctr:${tab.container?.containerName ?? ''}`
@@ -1117,6 +1146,7 @@ export const useSessionStore = defineStore('sessions', () => {
     exitCodeBySession,
     setCwd,
     setTermCwd,
+    localShellIdForSession,
     deviceKeyForSession,
     tabStatus,
     tabLabel,

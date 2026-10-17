@@ -10,7 +10,7 @@
  * 前置：npm run build；退出已安装的 Dox.app（单实例锁）。
  *      agent 侧 Go 测试归 `cd agent && go test ./...`（本脚本不管）。
  */
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import os from 'node:os'
 import path from 'node:path'
@@ -171,7 +171,8 @@ try {
   }
 } catch { /* 没有正好 */ }
 
-const app = await electron.launch({ args: ['.'] })
+const userData = mkdtempSync(path.join(os.tmpdir(), 'dox-search-'))
+const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
 await win.waitForLoadState('domcontentloaded')
@@ -291,6 +292,7 @@ try {
     }
   } catch { /* 实例可能已死 */ }
   await app.close().catch(() => undefined)
+  rmSync(userData, { recursive: true, force: true })
   rmSync(base, { recursive: true, force: true })
 }
 

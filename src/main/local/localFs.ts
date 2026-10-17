@@ -92,11 +92,11 @@ export async function stat(p: string): Promise<{ isDir: boolean; mtime: number; 
   }
 }
 
-export async function mkdir(p: string): Promise<void> {
+export async function mkdir(p: string, enforceWinName = true): Promise<void> {
   // Windows 保留名/非法字符会在 fs 层炸出 ENOENT/EINVAL 之类看不懂的错，
   // 先过一遍 sanitize 的判定给出人话（sanitizeWinName 非 win 平台原样返回，
-  // 所以只在 win32 拦）
-  if (process.platform === 'win32') {
+  // 所以只在 win32 拦）。WSL UNC 是 Linux 文件系统，不套用这条 Windows 规则。
+  if (process.platform === 'win32' && enforceWinName) {
     const name = path.basename(p)
     if (sanitizeWinName(name) !== name) throw new Error(`Windows 不允许的名字：${name}`)
   }

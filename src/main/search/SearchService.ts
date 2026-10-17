@@ -21,6 +21,7 @@ import {
   parseRgJsonLine
 } from './commands'
 import { searchLocalNode } from './localNodeSearch'
+import type { LocalPathResolver } from '../local/LocalPathResolver.ts'
 
 /**
  * 项目模式全文搜索（对标 VS Code 全局搜索）。
@@ -83,7 +84,8 @@ export class SearchService {
 
   constructor(
     private getClient: (id: string) => Client | undefined,
-    private agent: SearchAgentBridge
+    private agent: SearchAgentBridge,
+    private localPaths?: LocalPathResolver
   ) {}
 
   /** 启动一次搜索，立即返回 runId 与选定的引擎；结果与结局走 onEvent */
@@ -164,6 +166,8 @@ export class SearchService {
         return 'grep' // POSIX 必有；真没有则命令退出 127，错误文案自然上浮
       }
     }
+    // WSL UNC 固定走 Node：避免 Windows rg/grep 的路径和输出格式泄漏到 renderer
+    if (this.localPaths?.isWsl(params.fsSessionId)) return 'node'
     // 本机分支：rg → grep（仅 POSIX）→ node（Windows 兜底）
     const rgPath = await resolveExecutable('rg')
     if (rgPath !== 'rg') return 'rg'
@@ -408,8 +412,17 @@ export class SearchService {
   ): Promise<{ filesSearched: number; truncated: boolean }> {
     const matcher = createNodeMatcher(params)
     if (matcher.error) throw new Error(matcher.error)
-    const res = await searchLocalNode(params.root, matcher.match, SEARCH_MAX_TOTAL, {
-      onBatch: pushMatches,
+    const root = this.localPaths?.toNative(params.fsSessionId, params.root) ?? params.root
+    const onBatch = this.localPaths?.isWsl(params.fsSessionId)
+      ? (matches: SearchMatch[]): void => {
+          pushMatches(matches.map((match) => ({
+            ...match,
+            path: this.localPaths!.fromNative(params.fsSessionId, match.path)
+          })))
+        }
+      : pushMatches
+    const res = await searchLocalNode(root, matcher.match, SEARCH_MAX_TOTAL, {
+      onBatch,
       shouldAbort: () => slot.canceled
     })
     return { filesSearched: res.filesSearched, truncated: res.truncated }

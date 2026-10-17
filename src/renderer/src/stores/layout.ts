@@ -57,7 +57,8 @@ export const useLayoutStore = defineStore('layout', () => {
         username: tab.savedSessionId ? undefined : tab.config?.username,
         // 恢复时落回原目录（cd 跟踪只在 shell integration 活着时有值，没有就回家目录）
         // 用 termCwdBySession：cwdBySession 会被文件面板刷成面板目录
-        cwd: (tab.panes[0]?.sessionId && store.termCwdBySession[tab.panes[0].sessionId]) || undefined
+        cwd: (tab.panes[0]?.sessionId && store.termCwdBySession[tab.panes[0].sessionId]) || undefined,
+        localShellId: tab.localShellId
       }))
     }
   }
@@ -82,7 +83,15 @@ export const useLayoutStore = defineStore('layout', () => {
     const store = useSessionStore()
     watch(
       () => [
-        ...store.tabs.map((t) => [t.tabId, t.split, t.panes.length, t.title, t.customTitle, t.tabId === store.activeTabId]),
+        ...store.tabs.map((t) => [
+          t.tabId,
+          t.split,
+          t.panes.length,
+          t.title,
+          t.customTitle,
+          t.localShellId,
+          t.tabId === store.activeTabId
+        ]),
         Object.values(store.cwdBySession).join(''),
         Object.values(store.termCwdBySession).join('')
       ],
@@ -117,7 +126,7 @@ export const useLayoutStore = defineStore('layout', () => {
         const before = store.tabs.at(-1)?.tabId
 
         if (item.kind === 'local') {
-          await store.connectLocal(item.cwd)
+          await store.connectLocal(item.cwd, item.localShellId)
         } else if (item.savedSessionId) {
           const saved = byId.get(item.savedSessionId)
           // 设备被删掉了：这个标签没有意义，跳过

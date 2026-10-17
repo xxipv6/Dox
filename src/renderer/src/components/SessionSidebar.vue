@@ -10,6 +10,7 @@ import SidebarSection from './SidebarSection.vue'
 import ForwardPanel from './ForwardPanel.vue'
 import SnippetPanel from './SnippetPanel.vue'
 import ContainerPanel from './ContainerPanel.vue'
+import LocalWslPanel from './LocalWslPanel.vue'
 import AgentPanel from './AgentPanel.vue'
 import DockerManager from './DockerManager.vue'
 import ContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
@@ -20,6 +21,7 @@ import { pushToast } from '../stores/toast'
 
 const store = useSessionStore()
 const settings = useSettingsStore()
+const isWindows = window.api.platform === 'win32'
 
 const collapsed = ref(false)
 const dialogVisible = ref(false)
@@ -734,6 +736,8 @@ async function onCtrMenuSelect(id: string): Promise<void> {
           </div>
         </div>
       </SidebarSection>
+
+      <LocalWslPanel v-if="isWindows" />
 
       <div class="sidebar-tools">
         <div class="tools-label">工具</div>

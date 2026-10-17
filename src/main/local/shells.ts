@@ -1,8 +1,9 @@
-import { execFile, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
 import type { LocalShellInfo } from '../../shared/types'
+import { probeWslDistros, WslProbeScheduler, wslLaunchSpec } from './wsl'
 import psProfile from './scripts/dox-profile.ps1?raw'
 import bashrc from './scripts/dox-bashrc.sh?raw'
 import zshrc from './scripts/dox-zshrc.zsh?raw'
@@ -79,25 +80,6 @@ function firstExisting(...candidates: Array<() => string | undefined>): string |
     if (value && existsSync(value)) return value
   }
   return undefined
-}
-
-/** 列出 WSL 已安装的发行版（异步：wsl.exe 首次调用可能拉起服务，耗时数秒） */
-function listWslDistrosAsync(): Promise<string[]> {
-  return new Promise((resolve) => {
-    // 必须用 encoding:'buffer' 拿原始字节：wsl.exe 输出是 UTF-16LE，
-    // 按默认 utf8 解码会把发行版名变成乱码
-    execFile('wsl.exe', ['-l', '-q'], { windowsHide: true, encoding: 'buffer' }, (err, stdout) => {
-      if (err) return resolve([])
-      const text = (stdout as unknown as Buffer).toString('utf16le')
-      resolve(
-        text
-          .replace(/\0/g, '')
-          .split(/\r?\n/)
-          .map((s) => s.trim())
-          .filter(Boolean)
-      )
-    })
-  })
 }
 
 /** POSIX shell 种类：决定 integration 的注入方式（没有 --rcfile 这种通用入口） */
@@ -261,27 +243,42 @@ export function detectShells(): DetectedShell[] {
 }
 
 /**
- * 启动后异步预热：补上 WSL 发行版。
- * 必须在 app ready 之后调用，且不要 await 在关键路径上。
+ * WSL 探测串行执行：启动预热与 renderer 首次查询共享同一个任务；
+ * 手动刷新会真正重跑，并合并探测期间收到的重复刷新。
  */
-export async function prewarmShells(): Promise<void> {
-  detectShells()
-  if (process.platform !== 'win32') return
+const wslProbeScheduler = new WslProbeScheduler(async () => {
   try {
-    const distros = await listWslDistrosAsync()
-    const wslEntries: DetectedShell[] = distros.map((distro) => ({
-      id: `wsl:${distro}`,
-      name: `WSL · ${distro}`,
+    const distros = await probeWslDistros()
+    const wslEntries: DetectedShell[] = distros.map((info) => ({
+      id: `wsl:${info.distro}`,
+      name: `WSL · ${info.distro}`,
       integrated: false,
-      command: 'wsl.exe',
-      args: ['-d', distro],
-      integration: 'none'
+      ...wslLaunchSpec(info.distro),
+      integration: 'none',
+      wsl: info
     }))
     const withoutWsl = detected.filter((s) => !s.id.startsWith('wsl:'))
     detected = [...withoutWsl, ...wslEntries]
   } catch {
-    /* WSL 不可用不影响其他 shell */
+    // WSL 不可用不影响其他 shell；刷新失败时保留最后一次成功的 WSL 列表
   }
+})
+
+/**
+ * 启动后异步预热：补上 WSL 发行版。
+ * 必须在 app ready 之后调用，且不要 await 在关键路径上。
+ * forceRefresh=true 用于侧栏手动刷新，会重新执行 wsl.exe 而不是只读缓存。
+ */
+export async function prewarmShells(forceRefresh = false): Promise<void> {
+  detectShells()
+  if (process.platform !== 'win32') return
+  await wslProbeScheduler.ensure(forceRefresh)
+}
+
+/** 列表查询等待首次预热；普通后续调用只读缓存，force 才重新探测 WSL */
+export async function listDetectedShells(forceRefresh = false): Promise<DetectedShell[]> {
+  await prewarmShells(forceRefresh)
+  return detectShells()
 }
 
 export interface ResolvedShell {
@@ -301,7 +298,7 @@ export function resolveShell(shellId?: string): ResolvedShell {
 
   // WSL 的 spawn 参数可以直接从 id 推出，不必等异步探测完成
   if (shellId?.startsWith('wsl:')) {
-    return { command: 'wsl.exe', args: ['-d', shellId.slice(4)], env }
+    return { ...wslLaunchSpec(shellId.slice(4)), env }
   }
 
   const shell = shells.find((s) => s.id === shellId) ?? shells[0]

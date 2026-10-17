@@ -49,6 +49,7 @@ try {
   // ---- browse：进测试目录，滚到底 ----
   await win.locator('button.bar-btn', { hasText: '文件' }).click()
   await win.locator('.explorer .row').first().waitFor({ timeout: 10000 })
+  // 保持默认「跟随终端：开」：终端与面板在同一目录时，切标签也必须恢复滚动。
   await win.locator('.explorer .row', { hasText: 'dox-e2e-ui' }).first().dblclick()
   await win.waitForTimeout(1200)
   await win.evaluate(() => {
@@ -63,6 +64,15 @@ try {
   await switchAwayAndBack()
   await win.locator('.explorer .row').first().waitFor({ timeout: 10000 })
   await win.waitForTimeout(600)
+  // 目录列表与二次 scrollTop 补偿是异步的；等到稳定再断言，不把中间钳位值当成结果。
+  await win.waitForFunction(
+    (expected) => {
+      const el = document.querySelector('.file-list')
+      return !!el && Math.abs(el.scrollTop - expected) <= 4
+    },
+    scrolled,
+    { timeout: 5000 }
+  ).catch(() => undefined)
   const restored = await scrollTop()
   check('滚动位置恢复', restored > 0 && Math.abs(restored - scrolled) <= 4, `期望~${scrolled} 实际${restored}`)
 

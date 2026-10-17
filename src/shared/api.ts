@@ -61,8 +61,8 @@ export interface DoxApi {
   connectTransport(savedSessionId: string): Promise<string>
   /** 打开本地终端，返回 local- 前缀的会话 id；shellId 不传则用设置里的默认值 */
   connectLocal(term: TermSize, shellId?: string, cwd?: string): Promise<string>
-  /** 列出本机可用的本地 shell */
-  listLocalShells(): Promise<LocalShellInfo[]>
+  /** 列出本机可用的本地 shell；forceRefresh=true 时重新探测 WSL */
+  listLocalShells(forceRefresh?: boolean): Promise<LocalShellInfo[]>
   /** 键盘输入 → SSH（高频，send 不等待回执） */
   input(id: string, data: string | Uint8Array): void
   /** 终端尺寸变化（cols × rows） */

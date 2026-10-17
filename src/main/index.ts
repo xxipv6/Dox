@@ -16,6 +16,7 @@ import { ForwardManager } from './forward/ForwardManager'
 import { ContainerTunnelManager } from './forward/containerTunnel'
 import { ContainerManager } from './container/ContainerManager'
 import { LocalPtyManager } from './local/LocalPtyManager'
+import { LocalPathResolver } from './local/LocalPathResolver'
 import { AgentManager } from './agent/AgentManager'
 import { ProcessService } from './proc/ProcessService'
 import { AiUsageService } from './aiusage/AiUsageService'
@@ -69,6 +70,9 @@ const settingsStore = new SettingsStore()
 // 已保存会话解析器：id → 完整连接配置（认证信息解密不出主进程）。
 // 跳板机建链与断线重连都走它 —— 重连时重新解密，主进程不必常驻明文密码。
 const sessionManager = new SessionManager((id) => configStore.resolveConnection(id), knownHosts)
+// 本地 PTY 先创建：WSL 的 sessionId → distro 是文件路径解析的统一身份来源
+const localPtyManager = new LocalPtyManager()
+const localPathResolver = new LocalPathResolver((sessionId) => localPtyManager.getWslDistro(sessionId))
 // 容器文件操作桥留一个后注册口：AgentManager 依赖 ContainerManager，构造在更后面
 const agentFsHolder: { bridge?: import('./sftp/SftpService').AgentFsBridge } = {}
 const sftpService = new SftpService(sessionManager, {
@@ -76,7 +80,7 @@ const sftpService = new SftpService(sessionManager, {
     if (!agentFsHolder.bridge) return Promise.reject(new Error('容器文件通道尚未就绪'))
     return agentFsHolder.bridge.call(sessionId, containerName, method, params)
   }
-})
+}, localPathResolver)
 const transferManager = new TransferManager(
   (sessionId) => sessionManager.sftp(sessionId),
   // 队列变化广播给所有窗口
@@ -86,7 +90,8 @@ const transferManager = new TransferManager(
     }
   },
   // tar 整流传输要在连接上开 exec 通道
-  (sessionId) => sessionManager.getClient(sessionId)
+  (sessionId) => sessionManager.getClient(sessionId),
+  localPathResolver
 )
 /*
  * 容器终端：跑在父 SSH 连接上的一条 docker exec 通道。
@@ -122,7 +127,7 @@ composeService.onEvent = (ev) => {
 }
 
 // 项目模式全文搜索：引擎链 agent → rg → grep → node；结果流式广播（渲染层按 runId 过滤）
-const searchService = new SearchService((id) => sessionManager.getClient(id), agentManager)
+const searchService = new SearchService((id) => sessionManager.getClient(id), agentManager, localPathResolver)
 searchService.onEvent = (ev) => {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(IpcChannels.searchEvent, ev)
@@ -150,7 +155,6 @@ containerManager.onParentDrained = (id) => sessionManager.releaseOrphan(id)
 // 重连成功后按原参数把该会话的转发规则重新建立起来，
 // 否则隧道会无声死掉，用户还以为它开着
 sessionManager.onReconnected = (id) => void forwardManager.restartBySession(id)
-const localPtyManager = new LocalPtyManager()
 
 // Windows 通知 / 任务栏跳转列表所需
 if (process.platform === 'win32') {
@@ -300,7 +304,8 @@ app.whenReady().then(() => {
     processService,
     aiUsageService,
     composeService,
-    searchService
+    searchService,
+    localPathResolver
   )
   aiUsageService.start()
   createWindow()

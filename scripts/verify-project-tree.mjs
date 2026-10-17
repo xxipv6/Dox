@@ -41,7 +41,8 @@ try {
   }
 } catch { /* 没有正好 */ }
 
-const app = await electron.launch({ args: ['.'] })
+const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-project-tree-'))
+const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
 await win.waitForLoadState('domcontentloaded')
@@ -208,6 +209,7 @@ try {
     }
   } catch { /* 实例可能已死 */ }
   await app.close().catch(() => undefined)
+  fs.rmSync(userData, { recursive: true, force: true })
   fs.rmSync(base, { recursive: true, force: true })
 }
 

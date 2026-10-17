@@ -24,6 +24,7 @@ import type { LayoutStore } from '../store/layoutStore'
 import type { SettingsStore } from '../store/settingsStore'
 import type { SessionManager } from '../ssh/SessionManager'
 import type { LocalPtyManager } from '../local/LocalPtyManager'
+import type { LocalPathResolver } from '../local/LocalPathResolver.ts'
 import { isContainerId, isLocalId } from '../../shared/sessionId'
 import { applyNativeTheme } from '../theme'
 import type { ContainerManager } from '../container/ContainerManager'
@@ -82,7 +83,8 @@ export function registerIpc(
   processService: ProcessService,
   aiUsageService: AiUsageService,
   composeService: ComposeService,
-  searchService: SearchService
+  searchService: SearchService,
+  localPathResolver?: LocalPathResolver
 ): void {
   // ---- SSH 会话 ----
   ipcMain.handle(
@@ -106,7 +108,9 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.localConnect, (event, term: TermSize, shellId?: string, cwd?: string) =>
     localPtyManager.spawn(event.sender, term, shellId, cwd)
   )
-  ipcMain.handle(IpcChannels.localListShells, () => localPtyManager.listShells())
+  ipcMain.handle(IpcChannels.localListShells, (_event, forceRefresh?: boolean) =>
+    localPtyManager.listShells(forceRefresh)
+  )
   /*
    * 输入 / resize / 断开按 id 前缀路由到本地终端、容器终端或 SSH（高频消息用 send/on）。
    *
@@ -236,7 +240,7 @@ export function registerIpc(
     agentManager.releaseChannel(sessionId, containerName, event.sender)
   )
   // ---- 目录变更推送：远端/容器走 agent fs_watch，本机走主进程 fs.watch（事件同走 agent:fsEvent）----
-  const localFsWatcher = new LocalFsWatcher()
+  const localFsWatcher = new LocalFsWatcher(localPathResolver)
   ipcMain.handle(IpcChannels.agentWatchFs, (event, sessionId: string, containerName: string | undefined, dirs: string[]) =>
     agentManager.watchFs(sessionId, containerName, event.sender, dirs)
   )

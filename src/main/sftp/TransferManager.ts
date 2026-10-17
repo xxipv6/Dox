@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { sanitizeWinName } from '../fsSafe.ts'
 import fs from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
-import { basename, dirname, join, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, sep, win32 } from 'node:path'
+import type { LocalPathResolver } from '../local/LocalPathResolver.ts'
 import type { Readable, Writable } from 'node:stream'
 import type { Client, ClientChannel, SFTPWrapper } from 'ssh2'
 // 默认导入而不是命名导入：Node 原生 ESM 探不出 CJS 包的命名导出
@@ -198,7 +199,8 @@ export class TransferManager {
     private readonly getSftp: (sessionId: string) => Promise<SFTPWrapper>,
     private readonly onUpdate: (tasks: TransferTask[]) => void,
     /** tar 流的 exec 通道要从连接上开；拿不到（已断开）就走不了 tar 路 */
-    private readonly getClient: (sessionId: string) => Client | undefined
+    private readonly getClient: (sessionId: string) => Client | undefined,
+    private readonly localPaths?: LocalPathResolver
   ) {}
 
   list(): TransferTask[] {
@@ -396,54 +398,71 @@ export class TransferManager {
   async enqueueLocalCopy(sessionId: string, sources: string[], destDir: string): Promise<TransferTask[]> {
     const gen = this.expansionGen
     const created: TransferTask[] = []
-    const destReal = await fs.promises.realpath(destDir).catch(() => destDir)
+    const wsl = this.localPaths?.isWsl(sessionId) ?? false
+    const destIsWsl = wsl && destDir.startsWith('/')
+    if (wsl && !destIsWsl && !win32.isAbsolute(destDir)) {
+      throw new Error(`无法识别复制目标路径：${destDir}`)
+    }
+    const destNative = destIsWsl ? this.localPaths!.toNative(sessionId, destDir) : destDir
+    const destReal = await fs.promises.realpath(destNative).catch(() => destNative)
+    const joinRemote = destIsWsl ? posix.join : join
 
-    const attachStream = (task: InternalTask): void => {
+    const attachStream = (task: InternalTask, nativeLocal = task.localPath, nativeRemote = task.remotePath): void => {
       task._stream = (t) =>
         this.pipeStreams(
           t,
-          fs.createReadStream(t.localPath, { highWaterMark: 256 * 1024 }),
+          fs.createReadStream(nativeLocal, { highWaterMark: 256 * 1024 }),
           // 本机复制没有网络栈兜底，写侧默认 16KB 会把 syscall 数放大 64 倍
-          fs.createWriteStream(t.remotePath, { highWaterMark: 1024 * 1024 }),
-          () => void fs.promises.unlink(t.remotePath).catch(() => undefined)
+          fs.createWriteStream(nativeRemote, { highWaterMark: 1024 * 1024 }),
+          () => void fs.promises.unlink(nativeRemote).catch(() => undefined)
         )
     }
 
     for (const src of sources) {
-      const st = await fs.promises.lstat(src).catch(() => null)
+      const sourceIsWsl = wsl && src.startsWith('/')
+      if (wsl && !sourceIsWsl && !win32.isAbsolute(src)) {
+        throw new Error(`无法识别复制来源路径：${src}`)
+      }
+      const sourceNative = sourceIsWsl ? this.localPaths!.toNative(sessionId, src) : src
+      const st = await fs.promises.lstat(sourceNative).catch(() => null)
       // 符号链接跳过：跟链复制会把链接目标的内容抄一份，与 walkLocal 口径一致
       if (!st || st.isSymbolicLink()) continue
-      const srcReal = await fs.promises.realpath(src).catch(() => src)
-      if (srcReal === destReal || destReal.startsWith(srcReal + sep)) {
-        throw new Error(`不能把「${basename(src)}」复制到它自己里面`)
+      const srcReal = await fs.promises.realpath(sourceNative).catch(() => sourceNative)
+      const relToDest = relative(srcReal, destReal)
+      if (relToDest === '' || (relToDest !== '..' && !relToDest.startsWith(`..${sep}`) && !isAbsolute(relToDest))) {
+        throw new Error(`不能把「${basename(sourceNative)}」复制到它自己里面`)
       }
 
       if (st.isFile()) {
+        const remoteName = bumpCopyName(destNative, basename(sourceNative))
         const task = this.createTask(
           sessionId,
           'upload',
           src,
-          join(destDir, bumpCopyName(destDir, basename(src))),
+          joinRemote(destDir, remoteName),
           st.size
         )
-        attachStream(task)
+        attachStream(task, sourceNative, join(destNative, remoteName))
         this.push(task)
         created.push(this.snapshot(task))
         continue
       }
 
       if (st.isDirectory()) {
-        const rootName = bumpCopyName(destDir, basename(src))
-        const rootDst = join(destDir, rootName)
+        const rootName = bumpCopyName(destNative, basename(sourceNative))
+        const rootDst = join(destNative, rootName)
         await fs.promises.mkdir(rootDst, { recursive: true })
-        const files = await walkLocal(src, () => this.expansionGen !== gen)
+        const files = await walkLocal(sourceNative, () => this.expansionGen !== gen)
         for (const f of files) {
           // 全部取消后已遍历出的文件不再入队
           if (this.expansionGen !== gen) break
-          const dst = join(rootDst, ...f.rel.split('/'))
+          const relParts = f.rel.split('/')
+          const dst = join(rootDst, ...relParts)
           await fs.promises.mkdir(dirname(dst), { recursive: true })
-          const task = this.createTask(sessionId, 'upload', f.path, dst, f.size, `${rootName}/${f.rel}`)
-          attachStream(task)
+          const logicalSource = sourceIsWsl ? posix.join(src, f.rel) : f.path
+          const logicalDest = joinRemote(destDir, rootName, ...relParts)
+          const task = this.createTask(sessionId, 'upload', logicalSource, logicalDest, f.size, `${rootName}/${f.rel}`)
+          attachStream(task, f.path, dst)
           this.push(task)
           created.push(this.snapshot(task))
         }

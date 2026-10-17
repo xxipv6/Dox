@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import type { WebContents } from 'electron'
 import { IpcChannels } from '../../shared/ipc'
+import type { LocalPathResolver } from '../local/LocalPathResolver.ts'
 
 /**
  * 本机面板的目录变更监听（Node fs.watch，非递归，逐目录）。
@@ -25,6 +26,8 @@ interface OwnerWatch {
 const FLUSH_MS = 300
 
 export class LocalFsWatcher {
+  constructor(private readonly localPaths?: LocalPathResolver) {}
+
   /** `${owner.id}:${sessionId}` → 监听状态（owner.id 随 WebContents 销毁即失效，正好做键） */
   private owners = new Map<string, OwnerWatch>()
   /** 每个 WebContents 的 destroyed 监听只需挂一次 */
@@ -60,7 +63,8 @@ export class LocalFsWatcher {
     for (const dir of want) {
       if (ow.watchers.has(dir)) continue
       try {
-        const w = fs.watch(dir, () => this.markDirty(key, owner, sessionId, dir))
+        const nativeDir = this.localPaths?.toNative(sessionId, dir) ?? dir
+        const w = fs.watch(nativeDir, () => this.markDirty(key, owner, sessionId, dir))
         w.on('error', () => {
           // 目录被删/权限变化：摘掉即可，监听是加分项不是刚需
           ow.watchers.delete(dir)

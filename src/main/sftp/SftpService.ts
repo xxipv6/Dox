@@ -7,6 +7,7 @@ import { execCapture } from '../ssh/remoteExec.ts'
 import { outputsOf } from '../execError.ts'
 import { archiveBaseName, buildArchiveCommand, withSuffix } from './archive.ts'
 import * as localFs from '../local/localFs.ts'
+import { wslWindowsMountToNative, type LocalPathResolver } from '../local/LocalPathResolver.ts'
 import {
   mkdirP,
   posix,
@@ -78,8 +79,21 @@ const RM_BATCH = 100
 export class SftpService {
   constructor(
     private readonly sessions: SessionManager,
-    private readonly agentFs?: AgentFsBridge
+    private readonly agentFs?: AgentFsBridge,
+    private readonly localPaths?: LocalPathResolver
   ) {}
+
+  private nativeLocal(sessionId: string, path: string): string {
+    return this.localPaths?.toNative(sessionId, path) ?? path
+  }
+
+  private logicalLocal(sessionId: string, path: string): string {
+    return this.localPaths?.fromNative(sessionId, path) ?? path
+  }
+
+  private isWsl(sessionId: string): boolean {
+    return this.localPaths?.isWsl(sessionId) ?? false
+  }
 
   private fs(sessionId: string, containerName: string, method: string, params: unknown): Promise<unknown> {
     if (!this.agentFs) throw new Error('容器文件通道不可用')
@@ -87,7 +101,12 @@ export class SftpService {
   }
 
   async list(sessionId: string, dir: string, containerName?: string): Promise<FileEntry[]> {
-    if (isLocalId(sessionId)) return localFs.list(dir)
+    if (isLocalId(sessionId)) {
+      const entries = await localFs.list(this.nativeLocal(sessionId, dir))
+      if (!this.isWsl(sessionId)) return entries
+      // UNC 只停留在 node:fs 边界；renderer 继续按原 POSIX 目录和名称构造路径
+      return entries.map((entry) => ({ ...entry, path: posix.join(dir, entry.name) }))
+    }
     if (containerName) {
       const res = (await this.fs(sessionId, containerName, 'fs_list', { path: dir })) as {
         entries: { name: string; is_dir: boolean; is_symlink: boolean; size: number; mtime: number }[]
@@ -120,7 +139,11 @@ export class SftpService {
   }
 
   async realpath(sessionId: string, path: string, containerName?: string): Promise<string> {
-    if (isLocalId(sessionId)) return localFs.realpath(path)
+    if (isLocalId(sessionId)) {
+      if (this.isWsl(sessionId) && path === '.') return this.localPaths!.home(sessionId)
+      const resolved = await localFs.realpath(this.nativeLocal(sessionId, path))
+      return this.logicalLocal(sessionId, resolved)
+    }
     if (containerName) {
       // 容器没有「家目录」概念，面板落地在 /；cwd 跟随由终端侧 OSC 7 提供
       return path === '.' ? '/' : path
@@ -142,7 +165,7 @@ export class SftpService {
     path: string,
     containerName?: string
   ): Promise<{ isDir: boolean; mtime: number; size: number } | null> {
-    if (isLocalId(sessionId)) return localFs.stat(path)
+    if (isLocalId(sessionId)) return localFs.stat(this.nativeLocal(sessionId, path))
     try {
       if (containerName) {
         const res = (await this.fs(sessionId, containerName, 'fs_stat', { path })) as {
@@ -161,7 +184,11 @@ export class SftpService {
   }
 
   async mkdir(sessionId: string, path: string, containerName?: string): Promise<void> {
-    if (isLocalId(sessionId)) return localFs.mkdir(path)
+    if (isLocalId(sessionId)) {
+      // /mnt/c、/mnt/d 实际仍受 Windows 文件名规则约束；Linux 原生 UNC 不套用。
+      const enforceWinName = !this.isWsl(sessionId) || wslWindowsMountToNative(path) !== null
+      return localFs.mkdir(this.nativeLocal(sessionId, path), enforceWinName)
+    }
     if (containerName) {
       await this.fs(sessionId, containerName, 'fs_mkdir', { path })
       return
@@ -181,7 +208,7 @@ export class SftpService {
     path: string,
     containerName?: string
   ): Promise<{ total: number; used: number; avail: number; mount?: string } | null> {
-    if (isLocalId(sessionId)) return localFs.diskUsage(path)
+    if (isLocalId(sessionId)) return localFs.diskUsage(this.nativeLocal(sessionId, path))
     try {
       if (containerName) {
         const r = (await this.fs(sessionId, containerName, 'fs_usage', { path })) as {
@@ -218,7 +245,10 @@ export class SftpService {
    * 期间渲染进程在 await —— 失败会把 tar 的 stderr 原文带回去。
    */
   async archive(sessionId: string, paths: string[], containerName?: string): Promise<string> {
-    if (isLocalId(sessionId)) return localFs.archive(paths)
+    if (isLocalId(sessionId)) {
+      if (this.isWsl(sessionId)) throw new Error('WSL 文件面板暂不支持打包')
+      return localFs.archive(paths)
+    }
     if (!paths.length) throw new Error('没有选中任何项')
     const parent = posix.dirname(paths[0])
     const names = paths.map((p) => posix.basename(p))
@@ -276,7 +306,9 @@ export class SftpService {
   }
 
   async rename(sessionId: string, from: string, to: string, containerName?: string): Promise<void> {
-    if (isLocalId(sessionId)) return localFs.rename(from, to)
+    if (isLocalId(sessionId)) {
+      return localFs.rename(this.nativeLocal(sessionId, from), this.nativeLocal(sessionId, to))
+    }
     if (containerName) {
       await this.fs(sessionId, containerName, 'fs_rename', { from, to })
       return
@@ -293,7 +325,10 @@ export class SftpService {
    * 开头 8KB 含 NUL 字节则判定为二进制，不交给编辑器（否则是满屏乱码）。
    */
   async readText(sessionId: string, path: string, containerName?: string): Promise<RemoteFileContent> {
-    if (isLocalId(sessionId)) return localFs.readText(path)
+    if (isLocalId(sessionId)) {
+      const content = await localFs.readText(this.nativeLocal(sessionId, path))
+      return { ...content, path: this.logicalLocal(sessionId, content.path) }
+    }
     if (containerName) {
       const st = (await this.fs(sessionId, containerName, 'fs_stat', { path })) as { size: number }
       if (st.size > MAX_EDITABLE_BYTES) {
@@ -355,7 +390,9 @@ export class SftpService {
     expectedMtime?: number,
     containerName?: string
   ): Promise<number> {
-    if (isLocalId(sessionId)) return localFs.writeText(path, content, expectedMtime)
+    if (isLocalId(sessionId)) {
+      return localFs.writeText(this.nativeLocal(sessionId, path), content, expectedMtime)
+    }
     if (containerName) {
       const res = (await this.fs(sessionId, containerName, 'fs_write', {
         path,
@@ -392,7 +429,7 @@ export class SftpService {
    * 5 万文件在高延迟链路上要按小时计。rm 不存在（127）回退 SFTP 递归。
    */
   async remove(sessionId: string, path: string, isDir: boolean, containerName?: string): Promise<void> {
-    if (isLocalId(sessionId)) return localFs.remove(path, isDir)
+    if (isLocalId(sessionId)) return localFs.remove(this.nativeLocal(sessionId, path), isDir)
     if (containerName) {
       await this.fs(sessionId, containerName, 'fs_delete', { path, recursive: isDir })
       return

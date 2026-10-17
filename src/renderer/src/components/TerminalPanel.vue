@@ -545,6 +545,13 @@ function pathFromOsc7(uri: string): string | null {
   const m = /^file:\/\/([^/]*)(\/.*)$/.exec(uri)
   if (!m) return null
   const raw = safeDecode(m[2])
+  // WSL 的 /c/... 也是合法 Linux 路径，不能套用 Git Bash 的 MSYS 盘符转换
+  if (
+    props.sessionId.startsWith(LOCAL_ID_PREFIX) &&
+    store.localShellIdForSession(props.sessionId)?.startsWith('wsl:')
+  ) {
+    return raw
+  }
   // Windows 下是 /C:/Users/... → C:\Users\...
   if (/^\/[A-Za-z]:/.test(raw)) return raw.slice(1).replace(/\//g, '\\')
   // Git Bash（MSYS）报的是 /c/Users/... 形式
@@ -942,8 +949,11 @@ onMounted(() => {
   // 本地标签：解析这个标签跑的是哪种 shell（拖拽粘路径的引号策略靠它）
   if (props.sessionId.startsWith(LOCAL_ID_PREFIX)) {
     void window.api.listLocalShells().then((shells) => {
-      const cur = shells.find((sh) => sh.id === settings.localShellId) ?? shells[0]
-      localShellKind = cur?.integration ?? null
+      const shellId = store.localShellIdForSession(props.sessionId)
+      const cur = shells.find((sh) => sh.id === shellId) ?? shells[0]
+      // resolveShell 对任何 wsl: id 都可直接启动，即使刷新后列表里已没有它，
+      // 这里也不能误回退成全局 cmd/PowerShell 的引号策略
+      localShellKind = shellId?.startsWith('wsl:') ? 'none' : (cur?.integration ?? null)
     }).catch(() => undefined)
   }
   term = new Terminal({

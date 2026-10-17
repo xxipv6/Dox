@@ -199,6 +199,8 @@ export interface LayoutTabSnapshot {
   username?: string
   /** 标签当时的 cwd（cd 跟踪）：恢复时落回原目录，而不是回家目录 */
   cwd?: string
+  /** 本地标签显式指定的 Shell（例如侧栏打开的 WSL）；缺省仍跟随全局默认 */
+  localShellId?: string
 }
 
 export interface LayoutSnapshot {
@@ -415,6 +417,15 @@ export type ContainerProbeResult =
   | { ok: true; list: ContainerList }
   | { ok: false; reason: ContainerProbeReason; message: string; detail?: string }
 
+export type WslDistroState = 'running' | 'stopped' | 'unknown'
+
+/** WSL 发行版的附加信息；quiet 回退时默认标记可能未知，状态用 unknown 表达 */
+export interface WslDistroInfo {
+  distro: string
+  isDefault?: boolean
+  state: WslDistroState
+}
+
 /** 本地终端可用的 shell */
 export interface LocalShellInfo {
   id: string
@@ -423,6 +434,8 @@ export interface LocalShellInfo {
   integrated: boolean
   /** shell 种类（渲染层据此选引号策略等：cmd 不认 POSIX 单引号） */
   integration?: 'powershell' | 'bash' | 'zsh' | 'fish' | 'cmd' | 'none'
+  /** 只有 wsl:<distro> 项才有，其他本地 Shell 不带这些语义 */
+  wsl?: WslDistroInfo
 }
 
 /** 创建本地终端的参数（cols/rows 复用 TermSize） */

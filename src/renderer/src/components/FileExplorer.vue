@@ -54,7 +54,13 @@ const searchSnap = ref(uiSnapshot?.search)
  * 「下载/上传」= 复制、没有 compose / du 分解（那俩是远端 agent 的能力）。
  */
 const isLocal = computed(() => !props.container && props.sessionId.startsWith(LOCAL_ID_PREFIX))
-const isWinLocal = computed(() => isLocal.value && window.api.platform === 'win32')
+const isWsl = computed(
+  () => isLocal.value && (store.localShellIdForSession(props.sessionId)?.startsWith('wsl:') ?? false)
+)
+const wslDistro = computed(() =>
+  isWsl.value ? (store.localShellIdForSession(props.sessionId)?.slice(4) ?? '') : ''
+)
+const isWinLocal = computed(() => isLocal.value && !isWsl.value && window.api.platform === 'win32')
 /** 平台习惯快捷键：mac 重命名=回车、删除=⌘⌫；win/linux 重命名=F2、删除=Del（VS Code 式） */
 const isMacPlatform = window.api.platform === 'darwin'
 /** 系统文件管理器的叫法（本机面板右键菜单文案）：Finder / 资源管理器 / 文件管理器 */
@@ -356,6 +362,12 @@ async function pasteAcrossPanels(
     errorMsg.value = '容器里的内容暂不支持粘到别的面板'
     return
   }
+  const srcIsWsl = srcSession.startsWith(LOCAL_ID_PREFIX) &&
+    (store.localShellIdForSession(srcSession)?.startsWith('wsl:') ?? false)
+  if (isWsl.value || srcIsWsl) {
+    errorMsg.value = 'WSL 与其他面板之间暂不支持跨面板粘贴'
+    return
+  }
   await guard(async () => {
     if (isLocal.value) {
       const stats = await Promise.all(clip.paths.map((p) => window.api.sftpStat(srcSession, p)))
@@ -618,7 +630,8 @@ async function init(): Promise<void> {
     // 以远端 home 目录为起点（容器落地 /，由主进程 realpath 分路处理）；
     // 本地会话优先落在设置里的「默认目录」，和新开本地终端的落点一致
     const home = await window.api.sftpRealpath(fsSessionId.value, '.', ctrName.value)
-    const landing = isLocal.value && settings.localDefaultDir ? settings.localDefaultDir : home
+    if (isWsl.value) store.setHome(props.sessionId, home)
+    const landing = isLocal.value && !isWsl.value && settings.localDefaultDir ? settings.localDefaultDir : home
     // 切标签会重挂载本组件（App.vue 按 sessionId 作 key）：恢复上次浏览的目录，
     // 切走再切回才落在原处而不是落地目录。项目模式同理备好 cwd，退出时从那里继续。
     const last = uiSnapshot?.dir
@@ -635,32 +648,37 @@ async function init(): Promise<void> {
       return
     }
     const restoreDir = followCwd ?? last
+    // 只有回到面板离开时的同一目录才恢复滚动；跟随终端去了另一个目录时，
+    // 旧 scrollTop 不能带过去。followCwd === last 是常见情况，不应误清空。
+    const restoreScroll = (dir: string): void => {
+      const scroll = dir === last ? uiSnapshot?.scroll : undefined
+      if (!scroll) return
+      // 两次写入都要核对还在原目录：用户在等待间隙点进别的目录的话，
+      // 迟到的 scrollTop 会串进新目录的列表
+      const applyScroll = (): void => {
+        if (fileListEl.value && cwd.value === dir) fileListEl.value.scrollTop = scroll
+      }
+      void nextTick(() => {
+        applyScroll()
+        // 用量条等异步块晚到会把列表撑高（视口变矮、最大滚动变大），
+        // 此刻写的 scrollTop 会被钳小 —— 等布局安定后补一枪
+        window.setTimeout(applyScroll, 150)
+      })
+    }
     if (restoreDir && restoreDir !== landing) {
       await load(restoreDir)
       // load 自己吞错误（回滚 cwd + 错误横幅）：恢复的目录进不去（被删/掉权限）
       // 就清掉横幅落回 home，别把旧目录的错误糊在刚挂载的面板上
       if (cwd.value === restoreDir) {
-        // 滚动位置只对「面板浏览恢复」有意义：跟到终端 cwd 是另一个目录，旧 scrollTop 会串位
-        const scroll = followCwd ? undefined : uiSnapshot?.scroll
-        if (scroll) {
-          // 两次写入都要核对还在原目录：用户在等待间隙点进别的目录的话，
-          // 迟到的 scrollTop 会串进新目录的列表
-          const applyScroll = (): void => {
-            if (fileListEl.value && cwd.value === restoreDir) fileListEl.value.scrollTop = scroll
-          }
-          void nextTick(() => {
-            applyScroll()
-            // 用量条等异步块晚到会把列表撑高（视口变矮、最大滚动变大），
-            // 此刻写的 scrollTop 会被钳小 —— 等布局安定后补一枪
-            window.setTimeout(applyScroll, 150)
-          })
-        }
+        restoreScroll(restoreDir)
         return
       }
       errorMsg.value = ''
       retryAction.value = null
     }
     await load(landing)
+    // 落地目录本身也有滚动状态；以前这条分支直接返回，home/默认目录必回顶部。
+    if (restoreDir === landing && cwd.value === landing) restoreScroll(landing)
   } catch {
     await load('/')
   }
@@ -932,7 +950,7 @@ function onTreeBlankContextMenu(p: { x: number; y: number }): void {
       [
         { id: 'search-in-folder', label: '从文件夹中查找', icon: 'search' },
         { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' },
-        ...(isLocal.value ? [{ id: 'reveal-cwd', label: `在${fmName}中显示此目录`, icon: 'external' as const }] : [])
+        ...(isLocal.value && !isWsl.value ? [{ id: 'reveal-cwd', label: `在${fmName}中显示此目录`, icon: 'external' as const }] : [])
       ],
       [
         { id: 'new-folder', label: '新建文件夹', icon: 'folder-plus' },
@@ -978,7 +996,7 @@ function buildRowMenuItems(targets: FileEntry[]): ContextMenuItem[] {
           ]
         : []),
       // 本机面板：系统文件管理器直达（远端面板的路径不在本机，没有这项）
-      ...(isLocal.value && !many
+      ...(isLocal.value && !isWsl.value && !many
         ? [
             { id: 'reveal', label: `在${fmName}中显示`, icon: 'external' as const },
             ...(targets[0].isDir
@@ -1000,13 +1018,15 @@ function buildRowMenuItems(targets: FileEntry[]): ContextMenuItem[] {
             : '下载',
         icon: 'download'
       },
-      {
-        // 就地打包：当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」。
-        // 容器里也能打 —— 由容器里的 agent 用 Go 标准库产包，不依赖容器里有 tar
-        id: 'archive',
-        label: many ? `打包这 ${targets.length} 项` : '打包',
-        icon: 'box'
-      }
+      ...(!isWsl.value
+        ? [{
+            // 就地打包：当前目录生成 .tar.gz，出现在面板里；下载走单独的「下载」。
+            // 容器里也能打 —— 由容器里的 agent 用 Go 标准库产包，不依赖容器里有 tar
+            id: 'archive' as const,
+            label: many ? `打包这 ${targets.length} 项` : '打包',
+            icon: 'box' as const
+          }]
+        : [])
     ],
     [
       // 复制进面板剪贴板；粘贴只接受同源（同会话同容器），跨面板给提示
@@ -1069,7 +1089,7 @@ function onBlankContextMenu(e: MouseEvent): void {
       [
         { id: 'enter-project', label: '以此处进入项目模式', icon: 'folder' },
         { id: 'open-terminal', label: '在终端打开此目录', icon: 'terminal' },
-        ...(isLocal.value ? [{ id: 'reveal-cwd', label: `在${fmName}中显示此目录`, icon: 'external' as const }] : [])
+        ...(isLocal.value && !isWsl.value ? [{ id: 'reveal-cwd', label: `在${fmName}中显示此目录`, icon: 'external' as const }] : [])
       ],
       [{ id: 'paste', label: '粘贴到当前目录', icon: 'paste', disabled: !canPaste.value }]
     ])
@@ -1256,6 +1276,7 @@ async function removeTargets(targets: FileEntry[]): Promise<void> {
  */
 function openInTerminal(dir?: string): void {
   const target = dir ?? cwd.value
+  let terminalDir = target
   if (isLocal.value && localShellKind === 'cmd') {
     // cmd 跨盘符必须 /d：cd "D:\…" 只改 D: 的记录目录，不切当前盘（同盘也兼容）
     window.api.input(props.sessionId, `cd /d "${target}"\r`)
@@ -1263,6 +1284,7 @@ function openInTerminal(dir?: string): void {
     // WSL（integration 'none' 且面板给的是盘符路径）：bash 不认 `D:\…`，翻成 /mnt/d/…
     const m = target.match(/^([A-Za-z]):[\\/]+(.*)$/)!
     const mnt = `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}`
+    terminalDir = mnt
     window.api.input(props.sessionId, `cd '${mnt.replace(/'/g, `'\\''`)}'\r`)
   } else {
     // 引号按 shell 种类选：cmd 不认单引号；PowerShell 单引号内单引号写两个。
@@ -1272,6 +1294,9 @@ function openInTerminal(dir?: string): void {
       : `'${target.replace(/'/g, `'\\''`)}'`
     window.api.input(props.sessionId, `cd ${quoted}\r`)
   }
+  // 直接 IPC 输入不会经过 xterm.onData 的 cd 跟踪。本地面板已知目标目录，
+  // 同步记到终端 cwd，否则 WSL 等无 OSC 7 的 shell 无法保存/恢复布局目录。
+  if (isLocal.value) store.setTermCwd(props.sessionId, terminalDir)
   // cd 打过去还得让用户看见：聚焦到挂着这个会话的终端标签，
   // 否则点了像没反应（SFTP 面板开着时终端可能在别的标签）
   const tab = store.tabs.find((t) => t.panes.some((p) => p.sessionId === props.sessionId))
@@ -1606,8 +1631,9 @@ onMounted(() => {
     void window.api
       .listLocalShells()
       .then((shells) => {
-        const cur = shells.find((sh) => sh.id === settings.localShellId) ?? shells[0]
-        localShellKind = cur?.integration ?? null
+        const shellId = store.localShellIdForSession(props.sessionId)
+        const cur = shells.find((sh) => sh.id === shellId) ?? shells[0]
+        localShellKind = shellId?.startsWith('wsl:') ? 'none' : (cur?.integration ?? null)
       })
       .catch(() => undefined)
   }
@@ -1712,8 +1738,12 @@ onBeforeUnmount(() => {
       <span v-if="props.container" class="ctr-badge" :title="`容器 ${props.container.containerName} 内的文件（经容器助手）`">
         <Icon name="box" :size="12" />{{ props.container.containerName }}
       </span>
-      <span v-else-if="isLocal" class="ctr-badge" title="本机文件（本地终端标签）">
-        <Icon name="monitor" :size="12" />本机
+      <span
+        v-else-if="isLocal"
+        class="ctr-badge"
+        :title="isWsl ? `WSL · ${wslDistro} 的文件` : '本机文件（本地终端标签）'"
+      >
+        <Icon name="monitor" :size="12" />{{ isWsl ? `WSL · ${wslDistro}` : '本机' }}
       </span>
       <!-- 本机 Windows 的根是「此电脑」（盘符列表），posix/远端的根是 / -->
       <template v-if="isWinLocal">
@@ -1741,8 +1771,12 @@ onBeforeUnmount(() => {
       <span v-if="props.container" class="ctr-badge" :title="`容器 ${props.container.containerName} 内的文件（经容器助手）`">
         <Icon name="box" :size="12" />{{ props.container.containerName }}
       </span>
-      <span v-else-if="isLocal" class="ctr-badge" title="本机文件（本地终端标签）">
-        <Icon name="monitor" :size="12" />本机
+      <span
+        v-else-if="isLocal"
+        class="ctr-badge"
+        :title="isWsl ? `WSL · ${wslDistro} 的文件` : '本机文件（本地终端标签）'"
+      >
+        <Icon name="monitor" :size="12" />{{ isWsl ? `WSL · ${wslDistro}` : '本机' }}
       </span>
       <Icon name="folder" :size="13" />
       <span class="project-root" :title="projectRoot">{{ rootName }}</span>

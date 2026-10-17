@@ -44,7 +44,8 @@ try {
   }
 } catch { /* 没有正好 */ }
 
-const app = await electron.launch({ args: ['.'] })
+const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'dox-local-explorer-'))
+const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`] })
 const win = await app.firstWindow()
 win.on('dialog', (d) => void d.accept())
 await win.waitForLoadState('domcontentloaded')
@@ -53,7 +54,7 @@ await win.waitForTimeout(1200)
 // 设置存主进程、渲染层 store 只在启动时 load 一次 —— ligatures 必须赶在
 // 第一次 reload 之前写，收尾恢复
 const origSettings = await win.evaluate(() => window.api.getSettings())
-if (origSettings && !origSettings.ligatures) {
+if (!origSettings?.ligatures) {
   await win.evaluate((s) => window.api.setSettings({ ...s, ligatures: true }), origSettings)
   await win.waitForTimeout(300)
 }
@@ -88,6 +89,9 @@ try {
   await win.evaluate(async () => {
     const s = await window.api.getSettings()
     await window.api.setSettings({ ...s, localDefaultDir: '' })
+    // 上一阶段已经把默认目录写进布局 cwd；不清布局会继续恢复测试目录，
+    // 面板也就看不到家目录里的夹具入口。
+    await window.api.setLayout({ tabs: [] })
     location.reload()
   })
   await win.waitForLoadState('domcontentloaded')
@@ -260,6 +264,7 @@ try {
   await win.evaluate(() => window.api.setLayout({ tabs: [] })).catch(() => undefined)
   if (origSettings) await win.evaluate((s) => window.api.setSettings(s), origSettings).catch(() => undefined)
   await app.close().catch(() => undefined)
+  fs.rmSync(userData, { recursive: true, force: true })
   for (let i = 0; i < 10; i++) {
     try {
       fs.rmSync(base, { recursive: true, force: true })
