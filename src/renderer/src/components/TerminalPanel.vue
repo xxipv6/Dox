@@ -143,11 +143,13 @@ function scanForListenPorts(chunk: Uint8Array): void {
 }
 
 /** 规则查重后把建议推上屏（横幅与 /proc 两条检测路径共用） */
-async function pushSuggestion(port: number, target: { sessionId: string }): Promise<void> {
+async function pushSuggestion(port: number, target: { sessionId: string; containerName?: string }): Promise<void> {
   const rules = await window.api.listForwards().catch(() => [])
   const exists = rules.some(
     (r) =>
       r.sessionId === target.sessionId &&
+      // 查重按容器归属匹配：宿主级的同端口规则不该压住容器里的建议
+      (r.container ?? r.originContainer ?? '') === (target.containerName ?? '') &&
       r.type === 'local' &&
       r.targetPort === port &&
       r.status === 'active'
@@ -410,6 +412,10 @@ async function confirmForward(s: PortSuggestion): Promise<void> {
   try {
     const rule = await window.api.addForward({
       sessionId: target.sessionId,
+      // 归属记到容器名下（面板过滤 / 关标签收规则都认它）；
+      // 不能用 container 字段 —— 那会把数据面切到容器助手隧道，而这里刻意
+      // 走 SSH -L 到网桥 IP（不装 agent 也能用，见 forwardTarget 的注释）
+      originContainer: target.containerName,
       type: 'local',
       listenPort: s.port,
       targetHost,

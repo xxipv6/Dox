@@ -172,11 +172,21 @@ export class AgentManager {
     this.sessions.onStatus(this.onSessionStatus)
   }
 
-  /** 查 agent 是否已装（按目标缓存；装/卸以我们的操作为准，外部手删了刷新即知） */
-  async status(sessionId: string, containerName?: string): Promise<AgentStatus> {
+  /**
+   * 查 agent 是否已装（按目标缓存；装/卸以我们的操作为准）。
+   *
+   * fresh=true 绕过缓存真探一次（面板的用户可见刷新走这条）——外部手删了
+   * 二进制 / 容器 rm 重建之后，缓存里那条「已安装」是我们自己装时写下的，
+   * 不真探就永远显示已安装、装按钮出不来，只能重启应用。
+   * 真探失败（含「二进制没了」的 exec 失败）顺手清掉这个 key 的旧缓存，
+   * 让其他消费方（转发面板的版本检查等）下次也重探。
+   */
+  async status(sessionId: string, containerName?: string, fresh = false): Promise<AgentStatus> {
     const key = keyOf(sessionId, containerName)
-    const cached = this.cache.get(key)
-    if (cached) return cached
+    if (!fresh) {
+      const cached = this.cache.get(key)
+      if (cached) return cached
+    }
     // 本机容器：没有 SSH，状态/安装/通道全部走本机 docker CLI
     if (isLocalContainerTarget(sessionId)) {
       if (!containerName) return { installed: false }
@@ -194,6 +204,7 @@ export class AgentManager {
         this.cache.set(key, status)
         return status
       } catch {
+        if (fresh) this.cache.delete(key)
         return { installed: false }
       }
     }
@@ -228,6 +239,7 @@ export class AgentManager {
       this.cache.set(key, status)
       return status
     } catch {
+      if (fresh) this.cache.delete(key)
       return { installed: false }
     }
   }

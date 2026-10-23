@@ -11,6 +11,11 @@
  *  -R（容器内监听 → 本机拨目标）：
  *    本机起 echo server；addForward(type:'remote', container) →
  *    容器里 nc 127.0.0.1:listenPort → 本机 echo 收到并回写，容器侧读回。
+ *  气泡路径（originContainer，SSH -L 到网桥 IP，不依赖容器助手）：
+ *    addForward(originContainer) → 本机连 127.0.0.1:listenPort →
+ *    经 SSH 到容器网桥 IP 拿到 nc 应答。
+ *  收口：removeContainerForwards 一次收掉归属该容器的两种规则
+ *       （隧道 container 与气泡 originContainer），监听全部释放。
  *
  * 用法：node scripts/verify-container-tunnel.mjs <host> [port] [user] [password]
  */
@@ -39,6 +44,7 @@ const IN_PORT = 18080 // 容器内 nc 监听
 const L_LOCAL = 18321 // -L：本机监听
 const R_IN = 18081 // -R：容器内监听
 const R_LOCAL = 18322 // -R：本机 echo server
+const B_LOCAL = 18323 // 气泡路径（originContainer）：本机监听
 const MARK = 'dox-tunnel-ok'
 
 // ---------- 夹具：远端一次性容器 ----------
@@ -193,18 +199,63 @@ try {
   check('-R 容器内连接到达本机 echo', echoReceived.join('').includes('ping-r'), JSON.stringify(echoReceived))
   check('-R 本机回写被容器侧读回', String(rResp).includes('pong:ping-r'), JSON.stringify(rResp))
 
-  // ---------- 收口：删规则 → 隧道断 ----------
-  await win.evaluate((id) => window.api.removeForward(id), ruleL.id)
-  await win.evaluate((id) => window.api.removeForward(id), ruleR.id)
+  // ---------- 气泡路径：originContainer + SSH -L 到网桥 IP（容器标签「转发到本机」建的那种） ----------
+  const bridgeIp = await win.evaluate(
+    ({ sessionId, c }) => window.api.containerIp(sessionId, c),
+    { sessionId, c: CONTAINER }
+  )
+  check('拿到容器网桥 IP', typeof bridgeIp === 'string' && bridgeIp.length > 0, String(bridgeIp))
+  const ruleB = await win.evaluate(
+    ({ sessionId, c, ip }) =>
+      window.api.addForward({
+        sessionId,
+        type: 'local',
+        listenHost: '127.0.0.1',
+        listenPort: 18323,
+        targetHost: ip,
+        targetPort: 18080,
+        // 与 TerminalPanel.confirmForward 同口径：container 留空（数据面不走
+        // 容器助手隧道），归属记在 originContainer 上
+        originContainer: c
+      }),
+    { sessionId, c: CONTAINER, ip: bridgeIp ?? '127.0.0.1' }
+  )
+  check('气泡规则带着 originContainer 落库', ruleB.originContainer === CONTAINER && !ruleB.container, JSON.stringify(ruleB))
+  await waitRule(ruleB.id, 'active')
+  check('气泡规则 active', true)
+  const bResp = await new Promise((resolve, reject) => {
+    const sock = net.connect(B_LOCAL, '127.0.0.1')
+    let buf = ''
+    sock.on('data', (d) => { buf += d.toString(); sock.end() })
+    sock.on('close', () => resolve(buf))
+    sock.on('error', reject)
+    setTimeout(() => { sock.destroy(); reject(new Error('超时，收到: ' + buf)) }, 8000)
+  }).catch((e) => String(e))
+  check('气泡路径经网桥 IP 拿到容器内应答', bResp === MARK, JSON.stringify(bResp))
+
+  // ---------- 收口：removeContainerForwards 一次收掉两种归属的规则（关容器标签走的就是这条） ----------
+  await win.evaluate(
+    ({ sessionId, c }) => window.api.removeContainerForwards(sessionId, c),
+    { sessionId, c: CONTAINER }
+  )
   await win.waitForTimeout(800)
   const gone = await new Promise((resolve) => {
     const sock = net.connect(L_LOCAL, '127.0.0.1')
     sock.once('connect', () => { sock.destroy(); resolve(false) })
     sock.once('error', () => resolve(true))
   })
-  check('删规则后 -L 本机监听已收', gone)
+  check('收口后 -L 本机监听已收', gone)
+  const goneB = await new Promise((resolve) => {
+    const sock = net.connect(B_LOCAL, '127.0.0.1')
+    sock.once('connect', () => { sock.destroy(); resolve(false) })
+    sock.once('error', () => resolve(true))
+  })
+  check('收口后气泡路径本机监听已收', goneB)
   const rulesLeft = await win.evaluate(() => window.api.listForwards())
-  check('规则表已清空', !rulesLeft.some((r) => r.id === ruleL.id || r.id === ruleR.id))
+  check(
+    '规则表已清空（隧道 + 气泡两种归属）',
+    !rulesLeft.some((r) => r.id === ruleL.id || r.id === ruleR.id || r.id === ruleB.id)
+  )
 
   await win.evaluate((id) => window.api.disconnect(id), sessionId)
 } finally {

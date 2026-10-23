@@ -82,6 +82,21 @@ src/
 改这里之前先想清楚：新增一类会话时，把它接进前缀路由，就能白拿输入/resize/断开/SFTP 排除/重连排除
 这一整套，不用写第二套 API。
 
+### 转发规则的两种容器归属
+
+`ForwardRule` 上 `container` 与 `originContainer` **不是同义词**，动转发代码前必须分清：
+
+- `container`：**数据面**走容器助手隧道（监听/拨号都在容器里，ForwardManager 据此路由到
+  `ContainerTunnelManager`）。面板表单建的那种。
+- `originContainer`：**纯归属字段**（面板过滤 + 关标签收规则），数据面是普通 SSH `-L`
+  到容器网桥 IP。容器标签的端口建议气泡建的就是这种 —— 它不依赖容器助手，
+  所以 `container` 必须留空，否则没装 agent 的容器就转发不了。
+
+生命周期也跟着归属走：容器标签（最后一个指着该容器的）关闭时，渲染层调
+`removeContainerForwards` 把两种归属的规则**删记录**收掉 —— 不是 `stopBySession`
+那种「置 stopped 留记录等重连」，标签都没了，留着就是任何面板都管不到的幽灵监听。
+面板过滤与建议查重一律认 `container ?? originContainer`。
+
 ---
 
 ## 3. 必须守住的约束

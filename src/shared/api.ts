@@ -264,10 +264,13 @@ export interface DoxApi {
   /**
    * 远程助手状态（installed/version/osArch）与显式安装（opt-in）。
    * containerName 给了就是容器内安装（Dev Containers 式注入，docker cp + exec）。
+   * fresh=true 绕过主进程缓存真探一次（面板的用户可见刷新用；外部手删了
+   * 二进制之后，缓存的「已安装」不重探就永远错下去）。
    */
   agentStatus(
     sessionId: string,
-    containerName?: string
+    containerName?: string,
+    fresh?: boolean
   ): Promise<{ installed: boolean; version?: string; osArch?: string }>
   agentInstall(
     sessionId: string,
@@ -344,6 +347,8 @@ export interface DoxApi {
   listForwards(): Promise<ForwardRule[]>
   addForward(input: ForwardRuleInput): Promise<ForwardRule>
   removeForward(id: string): Promise<void>
+  /** 收掉归属某容器的全部转发规则（container 隧道规则与 originContainer 气泡规则都认） */
+  removeContainerForwards(sessionId: string, container: string): Promise<void>
   onForwardUpdate(cb: (rules: ForwardRule[]) => void): () => void
 
   // ---- 快捷命令片段 ----

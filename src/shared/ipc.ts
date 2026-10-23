@@ -139,6 +139,8 @@ export const IpcChannels = {
   forwardList: 'forward:list',
   forwardAdd: 'forward:add',
   forwardRemove: 'forward:remove',
+  // 收掉归属某容器的全部规则（关容器标签时调用；认 container 与 originContainer）
+  forwardRemoveContainer: 'forward:removeContainer',
   forwardUpdate: 'forward:update',
   // 快捷命令片段
   snippetList: 'snippet:list',

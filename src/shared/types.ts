@@ -286,6 +286,13 @@ export interface ForwardRule {
   targetPort: number
   /** 容器转发：容器名（local = 本机监听/容器内拨目标，remote = 容器内监听/本机拨目标） */
   container?: string
+  /**
+   * 归属容器（仅展示与生命周期，**不影响数据面**）。
+   * 容器标签的转发建议气泡建的是普通 SSH -L（目标 = 容器网桥 IP，不依赖
+   * 容器助手），container 字段必须留空才不会被 ForwardManager 路由到隧道；
+   * 但规则要算在这个容器名下 —— 面板过滤与「关标签收规则」都认这个字段。
+   */
+  originContainer?: string
   status: 'active' | 'error' | 'stopped'
   error?: string
 }
@@ -300,6 +307,8 @@ export interface ForwardRuleInput {
   /** 容器转发：容器名（sessionId 是承载它的父会话，本机容器 = 'local' 哨兵）。
    *  此时 local = 本机监听/容器内拨目标，remote = 容器内监听/本机拨目标（经容器助手隧道） */
   container?: string
+  /** 归属容器（展示/生命周期用，不改数据面）：容器标签的转发建议气泡走 SSH -L 时填 */
+  originContainer?: string
 }
 
 /** 快捷命令片段 */

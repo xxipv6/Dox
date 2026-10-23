@@ -98,11 +98,15 @@ const sortedRules = computed(() =>
   rules.value.filter((r) => {
     const t = activeTarget.value
     if (!t) return false
-    return r.sessionId === t.sessionId && (r.container ?? '') === (t.container ?? '')
+    // 归属认两个字段：隧道规则的 container 与气泡规则的 originContainer
+    // （后者数据面是 SSH -L 到网桥 IP，container 必须留空，见 types.ts）
+    return r.sessionId === t.sessionId && (r.container ?? r.originContainer ?? '') === (t.container ?? '')
   })
 )
-/** 其他会话/容器还有规则在跑时给一行提示，免得规则藏在别的标签里被遗忘 */
-const otherCount = computed(() => rules.value.length - sortedRules.value.length)
+/** 其他会话/容器还有规则**在跑**时给一行提示（stopped/error 的记录不算「运行中」），免得规则藏在别的标签里被遗忘 */
+const otherCount = computed(
+  () => rules.value.filter((r) => r.status === 'active').length - sortedRules.value.filter((r) => r.status === 'active').length
+)
 
 onMounted(async () => {
   rules.value = await api.listForwards()
@@ -232,11 +236,12 @@ const statusText: Record<ForwardRule['status'], string> = {
   </div>
 
   <div v-for="rule in sortedRules" :key="rule.id" class="rule">
-    <span class="rule-type" :class="[rule.type, { container: !!rule.container }]">{{ rule.type === 'local' ? 'L' : rule.type === 'remote' ? 'R' : 'D' }}</span>
-    <span class="rule-desc" :title="rule.error ?? (rule.type === 'socks' ? `socks5://${rule.listenHost}:${rule.listenPort}` : undefined)">
+    <span class="rule-type" :class="[rule.type, { container: !!(rule.container ?? rule.originContainer) }]">{{ rule.type === 'local' ? 'L' : rule.type === 'remote' ? 'R' : 'D' }}</span>
+    <span class="rule-desc" :title="rule.error ?? (rule.type === 'socks' ? `socks5://${rule.listenHost}:${rule.listenPort}` : rule.originContainer ? `经 SSH 转发到容器网桥地址 ${rule.targetHost}` : undefined)">
       <template v-if="rule.type === 'socks'">{{ rule.listenHost === '127.0.0.1' ? '' : rule.listenHost }}:{{ rule.listenPort }} → SOCKS5 动态代理</template>
       <template v-else-if="rule.container && rule.type === 'remote'">容器内 {{ rule.listenHost === '127.0.0.1' ? '' : rule.listenHost }}:{{ rule.listenPort }} → 本机 {{ rule.targetHost }}:{{ rule.targetPort }}</template>
       <template v-else-if="rule.container">本机 {{ rule.listenHost === '127.0.0.1' ? '' : rule.listenHost }}:{{ rule.listenPort }} → 容器内 {{ rule.targetHost }}:{{ rule.targetPort }}</template>
+      <template v-else-if="rule.originContainer">本机 {{ rule.listenHost === '127.0.0.1' ? '' : rule.listenHost }}:{{ rule.listenPort }} → 容器 {{ rule.originContainer }} :{{ rule.targetPort }}</template>
       <template v-else>{{ rule.listenHost === '127.0.0.1' ? '' : rule.listenHost }}:{{ rule.listenPort }} → {{ rule.targetHost }}:{{ rule.targetPort }}</template>
     </span>
     <span class="rule-status" :class="rule.status">{{ statusText[rule.status] }}</span>

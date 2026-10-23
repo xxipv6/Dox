@@ -149,8 +149,8 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.sftpArchive, sessionId, paths, containerName),
   remoteListeners: (sessionId) =>
     ipcRenderer.invoke(IpcChannels.remoteListeners, sessionId),
-  agentStatus: (sessionId, containerName) =>
-    ipcRenderer.invoke(IpcChannels.agentStatus, sessionId, containerName),
+  agentStatus: (sessionId, containerName, fresh) =>
+    ipcRenderer.invoke(IpcChannels.agentStatus, sessionId, containerName, fresh),
   agentInstall: (sessionId, containerName) =>
     ipcRenderer.invoke(IpcChannels.agentInstall, sessionId, containerName),
   agentWatchPorts: (sessionId, containerName) =>
@@ -226,6 +226,8 @@ const api: DoxApi = {
   listForwards: () => ipcRenderer.invoke(IpcChannels.forwardList),
   addForward: (input) => ipcRenderer.invoke(IpcChannels.forwardAdd, input),
   removeForward: (id) => ipcRenderer.invoke(IpcChannels.forwardRemove, id),
+  removeContainerForwards: (sessionId, container) =>
+    ipcRenderer.invoke(IpcChannels.forwardRemoveContainer, sessionId, container),
   onForwardUpdate: (cb) => {
     const listener = (_e: IpcRendererEvent, rules: ForwardRule[]): void => cb(rules)
     ipcRenderer.on(IpcChannels.forwardUpdate, listener)

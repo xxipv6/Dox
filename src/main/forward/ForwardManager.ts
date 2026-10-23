@@ -80,6 +80,27 @@ export class ForwardManager {
     this.emit()
   }
 
+  /**
+   * 收掉归属某容器的全部规则（关容器标签时由渲染层在「没有别的标签还指着
+   * 这个容器」时调用）。认两种归属：隧道规则（container）与气泡规则
+   * （originContainer，数据面是 SSH -L 到网桥 IP）。
+   *
+   * 不带走就不能留：容器标签一关，这些规则在任何标签的面板下都不可见
+   * （面板按容器归属过滤），留着就是管不到的幽灵监听。
+   * 与 stopBySession 的区别：那是「会话断开，留着记录等重连恢复」，
+   * 这里是「用户明确关了容器的工作区」，直接删记录。
+   */
+  async removeByContainer(sessionId: string, container: string): Promise<void> {
+    const mine = [...this.rules.values()].filter(
+      (r) => r.sessionId === sessionId && (r.container ?? r.originContainer) === container
+    )
+    for (const rule of mine) {
+      await this.stop(rule)
+      this.rules.delete(rule.id)
+    }
+    if (mine.length) this.emit()
+  }
+
   /** 会话断开时停止其全部转发规则（保留记录，状态置为 stopped） */
   stopBySession(sessionId: string): void {
     let changed = false

@@ -55,7 +55,9 @@ async function refresh(): Promise<void> {
   probeFailed.value = false
   if (!target.value) return
   try {
-    status.value = await window.api.agentStatus(target.value.sessionId, target.value.containerName)
+    // fresh=true 真探一次：外部手删了二进制 / 容器重建之后，主进程缓存的
+    // 「已安装」不绕开就永远显示已安装，只能重启应用才能重装（踩过）
+    status.value = await window.api.agentStatus(target.value.sessionId, target.value.containerName, true)
   } catch (err) {
     probeFailed.value = true
     errorMsg.value = errorText(err)

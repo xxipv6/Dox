@@ -215,8 +215,10 @@ export function registerIpc(
   ipcMain.handle(IpcChannels.remoteListeners, (_event, sessionId: string) =>
     sessionManager.remoteListeners(sessionId)
   )
-  ipcMain.handle(IpcChannels.agentStatus, (_event, sessionId: string, containerName?: string) =>
-    agentManager.status(sessionId, containerName)
+  ipcMain.handle(
+    IpcChannels.agentStatus,
+    (_event, sessionId: string, containerName?: string, fresh?: boolean) =>
+      agentManager.status(sessionId, containerName, fresh)
   )
   ipcMain.handle(IpcChannels.agentInstall, (_event, sessionId: string, containerName?: string) =>
     agentManager.install(sessionId, containerName)
@@ -547,6 +549,9 @@ export function registerIpc(
     forwardManager.add(input)
   )
   ipcMain.handle(IpcChannels.forwardRemove, (_event, id: string) => forwardManager.remove(id))
+  ipcMain.handle(IpcChannels.forwardRemoveContainer, (_event, sessionId: string, container: string) =>
+    forwardManager.removeByContainer(sessionId, container)
+  )
 
   // ---- 快捷命令片段 ----
   ipcMain.handle(IpcChannels.snippetList, () => configStore.listSnippets())

@@ -779,8 +779,23 @@ export const useSessionStore = defineStore('sessions', () => {
         closeMonitor()
       }
       const parent = tab.container.parentSessionId
+      const name = tab.container.containerName
       const savedId = Object.keys(transports).find((k) => transports[k] === parent)
       if (savedId) releaseTransportIfIdle(savedId)
+      /*
+       * 归属这个容器的转发规则（气泡建的 originContainer / 面板建的隧道规则）
+       * 随最后一个指着它的标签一起收掉。规则挂在父会话上，父会话多半还活着
+       * （宿主标签/其他容器通道），不收就是任何面板都管不到的幽灵监听。
+       * 嵌套容器没有转发入口，这里自然也清不到东西。
+       */
+      const stillUsed = tabs.value.some(
+        (t) =>
+          t.kind === 'container' &&
+          t.container &&
+          t.container.parentSessionId === parent &&
+          t.container.containerName === name
+      )
+      if (!stillUsed) void window.api.removeContainerForwards(parent, name).catch(() => undefined)
     }
     if (activeTabId.value === tab.tabId) {
       // 落到相邻标签（右邻优先，没有则左邻），不是无脑跳去最后一个
