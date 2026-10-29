@@ -35,8 +35,9 @@ import type { ForwardManager } from '../forward/ForwardManager'
 import type { AgentManager } from '../agent/AgentManager'
 import { createContainerTransferIO } from '../container/containerTransfer'
 import type { ContainerIO } from '../sftp/TransferManager'
-import { agentVersionOlder } from '../../shared/agentVersion'
+import { ARCHIVE_STREAM_MIN_AGENT_VERSION, agentVersionOlder } from '../../shared/agentVersion'
 import { createAgentStreamIO } from '../agent/agentStream'
+import { createAgentArchiveIO } from '../agent/agentArchiveStream'
 import { LocalFsWatcher } from '../sftp/LocalFsWatcher'
 import type { ProcessService } from '../proc/ProcessService'
 import type { AiUsageService } from '../aiusage/AiUsageService'
@@ -380,8 +381,13 @@ export function registerIpc(
     // 直传能力：状态读不到（agent 没装/挂了）就不挂，自然落回 docker cp 接力
     try {
       const st = await agentManager.status(sessionId, containerName)
-      if (st.installed && st.version && !agentVersionOlder(st.version, '0.4.0')) {
-        io.stream = createAgentStreamIO(agentManager, sessionId, containerName)
+      if (st.installed && st.version) {
+        if (!agentVersionOlder(st.version, '0.4.0')) {
+          io.stream = createAgentStreamIO(agentManager, sessionId, containerName)
+        }
+        if (!agentVersionOlder(st.version, ARCHIVE_STREAM_MIN_AGENT_VERSION)) {
+          io.archive = createAgentArchiveIO(agentManager, sessionId, containerName)
+        }
       }
     } catch {
       /* 回退接力路径 */

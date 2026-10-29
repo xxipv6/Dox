@@ -214,6 +214,9 @@ SFTP 往返** —— N × RTT 在高延迟链路上是分钟~小时级。一律�
 
 - 文件夹传输：`tar -xf -` / `tar -cf -` 整流（TransferManager，本机侧
   纯 JS 拼拆 tar，不依赖本机 tar）
+- 容器目录（agent 0.9+）：`agent/archive_stream.go` 用 Go `archive/tar` 产流/解流，
+  主进程 `agentArchiveStream.ts` 复用同一套 JS tar 格式层；下载按 credit 推送，
+  上传按 offset 送块，整棵树一条任务且不落临时归档。旧 agent 才回退逐文件路径
 - 目录删除 / 多选删除：`rm -rf --` 整删、每批 100 条路径分块（SftpService）
 - 就地复制（面板粘贴）：`cp -a --`（含 --no-dereference，符号链接不跟；
   SFTP 协议没有 copy 原语，无 cp 时明确报错而不是本机绕一圈）

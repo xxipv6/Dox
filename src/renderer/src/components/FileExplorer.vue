@@ -32,6 +32,32 @@ const editor = useEditorStore()
 const composeStore = useComposeStore()
 const settings = useSettingsStore()
 
+/** 面板宽度：拖左缘调整，松手才持久化；切标签/重启后沿用上次宽度。 */
+const panelWidth = ref(settings.filePanelWidth)
+let resizeMove: ((ev: MouseEvent) => void) | null = null
+let resizeUp: (() => void) | null = null
+
+function stopResizeListeners(): void {
+  if (resizeMove) window.removeEventListener('mousemove', resizeMove)
+  if (resizeUp) window.removeEventListener('mouseup', resizeUp)
+  resizeMove = null
+  resizeUp = null
+}
+
+function startResize(e: MouseEvent): void {
+  const startX = e.clientX
+  const startW = panelWidth.value
+  resizeMove = (ev: MouseEvent): void => {
+    panelWidth.value = Math.min(960, Math.max(280, startW + (startX - ev.clientX)))
+  }
+  resizeUp = (): void => {
+    stopResizeListeners()
+    settings.filePanelWidth = panelWidth.value
+  }
+  window.addEventListener('mousemove', resizeMove)
+  window.addEventListener('mouseup', resizeUp)
+}
+
 /** 实际的文件操作会话（容器 = 父 SSH 会话；宿主机 = 自己） */
 const fsSessionId = computed(() => props.container?.parentSessionId ?? props.sessionId)
 const ctrName = computed(() => props.container?.containerName)
@@ -1641,6 +1667,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   disposed = true
+  stopResizeListeners()
   // 重挂载（切标签）前的最后采集：树展开/搜索结果/滚动位置入 store，
   // 下一个实例经 uiSnapshot 捡起来。beforeUnmount 时子组件还活着，快照是新鲜的
   captureSubs()
@@ -1673,12 +1700,14 @@ onBeforeUnmount(() => {
     ref="explorerEl"
     class="explorer"
     :class="{ 'drag-over': dragOver }"
+    :style="{ width: panelWidth + 'px' }"
     tabindex="0"
     @keydown="onKeydown"
     @dragover.prevent="dragOver = true"
     @dragleave.prevent="((dragOver = false), (dropRowPath = null))"
     @drop.prevent="onDrop"
   >
+    <div class="resize-handle" title="拖动调整文件面板宽度" @mousedown.prevent="startResize"></div>
     <!-- 工具栏（后退/前进/上一级/过滤是 browse 概念，项目模式下隐藏） -->
     <div class="toolbar">
       <button v-if="mode === 'browse'" class="icon-btn" title="后退（鼠标侧键）" :disabled="!historyBack.length" @click="historyGoBack">
@@ -2019,6 +2048,23 @@ onBeforeUnmount(() => {
   flex-direction: column;
   border-left: 1px solid var(--border);
   background: var(--bg-panel);
+}
+/* 左缘拖宽柄：6px 命中区，避免让用户精确瞄准 1px 边框 */
+.resize-handle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: var(--z-sticky);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.resize-handle:hover {
+  background: var(--accent-soft);
+}
+.resize-handle:active {
+  background: var(--accent);
 }
 .explorer.drag-over {
   outline: 2px dashed var(--focus-ring);

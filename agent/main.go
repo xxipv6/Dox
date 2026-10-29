@@ -19,7 +19,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.8.1"
+var version = "0.9.0"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -84,6 +84,8 @@ func serve() error {
 	var fsWG sync.WaitGroup
 	// 端口隧道（容器转发）：监听与连接挂在 hub 上，stop / 通道断开统一收口
 	tunnels := newTunnelHub(enc)
+	// 目录归档流：下载推送与上传解压共用同一 serve 生命周期
+	archives := newArchiveStreamHub(enc)
 	// 文件请求来自传输窗口和多个面板，不能无限制地创建 goroutine。
 	// 8 个并发足够填满 SSH 窗口，同时避免 fs_du/archive 与分块读写一起
 	// 把远端磁盘和内存打满；超出的请求在这里排队，响应仍按 id 对应。
@@ -156,6 +158,7 @@ func serve() error {
 				fsw.close()
 			}
 			tunnels.closeAll()
+			archives.closeAll()
 			// 等待异步文件请求完成再退出，避免 stop 抢在 fs_write_commit /
 			// 回包之前执行，调用方收到一个无响应的 pending 请求。
 			fsWG.Wait()
@@ -166,13 +169,19 @@ func serve() error {
 			// 让请求循环继续接收后续分块；否则一个 fs_du/读块会把
 			// watch_stats、取消和其他传输请求全部排在后面。safeEncoder
 			// 负责并发回包的原子性，响应由 id 与调用方对应。
-			if isFSMethod(req.Method) {
+			if isFSMethod(req.Method) || isArchiveStreamMethod(req.Method) {
 				fsWG.Add(1)
 				go func(r request) {
 					defer fsWG.Done()
 					fsSlots <- struct{}{}
 					defer func() { <-fsSlots }()
-					result, _, err := dispatchFS(r.Method, r.Params)
+					var result interface{}
+					var err error
+					if isArchiveStreamMethod(r.Method) {
+						result, err = archives.dispatch(r.Method, r.Params)
+					} else {
+						result, _, err = dispatchFS(r.Method, r.Params)
+					}
 					if err != nil {
 						_ = enc.Encode(response{ID: r.ID, Error: err.Error()})
 					} else {
@@ -211,6 +220,7 @@ func serve() error {
 	}
 	// stdin 关闭 = SSH 通道断了：agent 没有存在的意义，跟着退出
 	tunnels.closeAll()
+	archives.closeAll()
 	return scanner.Err()
 }
 

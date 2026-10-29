@@ -133,8 +133,13 @@ export function execCapture(
 
         stream.on('close', () => {
           done(() => {
-            // OpenSSH 对 exec 一定会发 exit-status；收不到就按 0 处理
-            if (!sawExit) exitCode = 0
+            // close 而无 exit = 通道/连接异常结束。不能把「不知道命令有没有跑完」
+            // 当成成功：调用方会据此删除中转文件、结束传输或继续下一步写操作。
+            // execStream 与 tar 传输本来就是这个口径，这里保持一致。
+            if (!sawExit) {
+              finish('channel', '连接中断，命令未返回退出状态')
+              return
+            }
             if (exitCode === 0) {
               resolve({
                 stdout: Buffer.concat(out).toString('utf8'),

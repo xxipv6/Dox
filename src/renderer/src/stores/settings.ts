@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   // 536 是算出来的：网络页极限 `192.168.233.233:23244`（21 等宽字符 ≈139px）
   // 在默认宽度下不省略号（列账见 MonitorPanel 的 .conn-grid 注释）
   monitorWidth: 536,
+  filePanelWidth: 360,
   localDefaultDir: '',
   projectRoots: {}
 }
@@ -87,6 +88,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const portSentinel = ref(DEFAULT_SETTINGS.portSentinel)
   const outputHighlight = ref(DEFAULT_SETTINGS.outputHighlight)
   const monitorWidth = ref(DEFAULT_SETTINGS.monitorWidth)
+  const filePanelWidth = ref(DEFAULT_SETTINGS.filePanelWidth)
   const localDefaultDir = ref(DEFAULT_SETTINGS.localDefaultDir)
   /** 文件面板项目模式：deviceKey → 根路径（不在 watch 列表里，由 setProjectRoot 显式 persist） */
   const projectRoots = ref<Record<string, string>>(DEFAULT_SETTINGS.projectRoots ?? {})
@@ -164,6 +166,7 @@ export const useSettingsStore = defineStore('settings', () => {
      * 自己拖过宽度（非 440）的人不动 —— 那是明确的选择（同 uiTheme 迁移的口径）。
      */
     if (persisted?.monitorWidth === 440) monitorWidth.value = DEFAULT_SETTINGS.monitorWidth
+    filePanelWidth.value = persisted?.filePanelWidth ?? DEFAULT_SETTINGS.filePanelWidth
     localDefaultDir.value = persisted?.localDefaultDir ?? DEFAULT_SETTINGS.localDefaultDir
     projectRoots.value = persisted?.projectRoots ?? {}
     uiTheme.value = persisted?.uiTheme ?? DEFAULT_SETTINGS.uiTheme
@@ -206,6 +209,7 @@ export const useSettingsStore = defineStore('settings', () => {
           portSentinel: portSentinel.value,
           outputHighlight: outputHighlight.value,
           monitorWidth: monitorWidth.value,
+          filePanelWidth: filePanelWidth.value,
           localDefaultDir: localDefaultDir.value,
           projectRoots: { ...projectRoots.value }
         })
@@ -245,7 +249,7 @@ export const useSettingsStore = defineStore('settings', () => {
   watch(
     [
       themeId, uiTheme, fontSize, fontId, ligatures, localShellId,
-      suggestPortForward, portSentinel, outputHighlight, monitorWidth, localDefaultDir
+      suggestPortForward, portSentinel, outputHighlight, monitorWidth, filePanelWidth, localDefaultDir
     ],
     persist
   )
@@ -290,6 +294,7 @@ export const useSettingsStore = defineStore('settings', () => {
     portSentinel,
     outputHighlight,
     monitorWidth,
+    filePanelWidth,
     localDefaultDir,
     projectRoots,
     dialogVisible,

@@ -160,6 +160,8 @@ export interface AppSettings {
   outputHighlight: boolean
   /** 性能监控面板宽度（拖左缘调整，像素） */
   monitorWidth: number
+  /** 文件面板宽度（拖左缘调整，像素） */
+  filePanelWidth: number
   /**
    * 本地终端默认目录：设置后新开本地终端一律从这里启动
    * （优先于「继承当前标签 cwd」和学习层；空 = 走学习层那套）

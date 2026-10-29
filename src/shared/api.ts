@@ -411,6 +411,8 @@ export interface DoxApi {
   /** cwd 学习层：读取/写回目录访问统计（bucket → 目录 → 次数） */
 
   readonly platform: string
+  /** Windows 当前 build number（ConPTY 的 xterm 兼容策略用；其他平台为 undefined） */
+  readonly windowsBuildNumber: number | undefined
   /** 本机家目录（学习层的 home 排除用） */
   /** 最小化窗口 */
   windowMinimize(): void

@@ -32,6 +32,8 @@ const editor = useEditorStore()
  * 仍必须留给前台进程的 SIGINT。
  */
 const isMac = window.api.platform === 'darwin'
+/** 本机 Windows shell 经 node-pty/ConPTY；WSL 也由 wsl.exe 经过同一层。 */
+const usesConpty = window.api.platform === 'win32' && props.sessionId.startsWith(LOCAL_ID_PREFIX)
 /** 右键菜单里显示的修饰键名 */
 const modLabel = isMac ? 'Cmd' : 'Ctrl'
 
@@ -969,6 +971,11 @@ onMounted(() => {
     // 不设 lineHeight：非 1 的行高会改变 fit() 的行数计算，属于未验证的渲染风险
     scrollback: 10000,
     theme: settings.currentPreset.theme,
+    // ConPTY 的滚动与折行并不是 Unix PTY 语义。缺了 buildNumber 时 xterm
+    // 会走旧版保守策略；给全后同时启用新版重排和增高窗口的 scrollback 修正。
+    windowsPty: usesConpty
+      ? { backend: 'conpty', buildNumber: window.api.windowsBuildNumber }
+      : undefined,
     allowProposedApi: true
   })
   fitAddon = new FitAddon()

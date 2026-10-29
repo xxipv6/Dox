@@ -76,6 +76,10 @@ function keyOf(sessionId: string, containerName?: string): string {
   return containerName ? `${sessionId}::${containerName}` : sessionId
 }
 
+function archiveKey(sessionId: string, containerName: string | undefined, streamId: string): string {
+  return `${keyOf(sessionId, containerName)}::archive::${streamId}`
+}
+
 /**
  * serve 通道的流的最小形状：远端是 SSH exec 通道，本机容器是
  * `docker exec -i` 子进程的 stdio —— 适配成同一形状后，握手/分发/挂死
@@ -146,6 +150,14 @@ export interface TunnelEventPayload {
   op: 'open' | 'data' | 'close'
   data?: string
   err?: string
+}
+
+/** 目录归档流事件。data 为 base64；done 可带 error，通道死亡时由主进程补发。 */
+export interface AgentArchiveEvent {
+  id: string
+  type: 'data' | 'done'
+  data?: string
+  error?: string
 }
 
 /**
@@ -515,6 +527,12 @@ export class AgentManager {
     try { ch.stream.close() } catch { /* 已死 */ }
     // 隧道连接全部随通道死掉：通知隧道管理器收口（意图保留，重连后重建监听）
     this.tunnelHandlers.get(key)?.({ closed: true })
+    // 归档传输不跨 SSH 重连续跑：明确失败，让任务报错而不是永久等待。
+    for (const [handlerKey, registration] of [...this.archiveHandlers]) {
+      if (!handlerKey.startsWith(`${key}::archive::`)) continue
+      this.archiveHandlers.delete(handlerKey)
+      registration.cb({ id: registration.id, type: 'done', error: 'agent 通道已断开' })
+    }
     const w = this.watches.get(key)
     if (w) {
       w.ports.active = false
@@ -528,6 +546,23 @@ export class AgentManager {
 
   /** 隧道事件/通道死亡回调；null 注销 */
   private tunnelHandlers = new Map<string, (ev: TunnelEventPayload | { closed: true }) => void>()
+
+  /** 目录归档事件按 client 生成的 streamId 分发；不进入渲染层广播。 */
+  private archiveHandlers = new Map<string, { id: string; cb: (ev: AgentArchiveEvent) => void }>()
+
+  setArchiveHandler(
+    sessionId: string,
+    containerName: string | undefined,
+    streamId: string,
+    cb: (ev: AgentArchiveEvent) => void
+  ): () => void {
+    const key = archiveKey(sessionId, containerName, streamId)
+    const registration = { id: streamId, cb }
+    this.archiveHandlers.set(key, registration)
+    return () => {
+      if (this.archiveHandlers.get(key) === registration) this.archiveHandlers.delete(key)
+    }
+  }
 
   setTunnelHandler(
     sessionId: string,
@@ -632,6 +667,14 @@ export class AgentManager {
           continue
         }
         if (msg.event) {
+          // 归档流是主进程传输任务的私有事件，按 streamId 分发，不进 watch 泳道。
+          if (msg.event === 'archive') {
+            const payload = (msg as { data?: AgentArchiveEvent }).data
+            if (payload?.id) {
+              this.archiveHandlers.get(archiveKey(key, containerName, payload.id))?.cb(payload)
+            }
+            continue
+          }
           // 隧道帧的消费者是主进程里的 ContainerTunnelManager，不是渲染层 ——
           // 别落进 broadcast（未知事件会被归到 ports 泳道，白白广播给界面）
           if (msg.event === 'tunnel') {

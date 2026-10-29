@@ -23,6 +23,10 @@ import type {
   WindowState
 } from '../shared/types'
 
+const windowsBuildNumber = process.platform === 'win32'
+  ? Number(process.getSystemVersion().split('.')[2])
+  : undefined
+
 const api: DoxApi = {
   connect: (config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
     ipcRenderer.invoke(IpcChannels.sshConnect, config, term, opts),
@@ -266,6 +270,7 @@ const api: DoxApi = {
 
   // ---- 自绘标题栏 ----
   platform: process.platform,
+  windowsBuildNumber,
   windowMinimize: () => ipcRenderer.send(IpcChannels.windowMinimize),
   windowToggleMaximize: () => ipcRenderer.send(IpcChannels.windowToggleMaximize),
   windowClose: () => ipcRenderer.send(IpcChannels.windowClose),

@@ -12,6 +12,7 @@ import type { Client, ClientChannel, SFTPWrapper } from 'ssh2'
 import ssh2 from 'ssh2'
 import type { TransferDirection, TransferTask } from '../../shared/types'
 import type { AgentStreamIO } from '../agent/agentStream'
+import type { AgentArchiveIO } from '../agent/agentArchiveStream'
 import { mkdirRemoteRecursive, posix, readdirP, statP, toPosixRel, unlinkP } from './sftpUtils.ts'
 import { execCapture, execStream } from '../ssh/remoteExec.ts'
 import { firstLine } from '../execError.ts'
@@ -90,6 +91,8 @@ export interface ContainerIO {
   listContainer(dir: string): Promise<{ name: string; isDir: boolean; isSymlink: boolean; size: number }[]>
   /** agent ≥0.4.0 的分块直传（有它就不走 docker cp 接力；见 agent/agentStream.ts） */
   stream?: AgentStreamIO
+  /** agent ≥0.9.0 的目录归档流：整个文件夹一条任务 */
+  archive?: AgentArchiveIO
 }
 
 interface LocalFileItem {
@@ -217,15 +220,15 @@ export class TransferManager {
     const client = this.getClient(sessionId)
     // 拿不到连接时别缓存 false：那会赶在重连前探过一次，整段会话都被判成「没 tar」
     if (!client) return false
-    let ok = false
     try {
       await execCapture(client, 'command -v tar', { timeoutMs: 5000 })
-      ok = true
+      // 只缓存成功。超时/通道抖动也可能探测失败，负缓存会把一次瞬时
+      // 错误变成整段会话的逐文件回退（几万文件就展开成几万任务）。
+      this.tarSupport.set(sessionId, true)
+      return true
     } catch {
-      ok = false
+      return false
     }
-    this.tarSupport.set(sessionId, ok)
-    return ok
   }
 
   /** 上传本地文件或文件夹（文件夹递归展开），返回创建的任务列表 */
@@ -1206,6 +1209,10 @@ export class TransferManager {
       }
       task._finalize = async () => {
         await io.cp(stagePath, `${containerName}:${ctrPath}`)
+        // docker cp 的 exec 异常现在会正确上抛；再查一次容器内正式路径，
+        // 防止任何收尾漏洞把「stage 已删、目标却没生成」显示成完成。
+        const landed = await io.statContainer(ctrPath)
+        if (landed.isDir) throw new Error(`容器上传校验失败：目标是目录 ${ctrPath}`)
         await io.rmHostStage(stage)
       }
       task._cleanupStage = () => void io.rmHostStage(stage)
@@ -1219,6 +1226,49 @@ export class TransferManager {
     }
     if (stat.isDirectory()) {
       const rootName = basename(localPath)
+      if (io.archive) {
+        // agent 归档流：本地仍遍历一次生成 tar 条目，但整棵树只产生一条任务。
+        // 拖拽与按钮都走到这里，3 万文件不再展开成 3 万次网络往返。
+        const entries: LocalTarEntry[] = []
+        const completed = await this.walkTarLocal(localPath, rootName, entries, () => this.expansionGen !== gen)
+        if (!completed || this.expansionGen !== gen) return []
+        let total = tarTrailer().length
+        let fileCount = 0
+        for (const entry of entries) {
+          total += tarEntryBytes(entry)
+          if (!entry.isDir) fileCount++
+        }
+        const task = this.createTask(
+          sessionId,
+          'upload',
+          localPath,
+          posix.join(remoteDir, rootName),
+          total,
+          `${rootName}/（${fileCount} 个文件，agent 整流）`,
+          containerName
+        )
+        task._stream = async (t) => {
+          await ensureCtrDir(remoteDir)
+          await io.archive!.upload(
+            entries,
+            remoteDir,
+            (n) => {
+              t.transferred = n
+              this.emitThrottled()
+            },
+            () => !!t._cancelRequested,
+            (cancel) => {
+              t._cancel = cancel
+              if (t._cancelRequested) cancel()
+              return () => {
+                if (t._cancel === cancel) t._cancel = undefined
+              }
+            }
+          )
+        }
+        this.push(task)
+        return [this.snapshot(task)]
+      }
       const files = await walkLocal(localPath, () => this.expansionGen !== gen)
       const created: TransferTask[] = []
       for (const f of files) {
@@ -1284,6 +1334,36 @@ export class TransferManager {
     const gen = this.expansionGen
     const rootName = sanitizeWinName(posix.basename(remotePath))
     const rootLocal = join(localDir, rootName)
+    if (io.archive) {
+      const task = this.createTask(
+        sessionId,
+        'download',
+        rootLocal,
+        remotePath,
+        0,
+        `${rootName}/（agent 整流）`,
+        containerName
+      )
+      task._stream = (t) =>
+        io.archive!.download(
+          remotePath,
+          localDir,
+          (n) => {
+            t.transferred = n
+            this.emitThrottled()
+          },
+          () => !!t._cancelRequested,
+          (cancel) => {
+            t._cancel = cancel
+            if (t._cancelRequested) cancel()
+            return () => {
+              if (t._cancel === cancel) t._cancel = undefined
+            }
+          }
+        )
+      this.push(task)
+      return [this.snapshot(task)]
+    }
     await fs.promises.mkdir(rootLocal, { recursive: true })
 
     const created: TransferTask[] = []
@@ -1374,13 +1454,28 @@ export class TransferManager {
    */
   cancelAll(): void {
     this.expansionGen++
+    const canceledPending: string[] = []
     for (const task of this.tasks.values()) {
       if (task.status === 'pending') {
-        this.settle(task, 'canceled')
+        // 几万条任务只改状态，不逐条 settle 建几万个自动消失定时器。
+        task.status = 'canceled'
+        canceledPending.push(task.id)
       } else if (task.status === 'active') {
         task._cancelRequested = true
         task._cancel?.()
       }
+    }
+    if (canceledPending.length > 0) {
+      // pump 不必再逐条 shift 扫描已取消的队列项。
+      this.queue = this.queue.filter((id) => this.tasks.get(id)?.status === 'pending')
+      // 保留现有的三秒确认窗口，但整批只用一个定时器。
+      const timer = setTimeout(() => {
+        for (const id of canceledPending) {
+          if (this.tasks.get(id)?.status === 'canceled') this.tasks.delete(id)
+        }
+        this.emit()
+      }, AUTO_DISMISS_MS)
+      timer.unref?.()
     }
     this.emit()
   }
@@ -1518,7 +1613,8 @@ export class TransferManager {
         await this.pipe(task, sftp)
         if (task._finalize) await task._finalize()
       }
-      task.transferred = task.size
+      if (task.size > 0) task.transferred = task.size
+      else task.size = task.transferred // 归档下载事前未知总文件字节数，完成后保留真实进度
       this.settle(task, 'done')
     } catch (err) {
       const e = err as Error
@@ -1687,14 +1783,21 @@ export class TransferManager {
         const len = Math.min(CHUNK, total - pos)
         readPos += len
 
-        let bytesRead: number
+        let bytesRead = 0
         try {
-          ;({ bytesRead } = await fh.read(buf, 0, len, pos))
+          // read 允许短读：不能把这块的剩余字节直接跳过。文件在传输中
+          // 被截短也必须报错，否则缺块/提前 EOF 最后仍会被 run() 标成 done。
+          while (bytesRead < len) {
+            const { bytesRead: n } = await fh.read(buf, bytesRead, len - bytesRead, pos + bytesRead)
+            if (n === 0) {
+              throw new Error(`本地文件在 ${pos + bytesRead} 字节处提前结束，上传未完成`)
+            }
+            bytesRead += n
+          }
         } catch (err) {
           if (!failure) failure = err as Error
           return
         }
-        if (bytesRead === 0) return // 传输期间本地文件被截短
         if (failure) return
         await new Promise<void>((resolve) => {
           sftp.write(handle, buf, 0, bytesRead, pos, (err) => {
@@ -1715,7 +1818,14 @@ export class TransferManager {
     } finally {
       // 等在途写全部落定后才关句柄；之后删半截文件才不和句柄释放赛跑
       await fh!.close().catch(() => undefined)
-      await new Promise<void>((resolve) => sftp.close(handle, () => resolve()))
+      await new Promise<void>((resolve) => {
+        sftp.close(handle, (err) => {
+          // 某些 SFTP 网关到 CLOSE 才提交最终对象。忽略这个错误会把
+          // 「正式目标根本没有生成」误报成上传完成；已有错误则保留第一原因。
+          if (err && !failure) failure = err
+          resolve()
+        })
+      })
     }
 
     // failure 的写入全在闭包里，TS 流分析到这已把它窄化成 null —— 断言绕开
@@ -1725,6 +1835,13 @@ export class TransferManager {
         await unlinkP(sftp, task.remotePath).catch(() => undefined)
       }
       throw err
+    }
+
+    // WRITE/CLOSE 回包成功之后再确认正式目录项确实存在且长度完整。
+    // 让异常服务端或后续收尾竞态暴露在任务错误里，而不是显示假完成。
+    const landed = await statP(sftp, task.remotePath)
+    if (landed.size !== total) {
+      throw new Error(`上传校验失败：远端大小 ${landed.size}，预期 ${total}`)
     }
   }
 
@@ -1892,6 +2009,13 @@ export class TransferManager {
         }
         let exitCode: number | null = null
         let sawExit = false
+        // 背压/慢通道也要能立即取消：直接关 exec 通道，唤醒在途读写，
+        // 不必等下一块数据或远端 drain。
+        task._cancel = () => channel.close()
+        // 等本回调把 close/error 监听挂完再补关，避免早到取消吃掉收尾事件。
+        queueMicrotask(() => {
+          if (task._cancelRequested) channel.close()
+        })
         const errChunks: Buffer[] = []
         let errLen = 0
         channel.stderr?.on('data', (c: Buffer) => {
@@ -1990,6 +2114,13 @@ export class TransferManager {
         }
         let exitCode: number | null = null
         let sawExit = false
+        // 背压/慢通道也要能立即取消：直接关 exec 通道，唤醒在途读写，
+        // 不必等下一块数据或远端 drain。
+        task._cancel = () => channel.close()
+        // 等本回调把 close/error 监听挂完再补关，避免早到取消吃掉收尾事件。
+        queueMicrotask(() => {
+          if (task._cancelRequested) channel.close()
+        })
         const errChunks: Buffer[] = []
         let errLen = 0
         channel.stderr?.on('data', (c: Buffer) => {
