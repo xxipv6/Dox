@@ -209,6 +209,8 @@ check('编辑器写回容器（agent fs_write）', editCheck.trim() === '编辑�
 await win.screenshot({ path: 'shots/73-container-fs-editor.png' })
 
 // ---- 下载（stub 原生对话框）：文件 + 目录 ----
+// raw-tar 会把同 inode 的第二个名字输出为 typeflag '1'，覆盖硬链接不丢文件的回归。
+await ctrExec(`ln ${CTR_DIR}/up-dir/a.conf ${CTR_DIR}/up-dir/a-hard.conf`)
 await app.evaluate(({ dialog }) => {
   dialog.showSaveDialog = async () => ({ canceled: false, filePath: '/tmp/doxfs-local/dl-hello.txt' })
   dialog.showOpenDialog = async () => ({ canceled: false, filePaths: ['/tmp/doxfs-local'] })
@@ -224,13 +226,16 @@ await win.waitForTimeout(6000)
 let dlFile = ''
 let dlDirA = ''
 let dlDirB = ''
+let dlDirHard = ''
 try {
   dlFile = readFileSync(`${LOCAL_DIR}/dl-hello.txt`, 'utf8')
   dlDirA = readFileSync(`${LOCAL_DIR}/up-dir/a.conf`, 'utf8')
   dlDirB = readFileSync(`${LOCAL_DIR}/up-dir/sub/b.log`, 'utf8')
+  dlDirHard = readFileSync(`${LOCAL_DIR}/up-dir/a-hard.conf`, 'utf8')
 } catch { /* 没落地 */ }
 check('容器文件下载回本机', dlFile.trim() === '编辑后的内容 from-dox', dlFile)
 check('容器目录递归下载（含子目录）', dlDirA === 'key=value1\n' && dlDirB === 'log-line\n', `${dlDirA}|${dlDirB}`)
+check('容器目录下载保留硬链接内容', dlDirHard === 'key=value1\n', dlDirHard)
 // 中转目录不留痕
 const stageLeft = await remoteExec(`ls -d /tmp/.dox-stage-* 2>/dev/null || echo CLEAN`)
 check('宿主机中转目录已清理', stageLeft.includes('CLEAN'), stageLeft)

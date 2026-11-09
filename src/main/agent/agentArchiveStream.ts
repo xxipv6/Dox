@@ -23,6 +23,8 @@ import {
 
 const CHUNK = 1024 * 1024
 const WINDOW = 6
+/** 下载发送窗口：覆盖高延迟链路的带宽时延积；旧 agent 会忽略该可选参数 */
+const DOWNLOAD_WINDOW = 16
 
 export interface AgentArchiveEntry {
   path: string
@@ -228,6 +230,19 @@ export function createAgentArchiveIO(
         async onFileEnd() {
           await closeWriter()
           currentFile = null
+        },
+        async onHardlink(entry) {
+          const targetPath = safeLocalJoin(localDir, entry.name)
+          if (!targetPath) return
+          const sourcePath = entry.linkName ? safeLocalJoin(localDir, entry.linkName) : null
+          if (!sourcePath) throw new Error(`硬链接目标越界或缺失：${entry.linkName ?? entry.name}`)
+          await fs.promises.mkdir(dirname(targetPath), { recursive: true })
+          try {
+            await fs.promises.copyFile(sourcePath, targetPath)
+          } catch (err) {
+            await fs.promises.unlink(targetPath).catch(() => undefined)
+            throw err
+          }
         }
       }
 
@@ -252,7 +267,7 @@ export function createAgentArchiveIO(
       }
 
       try {
-        const starting = call('fs_archive_start', { id, path: remotePath })
+        const starting = call('fs_archive_start', { id, path: remotePath, window: DOWNLOAD_WINDOW })
         void starting.then(
           () => isCanceled() ? call('fs_archive_cancel', { id }).catch(() => undefined) : undefined,
           () => undefined
@@ -266,7 +281,11 @@ export function createAgentArchiveIO(
           }
           if (!event.data) continue
           await parser.push(Buffer.from(event.data, 'base64'), sink)
-          await ctl.wait(call('fs_archive_ack', { id }))
+          ctl.check()
+          // ack 只用于归还远端 credit，不是数据正确性的确认点。逐块等待回包会把
+          // 整流退化成 1MiB/RTT；异步发出后立即处理已到达的下一块，通道死亡
+          // 仍由 onDead 补发 done(error) 让任务失败。
+          void call('fs_archive_ack', { id }).catch(() => undefined)
         }
         await closeWriter()
         ctl.check()

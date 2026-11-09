@@ -38,6 +38,8 @@ onBeforeUnmount(() => unsubscribe?.())
 function progress(t: TransferTask): number {
   // 结束的任务恒满格：空文件（size=0）算出来是 0%，显示成「完成但 0%」像坏了
   if (t.status === 'done') return 100
+  // 总量未知时由 .indeterminate 动画表达活动状态，不要一直显示 0 宽。
+  if (t.status === 'active' && t.size <= 0) return 35
   return t.size > 0 ? Math.min(100, (t.transferred / t.size) * 100) : 0
 }
 </script>
@@ -85,7 +87,7 @@ function progress(t: TransferTask): number {
           <div class="progress-track">
             <div
               class="progress-bar"
-              :class="task.status"
+              :class="[task.status, { indeterminate: task.status === 'active' && task.size <= 0 }]"
               :style="{ width: progress(task) + '%' }"
             ></div>
           </div>
@@ -97,8 +99,8 @@ function progress(t: TransferTask): number {
         <span class="task-status" :class="task.status" :title="task.error">
           {{ statusText[task.status] }}
           {{ task.status === 'active' ? formatPercent(task.transferred, task.size) : '' }}
-          <template v-if="task.size > 0 && task.status !== 'pending'">
-            · {{ formatSize(task.transferred) }}/{{ formatSize(task.size) }}
+          <template v-if="task.status !== 'pending' && (task.size > 0 || task.transferred > 0)">
+            · {{ formatSize(task.transferred) }}<template v-if="task.size > 0">/{{ formatSize(task.size) }}</template>
           </template>
         </span>
         <button
@@ -221,6 +223,17 @@ function progress(t: TransferTask): number {
   height: 100%;
   background: var(--accent-text);
   transition: width var(--dur-base) var(--ease-out);
+}
+.progress-bar.indeterminate {
+  animation: transfer-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes transfer-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
 }
 .progress-bar.done {
   background: var(--success-text);

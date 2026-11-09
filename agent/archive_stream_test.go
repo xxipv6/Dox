@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -64,6 +65,75 @@ func (w archiveEventCapture) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func TestArchiveDownloadWindowNegotiation(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested int
+		want      int
+	}{
+		{name: "negative uses legacy default", requested: -1, want: archiveStreamWindow},
+		{name: "missing uses legacy default", requested: 0, want: archiveStreamWindow},
+		{name: "single credit", requested: 1, want: 1},
+		{name: "requested window", requested: 16, want: 16},
+		{name: "maximum window", requested: archiveStreamMaxWindow, want: archiveStreamMaxWindow},
+		{name: "oversized request is capped", requested: archiveStreamMaxWindow + 1, want: archiveStreamMaxWindow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := archiveDownloadWindow(tt.requested); got != tt.want {
+				t.Fatalf("archiveDownloadWindow(%d) = %d, want %d", tt.requested, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestArchiveDownloadCoalescesSmallEntries(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "root"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		name := filepath.Join(root, "root", fmt.Sprintf("%03d.txt", i))
+		if err := os.WriteFile(name, []byte("small"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capture := archiveEventCapture{ch: make(chan []byte)}
+	hub := newArchiveStreamHub(&safeEncoder{enc: json.NewEncoder(capture)})
+	defer hub.closeAll()
+	if err := hub.startDownload("coalesced", filepath.Join(root, "root"), 0); err != nil {
+		t.Fatal(err)
+	}
+	dataFrames := 0
+	for {
+		select {
+		case frame := <-capture.ch:
+			var ev event
+			if err := json.Unmarshal(frame, &ev); err != nil {
+				t.Fatal(err)
+			}
+			data := ev.Data.(map[string]interface{})
+			switch data["type"] {
+			case "data":
+				dataFrames++
+				if _, err := hub.dispatch("fs_archive_ack", json.RawMessage(`{"id":"coalesced"}`)); err != nil {
+					t.Fatal(err)
+				}
+			case "done":
+				if data["error"] != nil {
+					t.Fatalf("下载失败: %v", data["error"])
+				}
+				if dataFrames != 1 {
+					t.Fatalf("100 个小文件应合并为一个数据帧，实际 %d", dataFrames)
+				}
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("合块归档下载没有及时完成")
+		}
+	}
+}
+
 func TestArchiveDownloadProducesDataAndDone(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "root"), 0o755); err != nil {
@@ -75,7 +145,7 @@ func TestArchiveDownloadProducesDataAndDone(t *testing.T) {
 	capture := archiveEventCapture{ch: make(chan []byte)}
 	hub := newArchiveStreamHub(&safeEncoder{enc: json.NewEncoder(capture)})
 	defer hub.closeAll()
-	if err := hub.startDownload("download", filepath.Join(root, "root")); err != nil {
+	if err := hub.startDownload("download", filepath.Join(root, "root"), 0); err != nil {
 		t.Fatal(err)
 	}
 	sawData := false

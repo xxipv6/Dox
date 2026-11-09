@@ -93,6 +93,11 @@ export interface ContainerIO {
   stream?: AgentStreamIO
   /** agent ≥0.9.0 的目录归档流：整个文件夹一条任务 */
   archive?: AgentArchiveIO
+  /** 容器有 sh+tar 时绕过 NDJSON/Base64 的原始 exec 整流 */
+  rawTar?: {
+    supportsTar(): Promise<boolean>
+    command(remotePath: string): string
+  }
 }
 
 interface LocalFileItem {
@@ -318,13 +323,18 @@ export class TransferManager {
     // tar 整流：远端边打包边发，本地边收边解（单条任务）
     if (await this.supportsTar(sessionId)) {
       await fs.promises.mkdir(rootLocal, { recursive: true })
-      // 百分比需要总量：du -sb（GNU）一趟拿表观字节数；busybox 没有就
-      // 只显示已接收字节，不为总量再付一遍遍历
+      // 百分比需要总量：GNU du 的 -sb 拿表观字节数；BSD/BusyBox 没有 -b，
+      // 回退到通用的 -sk（块数 × 1024，进度允许近似），别让总量未知拖成空进度条。
       let total = 0
       const client = this.getClient(sessionId)
       if (client) {
         try {
-          const r = await execCapture(client, `du -sb ${shQuote(remotePath)}`, { timeoutMs: 60_000 })
+          const quoted = shQuote(remotePath)
+          const r = await execCapture(
+            client,
+            `(du -sb ${quoted} 2>/dev/null || du -sk ${quoted} 2>/dev/null | awk '{print $1 * 1024}')`,
+            { timeoutMs: 60_000 }
+          )
           total = parseInt(r.stdout.trim().split(/\s/)[0], 10) || 0
         } catch {
           total = 0
@@ -1296,16 +1306,30 @@ export class TransferManager {
     const stream = io.stream
     if (stream) {
       const task = this.createTask(sessionId, 'download', localPath, remotePath, st.size, undefined, containerName)
-      task._stream = (t) =>
-        stream.download(
-          remotePath,
-          localPath,
-          (n) => {
-            t.transferred = n
-            this.emitThrottled()
-          },
-          () => !!t._cancelRequested
-        )
+      task._stream = async (t) => {
+        try {
+          await stream.download(
+            remotePath,
+            localPath,
+            (n) => {
+              t.transferred = n
+              this.emitThrottled()
+            },
+            () => !!t._cancelRequested,
+            (cancel) => {
+              t._cancel = cancel
+              if (t._cancelRequested) cancel()
+              return () => {
+                if (t._cancel === cancel) t._cancel = undefined
+              }
+            }
+          )
+        } catch (err) {
+          // 取消与 SFTP/归档路径同口径：失败留半截供续传，取消不留残骸。
+          if (t._cancelRequested) await fs.promises.unlink(localPath).catch(() => undefined)
+          throw err
+        }
+      }
       this.push(task)
       return this.snapshot(task)
     }
@@ -1323,7 +1347,7 @@ export class TransferManager {
     return this.snapshot(task)
   }
 
-  /** 从容器下载文件夹：容器内经 agent fs_list 递归展开，逐文件两段接力 */
+  /** 从容器下载文件夹：agent ≥0.9 整流；老 agent 回退逐文件两段接力 */
   async enqueueDownloadDirContainer(
     sessionId: string,
     containerName: string,
@@ -1334,6 +1358,25 @@ export class TransferManager {
     const gen = this.expansionGen
     const rootName = sanitizeWinName(posix.basename(remotePath))
     const rootLocal = join(localDir, rootName)
+    const rawTar = io.rawTar
+    const rawTarSupported = rawTar ? await rawTar.supportsTar() : false
+    // 探测最多 5s，期间可能已执行“全部取消”；不能把任务延迟补回队列。
+    if (this.expansionGen !== gen) return []
+    if (rawTar && rawTarSupported) {
+      const cmd = rawTar.command(remotePath)
+      const task = this.createTask(
+        sessionId,
+        'download',
+        rootLocal,
+        remotePath,
+        0,
+        `${rootName}/（容器原始整流）`,
+        containerName
+      )
+      task._stream = (t) => this.tarDownload(t, remotePath, localDir, cmd)
+      this.push(task)
+      return [this.snapshot(task)]
+    }
     if (io.archive) {
       const task = this.createTask(
         sessionId,
@@ -1393,16 +1436,30 @@ export class TransferManager {
               `${rootName}/${rel}`,
               containerName
             )
-            task._stream = (t) =>
-              stream.download(
-                rChild,
-                lChild,
-                (n) => {
-                  t.transferred = n
-                  this.emitThrottled()
-                },
-                () => !!t._cancelRequested
-              )
+            task._stream = async (t) => {
+              try {
+                await stream.download(
+                  rChild,
+                  lChild,
+                  (n) => {
+                    t.transferred = n
+                    this.emitThrottled()
+                  },
+                  () => !!t._cancelRequested,
+                  (cancel) => {
+                    t._cancel = cancel
+                    if (t._cancelRequested) cancel()
+                    return () => {
+                      if (t._cancel === cancel) t._cancel = undefined
+                    }
+                  }
+                )
+              } catch (err) {
+                // 与其他下载路径一致：取消不留半截文件，句柄已由 stream.download 关闭。
+                if (t._cancelRequested) await fs.promises.unlink(lChild).catch(() => undefined)
+                throw err
+              }
+            }
             this.push(task)
             created.push(this.snapshot(task))
             continue
@@ -2100,11 +2157,11 @@ export class TransferManager {
    * 背压靠 for-await（await 磁盘写期间通道自动暂停）；取消 = 关通道 +
    * 删掉正在写的半截文件，已解开的文件保留（同逐文件路径口径）。
    */
-  private async tarDownload(task: InternalTask, remotePath: string, localDir: string): Promise<void> {
+  private async tarDownload(task: InternalTask, remotePath: string, localDir: string, rawCommand?: string): Promise<void> {
     const client = this.getClient(task.sessionId)
     if (!client) throw new Error('会话已断开')
     // `--` 防止合法但以 '-' 开头的目录名被 tar 当成选项。
-    const cmd = `tar -cf - -C ${shQuote(posix.dirname(remotePath))} -- ${shQuote(posix.basename(remotePath))}`
+    const cmd = rawCommand ?? `tar -cf - -C ${shQuote(posix.dirname(remotePath))} -- ${shQuote(posix.basename(remotePath))}`
 
     return new Promise<void>((resolve, reject) => {
       client.exec(cmd, { pty: false }, (execErr, channel) => {
@@ -2119,7 +2176,7 @@ export class TransferManager {
         task._cancel = () => channel.close()
         // 等本回调把 close/error 监听挂完再补关，避免早到取消吃掉收尾事件。
         queueMicrotask(() => {
-          if (task._cancelRequested) channel.close()
+          if (task._cancelRequested) task._cancel?.()
         })
         const errChunks: Buffer[] = []
         let errLen = 0
@@ -2187,6 +2244,21 @@ export class TransferManager {
           async onFileEnd() {
             await closeWriter()
             currentFile = null
+          },
+          async onHardlink(entry) {
+            const p = safeLocalJoin(localDir, entry.name)
+            if (!p) return
+            const target = entry.linkName ? safeLocalJoin(localDir, entry.linkName) : null
+            if (!target) throw new Error(`硬链接目标越界或缺失：${entry.linkName ?? entry.name}`)
+            await fs.promises.mkdir(dirname(p), { recursive: true })
+            // 与 agent 归档的材料化口径一致：复制已解出的内容，不依赖本机
+            // 硬链接权限；目标通常已由 tar 放在前面，失败要显式报错而非少文件。
+            try {
+              await fs.promises.copyFile(target, p)
+            } catch (err) {
+              await fs.promises.unlink(p).catch(() => undefined)
+              throw err
+            }
           }
         }
 
@@ -2232,7 +2304,9 @@ export class TransferManager {
             await closeWriter()
             dropHalf()
             channel.close()
-            reject(err as Error)
+            // channel.close 可能让 for-await 先抛 Channel closed；用户取消
+            // 必须保持 canceled 状态，不能被这个次生错误覆盖成失败。
+            reject(task._cancelRequested ? new Error(CANCELED) : err as Error)
           }
         })()
       })

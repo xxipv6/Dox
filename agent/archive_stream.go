@@ -7,6 +7,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 const (
 	archiveStreamChunk      = 1024 * 1024
 	archiveStreamWindow     = 6
+	archiveStreamMaxWindow  = 32
 	archiveExtractMaxBuffer = 8 * archiveStreamChunk
 )
 
@@ -133,13 +135,14 @@ func (h *archiveStreamHub) dispatch(method string, params json.RawMessage) (inte
 	switch method {
 	case "fs_archive_start":
 		var p struct {
-			ID   string `json:"id"`
-			Path string `json:"path"`
+			ID     string `json:"id"`
+			Path   string `json:"path"`
+			Window int    `json:"window"`
 		}
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, err
 		}
-		return nil, h.startDownload(p.ID, p.Path)
+		return nil, h.startDownload(p.ID, p.Path, p.Window)
 	case "fs_archive_ack":
 		var p struct {
 			ID string `json:"id"`
@@ -241,10 +244,19 @@ type archiveDownload struct {
 	creditMu   sync.Mutex
 	creditCond *sync.Cond
 	credit     int
+	window     int
 	closed     bool
 }
 
-func (h *archiveStreamHub) startDownload(id, root string) error {
+func archiveDownloadWindow(requested int) int {
+	// 老客户端没有 window 字段，保持 6；新客户端可按链路 BDP 请求更大的窗口。
+	if requested <= 0 {
+		return archiveStreamWindow
+	}
+	return min(requested, archiveStreamMaxWindow)
+}
+
+func (h *archiveStreamHub) startDownload(id, root string, requestedWindow int) error {
 	if !filepath.IsAbs(root) {
 		return errors.New("归档目录需要绝对路径")
 	}
@@ -255,10 +267,11 @@ func (h *archiveStreamHub) startDownload(id, root string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("归档目标不是目录（根符号链接不跟随）")
 	}
+	window := archiveDownloadWindow(requestedWindow)
 	reader, writer := io.Pipe()
 	d := &archiveDownload{
 		id: id, hub: h, reader: reader, writer: writer,
-		credit: archiveStreamWindow,
+		credit: window, window: window,
 	}
 	d.creditCond = sync.NewCond(&d.creditMu)
 	if err := h.add(id, d); err != nil {
@@ -272,7 +285,14 @@ func (h *archiveStreamHub) startDownload(id, root string) error {
 }
 
 func (d *archiveDownload) produce(root string) {
-	err := writeArchiveTar(d.writer, root)
+	// tar.Writer 会按文件头/内容/填充产生大量小写入；io.Pipe 又保留这些
+	// 边界，若不先合块，3 万小文件会变成十万级 NDJSON 帧和 ack。
+	// 在上传侧同款的 1MiB 粒度合块后，credit 控制的是有效数据量而非文件数。
+	buffered := bufio.NewWriterSize(d.writer, archiveStreamChunk)
+	err := writeArchiveTar(buffered, root)
+	if err == nil {
+		err = buffered.Flush()
+	}
 	_ = d.writer.CloseWithError(err)
 }
 
@@ -318,7 +338,11 @@ func (d *archiveDownload) waitCredit() bool {
 
 func (d *archiveDownload) ack() {
 	d.creditMu.Lock()
-	if !d.closed && d.credit < archiveStreamWindow {
+	window := d.window
+	if window <= 0 {
+		window = archiveStreamWindow // 测试/旧构造路径的默认值
+	}
+	if !d.closed && d.credit < window {
 		d.credit++
 		d.creditCond.Signal()
 	}

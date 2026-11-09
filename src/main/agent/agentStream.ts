@@ -33,7 +33,8 @@ export interface AgentStreamIO {
     remotePath: string,
     localPath: string,
     onProgress: (transferred: number) => void,
-    isCanceled: () => boolean
+    isCanceled: () => boolean,
+    registerCancel?: (cancel: () => void) => () => void
   ): Promise<void>
 }
 
@@ -118,7 +119,7 @@ export function createAgentStreamIO(
       }
     },
 
-    async download(remotePath, localPath, onProgress, isCanceled) {
+    async download(remotePath, localPath, onProgress, isCanceled, registerCancel) {
       /*
        * 下载续传：本地已有半截就从它的长度接着读（对端 read_chunk 带 offset）。
        * 本地比远端还大 = 不是同一个东西的残留，清空重来。
@@ -128,60 +129,91 @@ export function createAgentStreamIO(
        * 探路请求（小文件会多发几个越界读，返回空+eof，无害有界）。响应乱序
        * 到达没关系：块带 offset，写本地也用 offset。
        */
-      let offset = 0
-      try {
-        offset = (await fs.stat(localPath)).size
-      } catch { /* 没下载过 */ }
-      const fh = await fs.open(localPath, offset > 0 ? 'r+' : 'w')
-      try {
-        let readPos = offset
-        const startOffset = offset
-        let remoteSize = -1
-        let eofSeen = false
-        let confirmed = 0
-        let maxWritten = offset
-        let failure: Error | null = null
+      let canceled = false
+      let rejectInterrupted!: (err: Error) => void
+      const interrupted = new Promise<never>((_resolve, reject) => {
+        rejectInterrupted = reject
+      })
+      void interrupted.catch(() => undefined)
+      const dispose = registerCancel?.(() => {
+        if (canceled) return
+        canceled = true
+        rejectInterrupted(new Error(STREAM_CANCELED))
+      })
+      const check = (): void => {
+        if (isCanceled() && !canceled) {
+          canceled = true
+          rejectInterrupted(new Error(STREAM_CANCELED))
+        }
+        if (canceled) throw new Error(STREAM_CANCELED)
+      }
+      const wait = <T>(pending: Promise<T>): Promise<T> => {
+        check()
+        return Promise.race([pending, interrupted])
+      }
 
-        const worker = async (): Promise<void> => {
-          for (;;) {
-            if (isCanceled()) throw new Error(STREAM_CANCELED)
-            if (failure || eofSeen) return
-            // 分配块位置：同步代码段，worker 之间不会交错
-            const pos = readPos
-            if (remoteSize >= 0 && pos >= remoteSize) return
-            readPos += CHUNK
+      try {
+        check()
+        let offset = 0
+        try {
+          offset = (await fs.stat(localPath)).size
+        } catch { /* 没下载过 */ }
+        const fh = await fs.open(localPath, offset > 0 ? 'r+' : 'w')
+        try {
+          let readPos = offset
+          const startOffset = offset
+          let remoteSize = -1
+          let eofSeen = false
+          let confirmed = 0
+          let maxWritten = offset
+          let failure: Error | null = null
 
-            let r: { data: string; eof: boolean; size: number }
-            try {
-              r = await call('fs_read_chunk', { path: remotePath, offset: pos, length: CHUNK })
-            } catch (err) {
-              if (!failure) failure = err as Error
-              return
-            }
-            if (failure) return
-            remoteSize = r.size
-            const buf = Buffer.from(r.data, 'base64')
-            if (buf.length > 0) {
-              await fh.write(buf, 0, buf.length, pos)
-              confirmed += buf.length
-              if (pos + buf.length > maxWritten) maxWritten = pos + buf.length
-              onProgress(startOffset + confirmed)
-            }
-            if (r.eof || buf.length === 0) {
-              eofSeen = true
-              return
+          const worker = async (): Promise<void> => {
+            for (;;) {
+              check()
+              if (failure || eofSeen) return
+              // 分配块位置：同步代码段，worker 之间不会交错
+              const pos = readPos
+              if (remoteSize >= 0 && pos >= remoteSize) return
+              readPos += CHUNK
+
+              let r: { data: string; eof: boolean; size: number }
+              try {
+                // 取消不等多达 WINDOW 个在途 RPC 回包；迟到的响应由 race 吃掉。
+                r = await wait(call('fs_read_chunk', { path: remotePath, offset: pos, length: CHUNK }))
+              } catch (err) {
+                if (canceled) throw err
+                if (!failure) failure = err as Error
+                return
+              }
+              check()
+              if (failure) return
+              remoteSize = r.size
+              const buf = Buffer.from(r.data, 'base64')
+              if (buf.length > 0) {
+                await fh.write(buf, 0, buf.length, pos)
+                confirmed += buf.length
+                if (pos + buf.length > maxWritten) maxWritten = pos + buf.length
+                onProgress(startOffset + confirmed)
+              }
+              if (r.eof || buf.length === 0) {
+                eofSeen = true
+                return
+              }
             }
           }
-        }
-        await Promise.all(Array.from({ length: WINDOW }, worker))
+          await Promise.all(Array.from({ length: WINDOW }, worker))
 
-        // failure 的写入全在闭包里，TS 流分析到这已把它窄化成 null —— 断言绕开
-        const readErr = failure as Error | null
-        if (readErr) throw readErr
-        // 本地半截比远端新文件还长：截掉多出来的尾巴
-        if (remoteSize >= 0 && maxWritten > remoteSize) await fh.truncate(remoteSize)
+          // failure 的写入全在闭包里，TS 流分析到这已把它窄化成 null —— 断言绕开
+          const readErr = failure as Error | null
+          if (readErr) throw readErr
+          // 本地半截比远端新文件还长：截掉多出来的尾巴
+          if (remoteSize >= 0 && maxWritten > remoteSize) await fh.truncate(remoteSize)
+        } finally {
+          await fh.close()
+        }
       } finally {
-        await fh.close()
+        dispose?.()
       }
     }
   }

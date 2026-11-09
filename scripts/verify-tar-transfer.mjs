@@ -61,16 +61,19 @@ console.log('阶段 1：tarStream 写读往返')
 const collect = () => {
   const dirs = []
   const files = []
+  const hardlinks = []
   let cur = null
   return {
     sink: {
       async onDir(e) { dirs.push(e.name) },
       async onFileStart(e) { cur = { name: e.name, size: e.size, chunks: [] }; files.push(cur) },
       async onFileData(c) { cur.chunks.push(c) },
-      async onFileEnd() {}
+      async onFileEnd() {},
+      async onHardlink(e) { hardlinks.push(e) }
     },
     dirs,
     files,
+    hardlinks,
     dataOf: (f) => Buffer.concat(f.chunks)
   }
 }
@@ -173,7 +176,7 @@ await roundTrip('ustar 拆分长名', [
 ])
 
 // ---- 手搓 GNU 风格流：longname('L') + base-256 size（远端 GNU tar 默认 gnu 格式会产出）----
-const craftHeader = ({ name, size, type, magic = 'ustar\0' + '00' }) => {
+const craftHeader = ({ name, size, type, linkName = '', magic = 'ustar\0' + '00' }) => {
   const b = Buffer.alloc(512)
   b.write(name, 0, 'utf8')
   b.write('0000644\0', 100, 'ascii')
@@ -183,6 +186,7 @@ const craftHeader = ({ name, size, type, magic = 'ustar\0' + '00' }) => {
   b.write('0000000000\0', 136, 'ascii')
   b.fill(0x20, 148, 156)
   b.write(type, 156, 'ascii')
+  b.write(linkName, 157, 'utf8')
   b.write(magic, 257, 'ascii')
   let sum = 0
   for (let i = 0; i < 512; i++) sum += b[i]
@@ -208,6 +212,25 @@ const gnuStream = Buffer.concat([
   check("GNU 'L' 数据正确", c.files.length === 1 && Buffer.concat(c.files[0].chunks).toString() === 'hi')
 }
 
+// raw-tar 会保留硬链接为 typeflag '1'：必须交给落盘层材料化，不能静默跳过
+{
+  const stream = Buffer.concat([
+    craftHeader({ name: 'root/a.txt', size: 5, type: '0' }),
+    Buffer.from('hello'),
+    Buffer.alloc(tarPadSize(5)),
+    craftHeader({ name: 'root/b.txt', size: 0, type: '1', linkName: 'root/a.txt' }),
+    tarTrailer()
+  ])
+  const c = collect()
+  await feed(new TarParser(), stream, c.sink)
+  check(
+    '硬链接条目保留目标并通知 sink',
+    c.hardlinks.length === 1 && c.hardlinks[0].name === 'root/b.txt' &&
+      c.hardlinks[0].linkName === 'root/a.txt' && c.files.length === 1,
+    JSON.stringify(c.hardlinks)
+  )
+}
+
 // base-256 size：目录条目携带（文件的话解析器会等 8GB 数据，没法测；目录不读数据）
 const bigSize = 8589934591 + 5 // 0o77777777777 + 5，超出 11 位八进制
 {
@@ -229,7 +252,8 @@ const bigSize = 8589934591 + 5 // 0o77777777777 + 5，超出 11 位八进制
     async onDir(e) { sizes.push(e.size) },
     async onFileStart() {},
     async onFileData() {},
-    async onFileEnd() {}
+    async onFileEnd() {},
+    async onHardlink() {}
   })
   check('base-256 size 数值正确', sizes[0] === bigSize, `got=${sizes[0]}`)
 }

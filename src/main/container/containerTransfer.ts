@@ -8,21 +8,32 @@
  * 每个文件 cp 一次，换来逐文件的进度与取消语义。
  */
 
+import { posix } from 'node:path'
 import type { Client } from 'ssh2'
-import { execCapture } from '../ssh/remoteExec'
-import { assertContainerTarget } from './runtime'
+import { execCapture } from '../ssh/remoteExec.ts'
+import { assertContainerTarget } from './runtime.ts'
 
 export interface ContainerTransferIO {
   /** docker cp：from/to 中带 `容器名:` 前缀的一侧是容器路径 */
   cp(from: string, to: string): Promise<void>
   /** 删宿主机上的中转文件/目录（尽力而为，不抛错） */
   rmHostStage(path: string): Promise<void>
+  /** 远端容器的原始 tar 快路径；本机容器探测会返回 false */
+  rawTar: {
+    supportsTar(): Promise<boolean>
+    command(remotePath: string): string
+  }
 }
 
 /** 校验并转义容器路径（容器路径进 shell 命令，双引号包裹 + 转义） */
 function dq(s: string): string {
   if (s.includes('\n')) throw new Error('路径不允许换行')
   return s.replace(/(["\\$`])/g, '\\$1')
+}
+
+/** shell 单引号转义（runtime 与容器路径进远端 exec 命令用） */
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
 export function createContainerTransferIO(
@@ -39,7 +50,35 @@ export function createContainerTransferIO(
     await execCapture(client, cmd, { timeoutMs: 120_000 })
   }
 
+  // 能力探测只在目录下载真正选择快路径时执行；同一批多选共享一个 Promise，
+  // 避免 N 个目录并发发出 N 次相同的 docker exec 探针。单次操作内缓存失败，
+  // 下次用户操作会拿到新的 IO 并重试，容器重建后不会被永久粘在旧结果上。
+  let rawTarBinary: string | null = null
+  let rawTarSupport: Promise<boolean> | undefined
+
   return {
+    rawTar: {
+      supportsTar() {
+        rawTarSupport ??= (async () => {
+          const client = getClient(sessionId)
+          if (!client) return false
+          rawTarBinary = await resolveRuntime(sessionId)
+          if (!rawTarBinary) return false
+          await execCapture(client, `${rawTarBinary} exec ${containerName} sh -c 'command -v tar'`, {
+            timeoutMs: 5000
+          })
+          return true
+        })().catch(() => false)
+        return rawTarSupport
+      },
+      command(remotePath) {
+        if (!rawTarBinary) throw new Error('容器原始整流尚未完成能力探测')
+        return (
+          `${shQuote(rawTarBinary)} exec -i ${containerName} tar -cf - ` +
+          `-C ${shQuote(posix.dirname(remotePath))} -- ${shQuote(posix.basename(remotePath))}`
+        )
+      }
+    },
     async cp(from, to) {
       const binary = await resolveRuntime(sessionId)
       if (!binary) throw new Error('这台远端没有可用的容器运行时')

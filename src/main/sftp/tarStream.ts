@@ -184,6 +184,8 @@ export interface TarParsedEntry {
   name: string
   size: number
   isDir: boolean
+  /** 硬链接目标（tar typeflag '1'），与条目名一样相对归档根 */
+  linkName?: string
 }
 
 /** 解析结果的消费者；每个回调都可异步（磁盘写），解析器会挨个等 */
@@ -192,6 +194,7 @@ export interface TarSink {
   onFileStart(entry: TarParsedEntry): Promise<void>
   onFileData(chunk: Buffer): Promise<void>
   onFileEnd(): Promise<void>
+  onHardlink(entry: TarParsedEntry): Promise<void>
 }
 
 function isZeroBlock(block: Buffer): boolean {
@@ -260,9 +263,10 @@ type State =
 export class TarParser {
   private pending: Buffer = Buffer.alloc(0)
   private state: State = { kind: 'header' }
-  /** pax / GNU longname 对下一个真实条目的覆盖 */
+  /** pax / GNU longname/longlink 对下一个真实条目的覆盖 */
   private nextName: string | null = null
   private nextSize: number | null = null
+  private nextLinkName: string | null = null
 
   async push(chunk: Buffer, sink: TarSink): Promise<void> {
     if (this.state.kind === 'done') return
@@ -364,6 +368,7 @@ export class TarParser {
             const recs = parsePax(data)
             if (recs.path) this.nextName = recs.path
             if (recs.size) this.nextSize = parseInt(recs.size, 10)
+            if (recs.linkpath) this.nextLinkName = recs.linkpath
           }
         }
         continue
@@ -375,10 +380,10 @@ export class TarParser {
           left: size,
           data: [],
           apply: (data) => {
-            if (typeflag === 'L') {
-              const end = data.indexOf(0)
-              this.nextName = data.toString('utf8', 0, end < 0 ? data.length : end)
-            }
+            const end = data.indexOf(0)
+            const value = data.toString('utf8', 0, end < 0 ? data.length : end)
+            if (typeflag === 'L') this.nextName = value
+            else this.nextLinkName = value
           }
         }
         continue
@@ -387,14 +392,23 @@ export class TarParser {
       const entry: TarParsedEntry = {
         name: this.nextName ?? name,
         size: this.nextSize ?? size,
-        isDir: typeflag === '5'
+        isDir: typeflag === '5',
+        linkName: this.nextLinkName ?? (readCString(block, 157, 100) || undefined)
       }
       this.nextName = null
       this.nextSize = null
+      this.nextLinkName = null
 
       if (entry.isDir) {
         await sink.onDir(entry)
         this.state = { kind: 'pad', left: tarPadSize(entry.size) } // 目录 size 恒 0，防御而已
+        continue
+      }
+      if (typeflag === '1') {
+        // 硬链接没有自己的数据区；交给落盘层复制已解出的目标，不能当特殊
+        // 条目静默跳过，否则 raw-tar 快路径会少文件。
+        await sink.onHardlink(entry)
+        this.state = { kind: 'pad', left: entry.size + tarPadSize(entry.size) }
         continue
       }
       if (typeflag === '0') {
@@ -402,7 +416,7 @@ export class TarParser {
         this.state = { kind: 'file', entry, left: entry.size }
         continue
       }
-      // 符号链接 / 硬链接 / 设备节点等：跳过数据（不跟链是既定口径）
+      // 符号链接 / 设备节点等：跳过数据（不跟链是既定口径）
       this.state = { kind: 'pad', left: entry.size + tarPadSize(entry.size) }
     }
   }

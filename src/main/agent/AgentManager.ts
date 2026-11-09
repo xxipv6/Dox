@@ -76,8 +76,12 @@ function keyOf(sessionId: string, containerName?: string): string {
   return containerName ? `${sessionId}::${containerName}` : sessionId
 }
 
+function archiveEventKey(channelKey: string, streamId: string): string {
+  return `${channelKey}::archive::${streamId}`
+}
+
 function archiveKey(sessionId: string, containerName: string | undefined, streamId: string): string {
-  return `${keyOf(sessionId, containerName)}::archive::${streamId}`
+  return archiveEventKey(keyOf(sessionId, containerName), streamId)
 }
 
 /**
@@ -671,7 +675,8 @@ export class AgentManager {
           if (msg.event === 'archive') {
             const payload = (msg as { data?: AgentArchiveEvent }).data
             if (payload?.id) {
-              this.archiveHandlers.get(archiveKey(key, containerName, payload.id))?.cb(payload)
+              // key 已经是 sessionId::容器名，不能再传 containerName 重复拼接。
+              this.archiveHandlers.get(archiveEventKey(key, payload.id))?.cb(payload)
             }
             continue
           }

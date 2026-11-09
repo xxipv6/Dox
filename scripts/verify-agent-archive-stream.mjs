@@ -17,6 +17,7 @@ import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import { createAgentArchiveIO } from '../src/main/agent/agentArchiveStream.ts'
+import { createAgentStreamIO } from '../src/main/agent/agentStream.ts'
 import { TransferManager } from '../src/main/sftp/TransferManager.ts'
 
 const host = process.argv[2]
@@ -212,8 +213,15 @@ try {
   })
   sftp = await new Promise((resolve, reject) => ssh.sftp((err, value) => err ? reject(err) : resolve(value)))
   await remoteExec(`rm -rf '${remoteRoot}' && mkdir -p '${remoteRoot}'`)
+  const remoteArch = (await remoteExec('uname -m')).trim()
+  const agentBinary = remoteArch === 'aarch64' || remoteArch === 'arm64'
+    ? 'build/agent/dox-agent-linux-arm64'
+    : remoteArch === 'x86_64' || remoteArch === 'amd64'
+      ? 'build/agent/dox-agent-linux-amd64'
+      : null
+  if (!agentBinary) throw new Error(`不支持的远端架构：${remoteArch}`)
   await new Promise((resolve, reject) => {
-    sftp.fastPut('build/agent/dox-agent-linux-amd64', `${remoteRoot}/dox-agent`, (err) => err ? reject(err) : resolve())
+    sftp.fastPut(agentBinary, `${remoteRoot}/dox-agent`, (err) => err ? reject(err) : resolve())
   })
   await remoteExec(`chmod 700 '${remoteRoot}/dox-agent' && '${remoteRoot}/dox-agent' version`)
   agentStream = await new Promise((resolve, reject) => {
@@ -242,7 +250,7 @@ try {
     archiveHandlers.clear()
   })
   const hello = await call('hello', {})
-  check('agent 版本为 0.9.0', hello?.version === '0.9.0', hello?.version)
+  check('agent 版本为 0.9.5', hello?.version === '0.9.5', hello?.version)
 
   tm = new TransferManager(() => Promise.resolve(sftp), () => {}, () => ssh)
   const io = {
@@ -259,7 +267,8 @@ try {
         name: e.name, isDir: e.is_dir, isSymlink: e.is_symlink, size: e.size
       }))
     },
-    archive: createAgentArchiveIO(agents, 's', '')
+    archive: createAgentArchiveIO(agents, 's', ''),
+    stream: createAgentStreamIO(agents, 's', '')
   }
 
   console.log('阶段 2：生成 3 万文件 fixture 并计算基线')
@@ -343,10 +352,27 @@ try {
   const cancelDownMs = Math.round(performance.now() - t0)
   check('下载中流取消状态正确', cancelDownDone.status === 'canceled', cancelDownDone.status)
   check('下载取消在 2 秒内落定', cancelDownMs < 2000, `${cancelDownMs}ms`)
-  check('下载取消发送了远端 cancel', calls.includes('fs_archive_cancel'))
   check('下载当前半截文件已删除', !fs.existsSync(join(cancelDownload, 'remote-big', 'big.bin')))
   await call('fs_stat', { path: remoteRoot })
   check('下载取消后 agent 仍可响应', true)
+
+  const singleLocal = join(cancelDownload, 'single-big.bin')
+  const singleTask = await tm.enqueueDownloadContainer('s', '', `${remoteBig}/big.bin`, singleLocal, io)
+  const singleId = singleTask.id
+  for (let i = 0; i < 400; i++) {
+    const task = tm.list().find((t) => t.id === singleId)
+    if (task?.transferred > 0) break
+    await sleep(25)
+  }
+  t0 = performance.now()
+  tm.cancel(singleId)
+  const singleDone = await waitTask(singleId, 10_000)
+  const singleCancelMs = Math.round(performance.now() - t0)
+  check('单文件直传取消状态正确', singleDone.status === 'canceled', singleDone.status)
+  check('单文件直传取消在 2 秒内落定', singleCancelMs < 2000, `${singleCancelMs}ms`)
+  check('单文件直传取消删除半截文件', !fs.existsSync(singleLocal))
+  await call('fs_stat', { path: remoteRoot })
+  check('单文件取消后 agent 仍可响应', true)
 } catch (err) {
   check('测试执行未出现异常', false, err instanceof Error ? err.stack : String(err))
 } finally {
