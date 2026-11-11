@@ -2,6 +2,8 @@
 export const IpcChannels = {
   // SSH 会话
   sshConnect: 'ssh:connect',
+  /** 已保存设备：只传 id，由主进程解密并建立 shell */
+  sshConnectSaved: 'ssh:connectSaved',
   /** 取消进行中的连接（密码输错撞上慢服务器时，用户不该被弹窗卡到超时） */
   sshConnectCancel: 'ssh:connectCancel',
   /** 传输会话：不开 shell 的后台连接（直连容器的承载，入参为已保存设备 id） */
@@ -24,7 +26,6 @@ export const IpcChannels = {
   configList: 'config:list',
   configSave: 'config:save',
   configDelete: 'config:delete',
-  configGetAuth: 'config:getAuth',
   // 应用设置持久化
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
@@ -52,6 +53,8 @@ export const IpcChannels = {
   /** 远程助手：查询安装状态 / 显式安装（opt-in，永不静默） */
   agentStatus: 'agent:status',
   agentInstall: 'agent:install',
+  /** 用户确认后停止并删除目标助手；永不自动调用 */
+  agentUninstall: 'agent:uninstall',
   /** 订阅/退订 agent 端口推送（watch_ports 事件经 agent:ports 下行） */
   agentWatchPorts: 'agent:watchPorts',
   agentUnwatchPorts: 'agent:unwatchPorts',

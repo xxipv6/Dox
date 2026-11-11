@@ -30,6 +30,8 @@ const windowsBuildNumber = process.platform === 'win32'
 const api: DoxApi = {
   connect: (config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
     ipcRenderer.invoke(IpcChannels.sshConnect, config, term, opts),
+  connectSavedSession: (savedSessionId: string, term: TermSize) =>
+    ipcRenderer.invoke(IpcChannels.sshConnectSaved, savedSessionId, term),
   connectCancel: () => ipcRenderer.send(IpcChannels.sshConnectCancel),
   connectTransport: (savedSessionId: string) =>
     ipcRenderer.invoke(IpcChannels.sshConnectTransport, savedSessionId),
@@ -72,7 +74,6 @@ const api: DoxApi = {
   listSessions: () => ipcRenderer.invoke(IpcChannels.configList),
   saveSession: (input: SaveSessionInput) => ipcRenderer.invoke(IpcChannels.configSave, input),
   deleteSession: (id: string) => ipcRenderer.invoke(IpcChannels.configDelete, id),
-  getSessionAuth: (id: string) => ipcRenderer.invoke(IpcChannels.configGetAuth, id),
 
   // ---- SFTP ----
   sftpList: (sessionId, dir, containerName) =>
@@ -157,6 +158,8 @@ const api: DoxApi = {
     ipcRenderer.invoke(IpcChannels.agentStatus, sessionId, containerName, fresh),
   agentInstall: (sessionId, containerName) =>
     ipcRenderer.invoke(IpcChannels.agentInstall, sessionId, containerName),
+  agentUninstall: (sessionId, containerName) =>
+    ipcRenderer.invoke(IpcChannels.agentUninstall, sessionId, containerName),
   agentWatchPorts: (sessionId, containerName) =>
     ipcRenderer.invoke(IpcChannels.agentWatchPorts, sessionId, containerName),
   agentUnwatchPorts: (sessionId, containerName) =>

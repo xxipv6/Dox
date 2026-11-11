@@ -9,9 +9,9 @@
  * 密码：环境变量 DOX_TEST_PASS（不进仓库）。
  * 前置：npm run build。容器内搜索另测（本机没有 docker，不要在本地起容器）。
  */
-import { _electron as electron } from 'playwright'
 import { mkdirSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
+import { BUNDLED_AGENT_VERSION } from '../src/shared/agentVersion.ts'
 
 const host = process.argv[2] ?? process.env.DOX_TEST_HOST ?? '192.168.3.5'
 const port = process.argv[3] ?? '22'
@@ -29,22 +29,10 @@ const check = (name, cond, extra = '') => {
   if (!cond) failed = true
 }
 
-const REMOTE_BASE = '/tmp/dox-e2e-rsearch'
+const REMOTE_BASE = `/tmp/dox-e2e-rsearch-${process.pid}-${Date.now()}`
+const REMOTE_NAME = REMOTE_BASE.split('/').at(-1)
 
-try {
-  if (process.platform === 'win32') {
-    execFileSync('powershell', ['-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    ], { stdio: 'ignore' })
-  } else {
-    execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
-  }
-} catch { /* 没有正好 */ }
-
-const app = await electron.launch({ args: ['.'] })
-const win = await app.firstWindow()
-win.on('dialog', (d) => void d.accept())
-await win.waitForLoadState('domcontentloaded')
+await withIsolatedElectron(async ({ win }) => {
 await win.waitForTimeout(1200)
 const origSettings = await win.evaluate(() => window.api.getSettings())
 await win.evaluate(async (s) => {
@@ -121,14 +109,15 @@ try {
     let upgraded = false
     for (let i = 0; i < 40 && !upgraded; i++) {
       await win.waitForTimeout(1000)
-      upgraded = /已安装 v0\.7\./.test(
-        (await win.locator('.agent-ok').textContent().catch(() => '')) ?? '')
+      upgraded = ((await win.locator('.agent-ok').textContent().catch(() => '')) ?? '')
+        .includes(`已安装 v${BUNDLED_AGENT_VERSION}`)
     }
-    check('远程助手升级到 v0.7.x', upgraded,
+    check(`远程助手升级到 v${BUNDLED_AGENT_VERSION}`, upgraded,
       (await win.locator('.agent-ok').textContent().catch(() => '')) ?? '')
   } else {
-    check('远程助手已是 v0.7.x（无需升级）', /已安装 v0\.7\./.test(
-      (await win.locator('.agent-ok').textContent().catch(() => '')) ?? ''))
+    check(`远程助手已是 v${BUNDLED_AGENT_VERSION}（无需升级）`,
+      ((await win.locator('.agent-ok').textContent().catch(() => '')) ?? '')
+        .includes(`已安装 v${BUNDLED_AGENT_VERSION}`))
   }
   // 收起分区，免得挡后面的面板
   await agentHead.click().catch(() => undefined)
@@ -151,8 +140,8 @@ try {
   await win.waitForTimeout(1000)
   await rowWith('.explorer .file-list .row', 'tmp').dblclick()
   await win.waitForTimeout(1500)
-  await rowWith('.explorer .file-list .row', 'dox-e2e-rsearch').waitFor({ timeout: 10000 })
-  await rowWith('.explorer .file-list .row', 'dox-e2e-rsearch').click({ button: 'right' })
+  await rowWith('.explorer .file-list .row', REMOTE_NAME).waitFor({ timeout: 10000 })
+  await rowWith('.explorer .file-list .row', REMOTE_NAME).click({ button: 'right' })
   await win.locator('.context-menu .menu-item', { hasText: '进入项目模式' }).click()
   await win.locator('.explorer .project-bar').waitFor({ timeout: 5000 })
   check('远端项目模式顶栏', ((await win.locator('.explorer .project-bar').textContent()) ?? '')
@@ -205,11 +194,11 @@ try {
   } catch { /* 连接没起来就没有夹具 */ }
   try {
     if (origSettings) {
-      await win.evaluate((s) => window.api.setSettings({ ...s, projectRoots: {} }), origSettings)
+      await win.evaluate((s) => window.api.setSettings(s), origSettings)
     }
   } catch { /* 实例可能已死 */ }
-  await app.close().catch(() => undefined)
 }
+})
 
-console.log(failed ? '\n有失败项' : '\n全部通过')
-process.exit(failed ? 1 : 0)
+console.log(failed || process.exitCode ? '\n有失败项' : '\n全部通过')
+process.exit(failed || process.exitCode ? 1 : 0)

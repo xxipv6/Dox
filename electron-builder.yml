@@ -45,7 +45,8 @@ mac:
   target:
     - dmg
     - zip
-  # 签名与公证需要 Apple 开发者证书，配置 CSC_LINK / APPLE_API_KEY 等环境变量后自动启用
+  # identity: null 明确禁用签名；即使配置 CSC_LINK / APPLE_API_KEY 也不会自动启用。
+  # 将来接入 Apple 签名与公证时，移除此行并提供有效 Developer ID / 公证凭据。
   identity: null
 
 # ---------- Linux ----------

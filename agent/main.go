@@ -6,8 +6,9 @@
 //
 // 子命令：
 //
-//	version  打印一行 JSON 版本信息（安装校验用）
-//	serve    进入请求/事件循环（hello / watch_ports / watch_stats / fs_watch / stop）
+//	version    打印一行 JSON 版本信息（安装校验用）
+//	serve      进入请求/事件循环（hello / watch_ports / watch_stats / fs_watch / stop）
+//	uninstall  删除当前可执行文件（distroless 容器显式卸载）
 package main
 
 import (
@@ -19,7 +20,7 @@ import (
 )
 
 // version 由构建管线注入默认值；ldflags -X main.version=x.y.z 可覆盖
-var version = "0.9.5"
+var version = "0.9.6"
 
 type request struct {
 	ID     int             `json:"id"`
@@ -40,7 +41,7 @@ type event struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dox-agent <version|serve>")
+		fmt.Fprintln(os.Stderr, "usage: dox-agent <version|serve|uninstall>")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -52,6 +53,20 @@ func main() {
 			fmt.Fprintln(os.Stderr, "serve:", err)
 			os.Exit(1)
 		}
+	case "uninstall":
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: dox-agent uninstall")
+			os.Exit(2)
+		}
+		executable, err := os.Executable()
+		if err == nil {
+			err = os.Remove(executable)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "uninstall:", err)
+			os.Exit(1)
+		}
+		fmt.Println(`{"ok":true}`)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", os.Args[1])
 		os.Exit(2)
@@ -224,15 +239,9 @@ func serve() error {
 	return scanner.Err()
 }
 
-// isFSMethod 与 dispatchFS 保持同一份方法集合。将 fs 请求异步化后，
-// 未知方法仍在主循环内立即返回错误，避免把协议拼写错误静默吞掉。
+// isFSMethod 直接查询统一注册表。将 fs 请求异步化后，未知方法仍在主循环内
+// 立即返回错误，避免把协议拼写错误静默吞掉；其他协议方法保持同步执行。
 func isFSMethod(method string) bool {
-	switch method {
-	case "fs_list", "fs_stat", "fs_read", "fs_write", "fs_mkdir", "fs_rename", "fs_delete",
-		"fs_archive", "fs_usage", "fs_du", "fs_search", "fs_read_chunk", "fs_write_begin",
-		"fs_write_chunk", "fs_write_commit", "fs_write_abort":
-		return true
-	default:
-		return false
-	}
+	_, ok := fsHandlers[method]
+	return ok
 }

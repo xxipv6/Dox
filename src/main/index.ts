@@ -26,6 +26,7 @@ import { prewarmShells } from './local/shells'
 import { IpcChannels } from '../shared/ipc'
 import { registerIpc } from './ipc'
 import { setupAutoUpdater } from './updater'
+import { openHttpExternal } from './externalUrl'
 
 // 注意：不能命名为 __dirname，electron-vite dev 模式会注入同名 polyfill 导致重复声明
 const mainDir = dirname(fileURLToPath(import.meta.url))
@@ -69,7 +70,10 @@ const layoutStore = new LayoutStore()
 const settingsStore = new SettingsStore()
 // 已保存会话解析器：id → 完整连接配置（认证信息解密不出主进程）。
 // 跳板机建链与断线重连都走它 —— 重连时重新解密，主进程不必常驻明文密码。
-const sessionManager = new SessionManager((id) => configStore.resolveConnection(id), knownHosts)
+let containerManager: ContainerManager
+const sessionManager = new SessionManager((id) => configStore.resolveConnection(id), knownHosts, {
+  shouldKeepAlive: (id) => containerManager.hasActiveChannels(id)
+})
 // 本地 PTY 先创建：WSL 的 sessionId → distro 是文件路径解析的统一身份来源
 const localPtyManager = new LocalPtyManager()
 const localPathResolver = new LocalPathResolver((sessionId) => localPtyManager.getWslDistro(sessionId))
@@ -99,7 +103,7 @@ const transferManager = new TransferManager(
  * 它只借父会话的 client，自己不管连接 —— 所以「容器标签不重连」这件事
  * 不需要任何 guard，因为这里根本没有那套代码。
  */
-const containerManager = new ContainerManager((id) => sessionManager.getClient(id))
+containerManager = new ContainerManager((id) => sessionManager.getClient(id))
 const agentManager = new AgentManager(sessionManager, (id) => containerManager.runtimeBinary(id))
 agentFsHolder.bridge = agentManager
 const containerTunnels = new ContainerTunnelManager(agentManager)
@@ -140,21 +144,20 @@ sessionManager.onStatus((ev) => {
 
 // 会话断开时自动停止其转发规则（规则记录会保留，状态置为 stopped），
 // 并把它承载的容器终端通道一并收掉
-sessionManager.onClosed = (id) => {
+sessionManager.onClosed((id) => {
   forwardManager.stopBySession(id)
   containerManager.stopBySession(id)
   agentManager.invalidate(id)
-}
+})
 /*
  * 容器标签独立存活（Dev Containers 式）：关宿主终端标签时，若还有容器
  * exec 通道骑在这条连接上，SessionManager 不掐连接、把它留作孤儿保活；
  * 最后一个容器通道关闭时再真正断开。
  */
-sessionManager.shouldKeepAlive = (id) => containerManager.hasActiveChannels(id)
 containerManager.onParentDrained = (id) => sessionManager.releaseOrphan(id)
 // 重连成功后按原参数把该会话的转发规则重新建立起来，
 // 否则隧道会无声死掉，用户还以为它开着
-sessionManager.onReconnected = (id) => void forwardManager.restartBySession(id)
+sessionManager.onReconnected((id) => void forwardManager.restartBySession(id))
 
 // Windows 通知 / 任务栏跳转列表所需
 if (process.platform === 'win32') {
@@ -218,9 +221,11 @@ function createWindow(): void {
   win.on('maximize', pushWindowState)
   win.on('unmaximize', pushWindowState)
 
-  // 外部链接一律交给系统浏览器，不在应用内打开
+  // 外部链接一律交给系统浏览器，不在应用内打开；与 IPC 入口共用 HTTP(S) 白名单
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    void openHttpExternal(url, (target) => shell.openExternal(target)).catch((err) => {
+      console.warn(`[main] 打开外部链接失败: ${err instanceof Error ? err.message : String(err)}`)
+    })
     return { action: 'deny' }
   })
 

@@ -7,30 +7,16 @@
  * 用法：node scripts/verify-whatsnew.mjs
  * 前置：npm run build。隔离 userData，不碰已安装的 Dox.app。
  */
-import { _electron as electron } from 'playwright'
 import fs from 'node:fs'
-
-process.on('unhandledRejection', () => {})
-
-let failed = false
-const check = (name, cond, extra = '') => {
-  console.log(cond ? `  ok  ${name}` : `  FAIL ${name} ${extra}`)
-  if (!cond) failed = true
-}
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
 // 公告数据与构建同源（build-agent.mjs 的同一份守卫口径）
 const pkgVersion = JSON.parse(fs.readFileSync('package.json', 'utf8')).version
 const topEntry = JSON.parse(fs.readFileSync('src/shared/whatsnew.json', 'utf8'))[0]
 
-const userData = '/tmp/dox-probe-whatsnew'
-fs.rmSync(userData, { recursive: true, force: true })
-
-const app = await electron.launch({ args: ['.', `--user-data-dir=${userData}`] })
-const win = await app.firstWindow()
-await win.waitForLoadState('domcontentloaded')
+await withIsolatedElectron(async ({ win, check }) => {
 await win.waitForTimeout(3000)
 
-try {
   // A. 启动不自动弹（哪怕配置里残留旧版的 lastSeenVersion 也不弹——机制已拆）
   check('启动后无自动公告弹窗', (await win.locator('.whatsnew-dialog').count()) === 0)
   check('公告首条与 package.json 对齐（守卫口径）', topEntry.version === pkgVersion,
@@ -56,10 +42,4 @@ try {
   check('再次打开仍可查看', true)
 
   await win.screenshot({ path: 'shots/101-whatsnew.png' })
-} finally {
-  await app.close().catch(() => undefined)
-  fs.rmSync(userData, { recursive: true, force: true })
-}
-
-console.log(failed ? '\n有失败项' : '\n全部通过')
-process.exit(failed ? 1 : 0)
+}, { prefix: 'dox-whatsnew-' })

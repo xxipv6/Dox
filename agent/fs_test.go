@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -111,6 +113,61 @@ func TestFsWriteAndOptimisticLock(t *testing.T) {
 	if _, err := fsWrite(json.RawMessage(payload("x", &stale))); err == nil ||
 		!strings.Contains(err.Error(), "拒绝覆盖") {
 		t.Errorf("过期 mtime 应拒绝覆盖, 实际: %v", err)
+	}
+}
+
+func TestFsWriteConcurrentSameTargetPreservesWholeContentAndMode(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "concurrent.bin")
+	if err := os.WriteFile(target, []byte("old"), 0o751); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads := [][]byte{
+		bytes.Repeat([]byte("A"), 1<<20),
+		bytes.Repeat([]byte("B"), 1<<20),
+	}
+	params := make([]json.RawMessage, len(payloads))
+	for i, payload := range payloads {
+		params[i], _ = json.Marshal(map[string]string{
+			"path": target,
+			"data": base64.StdEncoding.EncodeToString(payload),
+		})
+	}
+
+	for round := 0; round < 16; round++ {
+		start := make(chan struct{})
+		errs := make(chan error, len(params))
+		for _, param := range params {
+			go func() {
+				<-start
+				_, err := fsWrite(param)
+				errs <- err
+			}()
+		}
+		close(start)
+		for range params {
+			if err := <-errs; err != nil {
+				t.Fatalf("第 %d 轮并发写失败: %v", round, err)
+			}
+		}
+		got, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, payloads[0]) && !bytes.Equal(got, payloads[1]) {
+			t.Fatalf("第 %d 轮最终文件混合了两次写入", round)
+		}
+	}
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != before.Mode().Perm() {
+		t.Fatalf("写入后权限从 %v 变为 %v", before.Mode().Perm(), after.Mode().Perm())
 	}
 }
 
@@ -297,6 +354,115 @@ func TestFsWriteBeginResume(t *testing.T) {
 	got, _ := os.ReadFile(target)
 	if string(got) != "partial-content" {
 		t.Fatalf("续传结果不符: %q", got)
+	}
+}
+
+func TestFsWriteCommitRejectsHoleAndResumesFromContinuousPrefix(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "hole.bin")
+	begin := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]interface{})
+	tmp := begin["tmp"].(string)
+
+	// 后块先到，前块失败：文件长度已经完整，但 [0,5) 仍是空洞。
+	later, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "offset": 5, "data": base64.StdEncoding.EncodeToString([]byte("world"))})
+	if _, err := fsWriteChunk(later); err != nil {
+		t.Fatal(err)
+	}
+	commit, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "path": target})
+	if _, err := fsWriteCommit(commit); err == nil {
+		t.Fatal("中间有空洞的临时文件不得提交")
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("不完整的临时文件不得替换目标")
+	}
+
+	// 续传只能从连续确认前缀开始，而不是从物理文件长度开始。
+	resumed := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]interface{})
+	if got := resumed["existing_size"].(int64); got != 0 {
+		t.Fatalf("前块缺失时连续前缀应为 0，实际 %d", got)
+	}
+	prefix, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "offset": 0, "data": base64.StdEncoding.EncodeToString([]byte("hello"))})
+	if _, err := fsWriteChunk(prefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsWriteCommit(commit); err != nil {
+		t.Fatalf("补齐前块后应能提交: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "helloworld" {
+		t.Fatalf("续传提交内容错误: %q, err=%v", got, err)
+	}
+}
+
+func TestFsWriteBeginRecoversCorruptOrLegacyChunkState(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(map[bool]string{false: "corrupt metadata", true: "legacy tmp"}[legacy], func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), "recover.bin")
+			begin := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]interface{})
+			tmp := begin["tmp"].(string)
+			chunk, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "offset": 0, "data": base64.StdEncoding.EncodeToString([]byte("stale"))})
+			if _, err := fsWriteChunk(chunk); err != nil {
+				t.Fatal(err)
+			}
+			if legacy {
+				if err := os.Remove(fsChunkMetadataPath(tmp)); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(fsChunkMetadataPath(tmp), []byte(`{"ranges":`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			resumed := call(t, fsWriteBegin, `{"path":`+strconv.Quote(target)+`}`).(map[string]interface{})
+			if got := resumed["existing_size"].(int64); got != 0 {
+				t.Fatalf("不可信状态必须从零重传，实际 %d", got)
+			}
+			fresh, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "offset": 0, "data": base64.StdEncoding.EncodeToString([]byte("fresh"))})
+			if _, err := fsWriteChunk(fresh); err != nil {
+				t.Fatal(err)
+			}
+			commit, _ := json.Marshal(map[string]interface{}{"tmp": tmp, "path": target})
+			if _, err := fsWriteCommit(commit); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(target)
+			if err != nil || string(got) != "fresh" {
+				t.Fatalf("恢复后的内容错误: %q, err=%v", got, err)
+			}
+		})
+	}
+}
+
+type failingReadAtFile struct {
+	info os.FileInfo
+	err  error
+}
+
+func (f failingReadAtFile) ReadAt(p []byte, _ int64) (int, error) {
+	return copy(p, "partial"), f.err
+}
+func (f failingReadAtFile) Stat() (os.FileInfo, error) { return f.info, nil }
+func (f failingReadAtFile) Close() error               { return nil }
+
+func TestFsReadChunkReturnsNonEOFErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "read-error.bin")
+	if err := os.WriteFile(path, []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readErr := errors.New("injected disk read failure")
+	originalOpen := openFSReadChunkFile
+	openFSReadChunkFile = func(string) (fsReadChunkFile, error) {
+		return failingReadAtFile{info: info, err: readErr}, nil
+	}
+	t.Cleanup(func() { openFSReadChunkFile = originalOpen })
+
+	params, _ := json.Marshal(map[string]interface{}{"path": path, "offset": 0, "length": 7})
+	result, err := fsReadChunk(params)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("非 EOF ReadAt 错误必须返回给调用方，result=%v err=%v", result, err)
 	}
 }
 

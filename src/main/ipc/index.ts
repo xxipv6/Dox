@@ -33,11 +33,8 @@ import type { SftpService } from '../sftp/SftpService'
 import type { TransferManager } from '../sftp/TransferManager'
 import type { ForwardManager } from '../forward/ForwardManager'
 import type { AgentManager } from '../agent/AgentManager'
-import { createContainerTransferIO } from '../container/containerTransfer'
-import type { ContainerIO } from '../sftp/TransferManager'
-import { ARCHIVE_STREAM_MIN_AGENT_VERSION, agentVersionOlder } from '../../shared/agentVersion'
-import { createAgentStreamIO } from '../agent/agentStream'
-import { createAgentArchiveIO } from '../agent/agentArchiveStream'
+import { createContainerIO } from '../container/containerIO'
+import { openHttpExternal } from '../externalUrl'
 import { LocalFsWatcher } from '../sftp/LocalFsWatcher'
 import type { ProcessService } from '../proc/ProcessService'
 import type { AiUsageService } from '../aiusage/AiUsageService'
@@ -92,6 +89,9 @@ export function registerIpc(
     IpcChannels.sshConnect,
     (event, config: SshSessionConfig, term: TermSize, opts?: { savedSessionId?: string }) =>
       sessionManager.connect(config, event.sender, term, opts)
+  )
+  ipcMain.handle(IpcChannels.sshConnectSaved, (event, savedSessionId: string, term: TermSize) =>
+    sessionManager.connectSaved(savedSessionId, event.sender, term)
   )
   // 取消进行中的连接（添加设备弹窗连接中也能点取消）
   ipcMain.on(IpcChannels.sshConnectCancel, (event) => sessionManager.cancelConnect(event.sender))
@@ -169,7 +169,6 @@ export function registerIpc(
     configStore.save(input)
   )
   ipcMain.handle(IpcChannels.configDelete, (_event, id: string) => configStore.remove(id))
-  ipcMain.handle(IpcChannels.configGetAuth, (_event, id: string) => configStore.resolveAuth(id))
 
   // ---- SFTP 文件操作（containerName 给了就走容器内 agent fs 协议）----
   ipcMain.handle(IpcChannels.sftpList, (_event, sessionId: string, dir: string, containerName?: string) =>
@@ -223,6 +222,9 @@ export function registerIpc(
   )
   ipcMain.handle(IpcChannels.agentInstall, (_event, sessionId: string, containerName?: string) =>
     agentManager.install(sessionId, containerName)
+  )
+  ipcMain.handle(IpcChannels.agentUninstall, (_event, sessionId: string, containerName?: string) =>
+    agentManager.uninstall(sessionId, containerName)
   )
   ipcMain.handle(IpcChannels.agentWatchPorts, (event, sessionId: string, containerName?: string) =>
     agentManager.watchPorts(sessionId, containerName, event.sender)
@@ -347,53 +349,9 @@ export function registerIpc(
 
   // ---- 传输队列 ----
 
-  /** 容器传输 IO：docker cp 段 + agent fs 段（容器内目录操作）组合；agent ≥0.4.0 附直传流 */
-  const containerIO = async (sessionId: string, containerName: string): Promise<ContainerIO> => {
-    const io: ContainerIO = {
-      ...createContainerTransferIO(
-        (id) => sessionManager.getClient(id) ?? null,
-        (id) => containerManager.runtimeBinary(id),
-        sessionId,
-        containerName
-      ),
-      mkdirContainer: async (dir) => {
-        await agentManager.call(sessionId, containerName, 'fs_mkdir', { path: dir })
-      },
-      statContainer: async (path) => {
-        const r = (await agentManager.call(sessionId, containerName, 'fs_stat', { path })) as {
-          is_dir: boolean
-          size: number
-        }
-        return { isDir: r.is_dir, size: r.size }
-      },
-      listContainer: async (dir) => {
-        const r = (await agentManager.call(sessionId, containerName, 'fs_list', { path: dir })) as {
-          entries: { name: string; is_dir: boolean; is_symlink: boolean; size: number }[]
-        }
-        return r.entries.map((e) => ({
-          name: e.name,
-          isDir: e.is_dir,
-          isSymlink: e.is_symlink,
-          size: e.size
-        }))
-      }
-    }
-    // 直传能力：状态读不到（agent 没装/挂了）就不挂，自然落回 docker cp 接力
-    try {
-      const st = await agentManager.status(sessionId, containerName)
-      if (st.installed && st.version) {
-        if (!agentVersionOlder(st.version, '0.4.0')) {
-          io.stream = createAgentStreamIO(agentManager, sessionId, containerName)
-        }
-        if (!agentVersionOlder(st.version, ARCHIVE_STREAM_MIN_AGENT_VERSION)) {
-          io.archive = createAgentArchiveIO(agentManager, sessionId, containerName)
-        }
-      }
-    } catch {
-      /* 回退接力路径 */
-    }
-    return io
-  }
+  /** 容器 IO 的能力探测与协议组合由领域工厂负责，IPC 只注入服务并调用。 */
+  const containerIO = (sessionId: string, containerName: string) =>
+    createContainerIO(sessionId, containerName, sessionManager, containerManager, agentManager)
 
   ipcMain.handle(IpcChannels.transferPickUpload, async (event, sessionId: string, remoteDir: string, containerName?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -648,15 +606,7 @@ export function registerIpc(
    * shell.openExternal，等于让远端能唤起本机任意协议处理器。
    */
   ipcMain.handle(IpcChannels.shellOpenExternal, async (_event, url: unknown) => {
-    if (typeof url !== 'string') return
-    let parsed: URL
-    try {
-      parsed = new URL(url)
-    } catch {
-      return
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
-    await shell.openExternal(parsed.toString())
+    await openHttpExternal(url, (target) => shell.openExternal(target))
   })
 
   /*

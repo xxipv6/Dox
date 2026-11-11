@@ -12,10 +12,25 @@ import {
   type SshSessionConfig
 } from '../../shared/types'
 
+/** 主进程内部持久化记录；公开 SavedSession 永远不包含这些密文字段。 */
+type StoredSession = SavedSession & {
+  encryptedPassword?: string
+  encryptedPassphrase?: string
+}
+
 interface StoreSchema {
-  sessions: SavedSession[]
+  sessions: StoredSession[]
   snippets: CommandSnippet[]
   aiAccounts: AiAccount[]
+}
+
+function toSessionSummary(session: StoredSession): SavedSession {
+  const {
+    encryptedPassword: _encryptedPassword,
+    encryptedPassphrase: _encryptedPassphrase,
+    ...summary
+  } = session
+  return summary
 }
 
 /**
@@ -29,16 +44,20 @@ export class ConfigStore {
     defaults: { sessions: [], snippets: [], aiAccounts: [] }
   })
 
-  list(): SavedSession[] {
+  private records(): StoredSession[] {
     return this.store.get('sessions')
   }
 
+  list(): SavedSession[] {
+    return this.records().map(toSessionSummary)
+  }
+
   save(input: SaveSessionInput): SavedSession {
-    const sessions = this.list()
+    const sessions = this.records()
     const existing = input.id ? sessions.find((s) => s.id === input.id) : undefined
     const id = existing?.id ?? randomUUID()
 
-    const saved: SavedSession = {
+    const saved: StoredSession = {
       id,
       name: input.name || `${input.username}@${input.host}`,
       host: input.host,
@@ -60,19 +79,19 @@ export class ConfigStore {
 
     const next = existing ? sessions.map((s) => (s.id === saved.id ? saved : s)) : [...sessions, saved]
     this.store.set('sessions', next)
-    return saved
+    return toSessionSummary(saved)
   }
 
   remove(id: string): void {
     this.store.set(
       'sessions',
-      this.list().filter((s) => s.id !== id)
+      this.records().filter((s) => s.id !== id)
     )
   }
 
   /** 取回解密后的认证信息，仅用于发起连接，不离开主进程 */
   resolveAuth(id: string): SshAuth {
-    const saved = this.list().find((s) => s.id === id)
+    const saved = this.records().find((s) => s.id === id)
     if (!saved) throw new Error(`会话不存在: ${id}`)
 
     if (saved.authType === 'password') {
@@ -89,7 +108,7 @@ export class ConfigStore {
 
   /** 解析一条已保存会话为可直接连接的完整配置（含解密认证与跳板机引用） */
   resolveConnection(id: string): SshSessionConfig {
-    const saved = this.list().find((s) => s.id === id)
+    const saved = this.records().find((s) => s.id === id)
     if (!saved) throw new Error(`会话不存在: ${id}`)
     return {
       host: saved.host,

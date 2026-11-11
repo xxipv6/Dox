@@ -13,16 +13,14 @@
  * 这里驱动真实的「文件夹下载」路径：用 app.evaluate 在主进程里替换掉
  * dialog.showOpenDialog（原生目录选择框 Playwright 点不了），其余全走真代码。
  *
- * 用法：node scripts/verify-folder-cancel.mjs                      # 用第一个已保存设备
- *      node scripts/verify-folder-cancel.mjs <host> [port] [user] [password]  # 仅连接指定主机
- * 前置：npm run build；无参数时需要已保存一个可连接的设备
+ * 用法：node scripts/verify-folder-cancel.mjs <host> [port] [user] [password]
+ * 前置：npm run build；通过参数仅连接指定主机，不读取真实已保存设备。
  *
  * 远端只做：建一个测试目录（若干小文件）、最后删掉它。不安装任何东西。
  */
-import { _electron as electron } from 'playwright'
 import { mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
 mkdirSync('shots', { recursive: true })
 
@@ -32,27 +30,21 @@ mkdirSync('shots', { recursive: true })
  * 100 × 10MB = 1GB。整流传输非常快，25MB 在本机夹具上 1 秒不到就传完，
  * 根本来不及点「全部取消」—— 要验取消，体量必须大到传输能持续几秒。
  */
-const DIR = 'dox-many-files-1g'
+const DIR = `dox-many-files-1g-${process.pid}`
 const FILE_COUNT = 100
 const FILE_BYTES = 10485760
-const LOCAL_OUT = join(tmpdir(), 'dox-folder-cancel')
-rmSync(LOCAL_OUT, { recursive: true, force: true })
-mkdirSync(LOCAL_OUT, { recursive: true })
+const host = process.argv[2]
+const port = Number(process.argv[3] ?? 22)
+const user = process.argv[4] ?? 'root'
+const password = process.argv[5] ?? ''
+if (!host) {
+  console.error('需要 host 参数；隔离实例不会读取真实已保存设备')
+  process.exit(2)
+}
 
-// 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try {
-  if (process.platform === 'win32') {
-    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
-    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    ], { stdio: 'ignore' })
-  } else {
-    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
-  }
-} catch { /* 没有正好 */ }
-const app = await electron.launch({ args: ['.'] })
-const win = await app.firstWindow()
-win.on('dialog', (d) => d.accept())
+await withIsolatedElectron(async ({ app, win, tempDir }) => {
+const LOCAL_OUT = join(tempDir, 'download')
+mkdirSync(LOCAL_OUT, { recursive: true })
 
 const check = (label, ok, detail = '') => {
   console.log(`  ${ok ? '✓' : '✗'} ${label}${detail ? ` — ${detail}` : ''}`)
@@ -92,11 +84,6 @@ await win.waitForFunction(
   { timeout: 15000 }
 )
 
-const host = process.argv[2]
-const port = Number(process.argv[3] ?? 22)
-const user = process.argv[4] ?? 'root'
-const password = process.argv[5] ?? ''
-
 if (host) {
   // 仅连接指定主机（不保存设备，不碰真实配置）
   await win.locator('button[title="添加设备"]').click()
@@ -119,13 +106,6 @@ if (host) {
   await win.locator('.terminal-container:visible').first().click()
   await win.waitForTimeout(1500)
   await win.keyboard.press('Escape')
-} else {
-  if (!(await win.locator('.device').count())) {
-    console.log('没有已保存设备，也无法验证（可传 host 参数走仅连接）。')
-    await app.close()
-    process.exit(1)
-  }
-  await win.locator('.device .device-name').first().dblclick()
 }
 await win.waitForFunction(
   () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
@@ -234,7 +214,7 @@ for (let i = 0; i < 60; i++) {
 console.log(`取消后 ${Date.now() - t0} ms：`, JSON.stringify(await counts()))
 
 check('取消后不再有任务在传输或排队', stableRounds >= 4, `仍有动静的采样次数 ${stillRunning}`)
-check('任务落定「已取消」而非「失败」', !finalText.includes('失败'), finalText)
+check('任务落定「已取消」而非「失败」', finalText.includes('已取消') && !finalText.includes('失败'), finalText || '未观察到已取消状态')
 // 自动消失是 3 秒后，上面那个循环在「安静下来」就退出了，这里得单独等
 let panelGone = false
 for (let i = 0; i < 40; i++) {
@@ -258,6 +238,6 @@ check('远端测试目录已清理', !(await rows()).includes(DIR))
 
 rmSync(LOCAL_OUT, { recursive: true, force: true })
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+}, { prefix: 'dox-folder-cancel-' })
 console.log(process.exitCode ? '\n结论: 存在失败项' : '\n结论: 全部通过')
-await app.close()
 process.exit(process.exitCode ?? 0)

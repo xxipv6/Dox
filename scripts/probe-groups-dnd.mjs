@@ -1,31 +1,14 @@
 // 设备分组·人性化入口探针：＋分组空组、拖拽进组、拖拽建组、拖拽移出
-// 用法：先 REMOTE_DEBUGGING_PORT=9333 npm run dev，再 node scripts/probe-groups-dnd.mjs
-import { chromium } from 'playwright'
+// 用法：npm run build && node scripts/probe-groups-dnd.mjs（隔离 userData，不读取真实设备）
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
-const results = []
-function check(name, ok, extra = '') {
-  results.push({ name, ok, extra })
-  console.log(`${ok ? '✓' : '✗'} ${name}${extra ? ` — ${extra}` : ''}`)
-}
-
-const browser = await chromium.connectOverCDP('http://localhost:9333')
-const page = browser.contexts()[0].pages()[0]
-
-try {
-  // 清场：关残留菜单、清掉所有分组（从干净状态开始）
-  const backdrop = page.locator('.menu-backdrop')
-  if (await backdrop.count()) await backdrop.first().click({ force: true }).catch(() => {})
+await withIsolatedElectron(async ({ win: page, check }) => {
   await page.evaluate(async () => {
-    for (const s of await window.api.listSessions()) {
-      if (s.group) {
-        await window.api.saveSession({
-          id: s.id, name: s.name, host: s.host, port: s.port,
-          username: s.username, authType: s.authType, group: undefined
-        })
-      }
+    for (const [name, host] of [['AI', 'ai.invalid'], ['Server', 'server.invalid']]) {
+      await window.api.saveSession({
+        name, host, port: 22, username: 'probe', authType: 'password', password: 'probe'
+      })
     }
-    localStorage.removeItem('dox-groups')
-    localStorage.removeItem('dox-collapsed-groups')
   })
   await page.reload()
   await page.waitForSelector('.device', { timeout: 5000 })
@@ -58,6 +41,7 @@ try {
   await page.locator('.device-block.in-group .device').first().dragTo(server)
   await page.waitForFunction(
     () => document.querySelector('.group-head .group-count')?.textContent === '0',
+    undefined,
     { timeout: 3000 }
   )
   check('拖到未分组设备上 → 移出分组', true)
@@ -66,41 +50,15 @@ try {
   await page.locator('.device', { hasText: 'AI' }).first().dragTo(page.locator('.device', { hasText: 'Server' }).first())
   const autoRename = page.locator('.group-head .rename-input')
   await autoRename.waitFor({ timeout: 3000 })
-  // 组头名字此时被输入框取代：输入框的默认值就是建出来的组名
   check('拖两台未分组设备 → 现场建组', (await autoRename.inputValue()) === '新分组')
   check('建组后重命名框自动打开', true)
-  {
-    await autoRename.fill('临时组')
-    await autoRename.press('Enter')
-    await page.waitForFunction(
-      () => [...document.querySelectorAll('.group-head')].some((h) => h.textContent?.includes('临时组')),
-      { timeout: 3000 }
-    )
-    const cnt = await page.locator('.group-head', { hasText: '临时组' }).locator('.group-count').innerText()
-    check('现场组两台设备都在', cnt === '2', `count=${cnt}`)
-  }
-} catch (err) {
-  console.error('PROBE ERROR:', err?.message ?? err)
-  results.push({ name: '（异常中断）', ok: false })
-} finally {
-  // 清理：所有设备移出分组 + 清 localStorage，恢复探针前状态
-  try {
-    await page.evaluate(async () => {
-      for (const s of await window.api.listSessions()) {
-        if (s.group) {
-          await window.api.saveSession({
-            id: s.id, name: s.name, host: s.host, port: s.port,
-            username: s.username, authType: s.authType, group: undefined
-          })
-        }
-      }
-      localStorage.removeItem('dox-groups')
-      localStorage.removeItem('dox-collapsed-groups')
-    })
-    await page.reload()
-  } catch {}
-  const failed = results.filter((r) => !r.ok)
-  console.log(`\n${results.length - failed.length}/${results.length} 通过`)
-  await browser.close()
-  process.exit(failed.length ? 1 : 0)
-}
+  await autoRename.fill('临时组')
+  await autoRename.press('Enter')
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('.group-head')].some((head) => head.textContent?.includes('临时组')),
+    undefined,
+    { timeout: 3000 }
+  )
+  const count = await page.locator('.group-head', { hasText: '临时组' }).locator('.group-count').innerText()
+  check('现场组两台设备都在', count === '2', `count=${count}`)
+}, { prefix: 'dox-groups-dnd-' })

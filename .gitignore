@@ -9,3 +9,7 @@ shots/
 Thumbs.db
 build/agent/
 agent/dox-agent
+.claude/
+CLAUDE.md
+AGENTS.md
+dev-*/

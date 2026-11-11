@@ -4,12 +4,15 @@ import type { Client, ClientChannel, TcpConnectionDetails } from 'ssh2'
 import type { ForwardRule, ForwardRuleInput } from '../../shared/types'
 import { handleSocks5 } from './socks'
 import type { ContainerTunnelManager } from './containerTunnel'
+import { toPublicRule } from './publicRule'
 
 interface InternalRule extends ForwardRule {
   /** 本地转发的 TCP server */
   server?: net.Server
   /** 本地转发已建立的连接：停止时必须主动销毁，否则 close() 永不回调 */
   sockets?: Set<net.Socket>
+  /** 远程转发已建立的 SSH channel / 本地目标 socket 对，停止时成对销毁 */
+  remotePairs?: Set<{ stream: ClientChannel; socket: net.Socket }>
   /** 远程转发在 client 上注册的 tcp connection 处理器 */
   tcpHandler?: (info: TcpConnectionDetails, accept: () => ClientChannel) => void
   /**
@@ -36,7 +39,7 @@ export class ForwardManager {
   ) {}
 
   list(): ForwardRule[] {
-    return [...this.rules.values()].map(({ server: _s, tcpHandler: _h, ...r }) => r)
+    return [...this.rules.values()].map(toPublicRule)
   }
 
   async add(input: ForwardRuleInput): Promise<ForwardRule> {
@@ -238,6 +241,8 @@ export class ForwardManager {
       client.forwardIn(rule.listenHost, rule.listenPort, (err: Error | undefined) => {
         if (err) return reject(err)
 
+        const pairs = new Set<{ stream: ClientChannel; socket: net.Socket }>()
+        rule.remotePairs = pairs
         const handler = (info: TcpConnectionDetails, accept: () => ClientChannel): void => {
           if (info.destPort !== rule.listenPort) return
           // 通配监听（0.0.0.0 / ::）：destIP 是连接实际到达的网卡地址，不会是通配符本身，
@@ -245,9 +250,21 @@ export class ForwardManager {
           if (rule.listenHost !== '0.0.0.0' && rule.listenHost !== '::' && info.destIP !== rule.listenHost) return
           const stream = accept()
           const socket = net.connect(rule.targetPort, rule.targetHost)
+          const pair = { stream, socket }
+          pairs.add(pair)
+          const closeStream = (): void => {
+            pairs.delete(pair)
+            stream.destroy()
+          }
+          const closeSocket = (): void => {
+            pairs.delete(pair)
+            socket.destroy()
+          }
+          stream.once('close', closeSocket)
+          socket.once('close', closeStream)
           stream.pipe(socket).pipe(stream)
-          stream.on('error', () => socket.destroy())
-          socket.on('error', () => stream.destroy())
+          stream.on('error', closeSocket)
+          socket.on('error', closeStream)
         }
         client.on('tcp connection', handler)
         rule.tcpHandler = handler
@@ -277,6 +294,14 @@ export class ForwardManager {
       })
       rule.server = undefined
     }
+    if (rule.remotePairs) {
+      for (const { stream, socket } of rule.remotePairs) {
+        stream.destroy()
+        socket.destroy()
+      }
+      rule.remotePairs.clear()
+      rule.remotePairs = undefined
+    }
     if (rule.tcpHandler) {
       const client = this.getClient(rule.sessionId)
       if (client) {
@@ -291,8 +316,7 @@ export class ForwardManager {
   }
 
   private snapshot(rule: InternalRule): ForwardRule {
-    const { server: _s, tcpHandler: _h, ...r } = rule
-    return r
+    return toPublicRule(rule)
   }
 
   private emit(): void {

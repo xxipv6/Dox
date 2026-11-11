@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import type { RemoteFileContent } from '@shared/types'
 import { dropSessionStates, deleteEditorState } from '../editor/stateCache'
+import { saveContentSnapshot } from '../editor/saveSnapshot'
 import { errorText } from '../utils/errors'
 import { useConfirmStore } from './confirm'
 
@@ -201,6 +202,9 @@ export const useEditorStore = defineStore('editor', () => {
       file.size = res.size
       // 代际号推动：FileEditor 据此重建视图（缓存的 state 还是旧文档，不能接着用）
       file.reloadSeq++
+      // 后台 reload 没有活动 FileEditor watcher 可依赖：立即废弃对应缓存。
+      // 活动视图的旧 state 即使随后 teardown 回存，也因代际不符而不会复活。
+      deleteEditorState(sessionId, path)
       file.externalChanged = false
       file.externalIgnoredMtime = null
       return true
@@ -257,16 +261,15 @@ export const useEditorStore = defineStore('editor', () => {
     file.error = ''
     file.conflict = false
     try {
-      file.mtime = await window.api.sftpWriteText(
-        file.fsSessionId ?? sessionId,
-        path,
-        file.content,
-        opts?.force ? undefined : file.mtime,
-        file.containerName
+      await saveContentSnapshot(file, (contentSnapshot, expectedMtime) =>
+        window.api.sftpWriteText(
+          file.fsSessionId ?? sessionId,
+          path,
+          contentSnapshot,
+          opts?.force ? undefined : expectedMtime,
+          file.containerName
+        )
       )
-      file.savedContent = file.content
-      // sftpWriteText 只返回 mtime；写入的内容就是 content，字节数自己算
-      file.size = new TextEncoder().encode(file.content).length
       return true
     } catch (err) {
       const text = errorText(err)

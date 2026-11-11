@@ -4,6 +4,7 @@ import type { SearchEngine, SearchEvent, SearchMatch } from '@shared/types'
 import type { ExplorerSearchState } from '../stores/sessions'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
+import { RunEventClaimer } from '../utils/runEventClaimer'
 
 /**
  * 项目模式全文搜索面板（与 ProjectTree 同位切换，父组件用 v-show 保活）。
@@ -63,6 +64,7 @@ let activeRunId: string | null = null
 let searchSeq = 0
 let debounceTimer: number | null = null
 let unsubscribe: (() => void) | null = null
+const runEvents = new RunEventClaimer<SearchEvent>((ev) => ev.runId)
 
 const ENGINE_LABEL: Record<SearchEngine, string> = {
   agent: '助手',
@@ -78,6 +80,7 @@ async function startSearch(): Promise<void> {
   // 空 query 不发请求，但要把正在跑的旧搜索停掉
   if (activeRunId) {
     window.api.searchCancel(activeRunId)
+    runEvents.release(activeRunId)
     activeRunId = null
   }
   if (!pattern) {
@@ -91,6 +94,7 @@ async function startSearch(): Promise<void> {
   errorMsg.value = ''
   doneInfo.value = null
   results.value = []
+  const operation = runEvents.begin()
   try {
     const { runId } = await window.api.searchStart({
       fsSessionId: props.fsSessionId,
@@ -102,11 +106,16 @@ async function startSearch(): Promise<void> {
     })
     // invoke 返回期间又有更新的调用发起：这次启动直接作废（晚回来的 runId 必须杀掉，不能留僵尸搜索）
     if (seq !== searchSeq) {
+      runEvents.abort(operation)
+      runEvents.release(runId)
       window.api.searchCancel(runId)
       return
     }
     activeRunId = runId
+    // 认养后先回放早到事件；done/error 已在缓冲区时立即收尾 searching。
+    for (const ev of runEvents.claim(operation, runId)) onSearchEvent(ev)
   } catch (err) {
+    runEvents.abort(operation)
     if (seq !== searchSeq) return
     searching.value = false
     errorMsg.value = err instanceof Error ? err.message : String(err)
@@ -136,9 +145,14 @@ watch(
 watch(
   () => props.active,
   (on) => {
-    if (!on && activeRunId) {
-      window.api.searchCancel(activeRunId)
-      activeRunId = null
+    if (!on) {
+      // 隐藏也使尚未返回的 invoke 作废；否则它会在隐藏后重新认养一个后台搜索。
+      searchSeq++
+      if (activeRunId) {
+        window.api.searchCancel(activeRunId)
+        runEvents.release(activeRunId)
+        activeRunId = null
+      }
       searching.value = false
     }
   }
@@ -218,13 +232,17 @@ function snapshot(): SearchSnapshot {
 defineExpose({ focusInput, snapshot })
 
 onMounted(() => {
-  unsubscribe = window.api.onSearchEvent(onSearchEvent)
+  unsubscribe = window.api.onSearchEvent((ev) => runEvents.accept(ev, onSearchEvent))
   focusInput()
 })
 
 onBeforeUnmount(() => {
+  searchSeq++
   if (debounceTimer !== null) window.clearTimeout(debounceTimer)
-  if (activeRunId) window.api.searchCancel(activeRunId)
+  if (activeRunId) {
+    window.api.searchCancel(activeRunId)
+    runEvents.release(activeRunId)
+  }
   unsubscribe?.()
 })
 </script>

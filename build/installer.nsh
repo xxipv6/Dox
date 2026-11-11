@@ -30,21 +30,19 @@
       ; --updated /KEEP_APP_DATA：保留 %APPDATA%/dox 里的配置与凭证
       InitPluginsDir
       CopyFiles /SILENT "$R6\${UNINSTALL_FILENAME}" "$PLUGINSDIR\dox-old-uninstaller.exe"
-      ; per-machine 卸载器会自提权（用户会看到一次 UAC 框），提权后异步执行，
-      ; ExecWait 的返回值不可靠 —— 以「HKLM 卸载条目是否消失」为准，最多试 3 次
-      StrCpy $R5 0
-      dox_old_uninstall_retry:
-        IntOp $R5 $R5 + 1
-        ExecWait '"$PLUGINSDIR\dox-old-uninstaller.exe" /S /KEEP_APP_DATA --updated --keep-shortcuts /allusers _?=$R6' $R7
-        Sleep 1500
-        ReadRegStr $R8 HKLM "${UNINSTALL_REGISTRY_KEY}" "UninstallString"
-        ${if} $R8 != ""
-        ${andIf} $R5 < 3
-          Goto dox_old_uninstall_retry
-        ${endif}
-      ${if} $R8 != ""
-        ; 失败不阻塞本次安装（新版已就位），只留日志 —— 残留的旧版由用户手动卸
-        DetailPrint "Previous per-machine uninstall did not finish (continuing)"
+      ; per-machine 卸载器会自提权（用户会看到一次 UAC 框），提权后异步执行。
+      ; 只启动一次，随后由 Windows 自带 PowerShell 等待该卸载器进程退出，
+      ; 避免固定 Sleep 后在旧卸载器仍运行时重入。总等待预算 120 秒。
+      ExecWait '"$PLUGINSDIR\dox-old-uninstaller.exe" /S /KEEP_APP_DATA --updated --keep-shortcuts /allusers _?=$R6' $R7
+      ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "$$deadline=(Get-Date).AddSeconds(120); do { $$p=Get-Process -Name dox-old-uninstaller -ErrorAction SilentlyContinue; if (-not $$p) { exit 0 }; Start-Sleep -Milliseconds 500 } while ((Get-Date) -lt $$deadline); exit 1"' $R7
+      ReadRegStr $R8 HKLM "${UNINSTALL_REGISTRY_KEY}" "UninstallString"
+      ${if} $R7 != 0
+      ${orIf} $R8 != ""
+        ; 新版文件虽已展开，但旧版仍存活/注册时继续会造成双实例并存；明确失败，
+        ; 让用户先手动卸载旧版后重试，不把部分升级伪装成成功。
+        DetailPrint "Previous per-machine uninstall did not finish within 120 seconds (aborting)"
+        MessageBox MB_ICONSTOP|MB_OK "The previous per-machine Dox installation could not be removed. Uninstall it manually, then run this installer again."
+        Abort "Previous per-machine uninstall did not finish"
       ${endif}
       Delete "$PLUGINSDIR\dox-old-uninstaller.exe"
     ${endif}

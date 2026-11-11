@@ -18,45 +18,19 @@
  * 用法：node scripts/verify-terminal-clipboard.mjs
  * 前置：npm run build（本脚本加载 out/ 产物，不需要 dev server）
  */
-import { _electron } from 'playwright'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-
-// 后台轮询/异步循环在窗口关掉后会抛未处理拒绝，直接把探测脚本带走
-process.on('unhandledRejection', () => {})
-
-let failed = false
-const check = (name, cond, extra = '') => {
-  console.log(cond ? `  ok  ${name}` : `  FAIL ${name} ${extra}`)
-  if (!cond) failed = true
-}
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
 const STAMP = Date.now()
 const MARK = `DOXCLIP-${STAMP}`
-const receipt = join(tmpdir(), `dox-clip-${STAMP}.log`)
+
+await withIsolatedElectron(async ({ app, win, check, tempDir }) => {
+const receipt = join(tempDir, 'clipboard-receipt.log')
 /** 敲进终端的重定向目标：Git Bash 会把反斜杠当转义符吃掉，MSYS 认正斜杠 */
 const receiptArg = receipt.replace(/\\/g, '/')
 
-// 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
 try {
-  if (process.platform === 'win32') {
-    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
-    execFileSync('powershell', ['-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    ], { stdio: 'ignore' })
-  } else {
-    execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
-  }
-} catch { /* 没有正好 */ }
-
-const app = await _electron.launch({ args: ['.'] })
-
-try {
-  const win = await app.firstWindow()
-  win.on('pageerror', (e) => console.log(`  [渲染层报错] ${e.message}`))
-  await win.waitForLoadState('domcontentloaded')
   await win.waitForTimeout(1500)
   // 清掉可能恢复出来的旧标签（隔离 userData 里通常本来就是空的）
   await win.evaluate(() => window.api.setLayout({ tabs: [] })).catch(() => {})
@@ -226,17 +200,7 @@ try {
 
   await win.screenshot({ path: 'shots/terminal-clipboard.png' })
   console.log('  截图：shots/terminal-clipboard.png')
-} catch (err) {
-  check('探测过程未抛错', false, err instanceof Error ? err.message : String(err))
 } finally {
-  await app.close().catch(() => {})
   rmSync(receipt, { force: true })
-  if (process.platform !== 'win32') {
-    try {
-      execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
-    } catch { /* 没有正好 */ }
-  }
 }
-
-console.log(failed ? '\n结论: 存在失败项' : '\n结论: 全部通过')
-process.exit(failed ? 1 : 0)
+})

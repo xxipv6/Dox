@@ -12,6 +12,7 @@
 import { _electron as electron } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { BUNDLED_AGENT_VERSION } from '../src/shared/agentVersion.ts'
 
 const host = process.argv[2] ?? process.env.DOX_TEST_HOST ?? '192.168.3.5'
 const port = process.argv[3] ?? '22'
@@ -142,14 +143,15 @@ try {
     let installed = false
     for (let i = 0; i < 40 && !installed; i++) {
       await win.waitForTimeout(1000)
-      installed = /已安装 v0\.7\./.test(
-        (await win.locator('.sidebar .agent-ok').textContent().catch(() => '')) ?? '')
+      installed = ((await win.locator('.sidebar .agent-ok').textContent().catch(() => '')) ?? '')
+        .includes(`已安装 v${BUNDLED_AGENT_VERSION}`)
     }
-    check('容器助手安装到 v0.7.x', installed,
+    check(`容器助手安装到 v${BUNDLED_AGENT_VERSION}`, installed,
       (await win.locator('.sidebar .agent-ok').textContent().catch(() => '')) ?? '')
   } else {
-    check('容器助手已是 v0.7.x', /已安装 v0\.7\./.test(
-      (await win.locator('.sidebar .agent-ok').textContent().catch(() => '')) ?? ''))
+    check(`容器助手已是 v${BUNDLED_AGENT_VERSION}`,
+      ((await win.locator('.sidebar .agent-ok').textContent().catch(() => '')) ?? '')
+        .includes(`已安装 v${BUNDLED_AGENT_VERSION}`))
   }
   await agentHead.click().catch(() => undefined)
 

@@ -10,6 +10,12 @@ import Spinner from './Spinner.vue'
 import SidebarSection from './SidebarSection.vue'
 import { pushToast } from '../stores/toast'
 import { useConfirmStore } from '../stores/confirm'
+import {
+  containerOriginForTab,
+  containerTargetKey,
+  isCurrentContainerRequest,
+  type ContainerTarget
+} from '../utils/containerTarget'
 
 /**
  * 远端容器列表（Docker / Podman）。
@@ -27,7 +33,9 @@ const loading = ref(false)
 const entering = ref<string | null>(null)
 /** 正在做生命周期操作的容器名（启动/停止/恢复/删除） */
 const controlling = ref<string | null>(null)
-const menu = ref<{ x: number; y: number; box: ContainerInfo } | null>(null)
+const menu = ref<{ x: number; y: number; box: ContainerInfo; target: ContainerTarget & { key: string } } | null>(null)
+const resultTargetKey = ref('')
+let refreshGeneration = 0
 
 /**
  * 要列哪个会话的容器。
@@ -59,6 +67,17 @@ const nestedChain = computed<string[] | undefined>(() => {
   return [...(tab.container.chain ?? []), tab.container.containerName]
 })
 
+const targetKey = computed(() =>
+  parentSessionId.value ? containerTargetKey(parentSessionId.value, nestedChain.value) : ''
+)
+const containerOrigin = computed(() =>
+  store.activeTab ? containerOriginForTab(store.activeTab, store.activeSessionId) : {}
+)
+/** 慢响应/切换目标期间，不把上一台主机的列表或错误展示成当前目标的结果 */
+const displayedResult = computed(() =>
+  resultTargetKey.value && resultTargetKey.value === targetKey.value ? result.value : null
+)
+
 /** 目标此刻是否可用。断线期间列表还在，但不能点进去 */
 const parentReady = computed(() => {
   const tab = store.activeTab
@@ -86,26 +105,37 @@ const blockedHint = computed(() =>
     : '父会话已断开，恢复后即可进入容器'
 )
 
-const containers = computed(() => (result.value?.ok ? result.value.list.containers : []))
+const containers = computed(() => (displayedResult.value?.ok ? displayedResult.value.list.containers : []))
 const runtimeLabel = computed(() =>
-  result.value?.ok ? (result.value.list.runtime === 'podman' ? 'Podman' : 'Docker') : ''
+  displayedResult.value?.ok ? (displayedResult.value.list.runtime === 'podman' ? 'Podman' : 'Docker') : ''
 )
 
 async function refresh(): Promise<void> {
+  const generation = ++refreshGeneration
   const sessionId = parentSessionId.value
+  const chain = nestedChain.value ? [...nestedChain.value] : undefined
   if (!sessionId) {
     result.value = null
+    resultTargetKey.value = ''
+    loading.value = false
+    menu.value = null
     return
   }
-  // 刷新期间**保留**旧列表（降透明度，见 .container-list.refreshing）：
-  // 先清空再加载的话，每次切标签/点刷新面板都要闪一下空态
+  const request = { generation, key: containerTargetKey(sessionId, chain) }
+  // 刷新期间**保留**同目标旧列表（降透明度，见 .container-list.refreshing）：
+  // displayedResult 会在切换目标时立即屏蔽旧目标内容，不让动作混用新会话。
   loading.value = true
   try {
-    result.value = await api.listContainers(sessionId, nestedChain.value)
+    const next = await api.listContainers(sessionId, chain)
+    if (!isCurrentContainerRequest(request, { generation: refreshGeneration, key: targetKey.value })) return
+    result.value = next
+    resultTargetKey.value = request.key
   } catch (err) {
+    if (!isCurrentContainerRequest(request, { generation: refreshGeneration, key: targetKey.value })) return
     result.value = { ok: false, reason: 'error', message: errorText(err) }
+    resultTargetKey.value = request.key
   } finally {
-    loading.value = false
+    if (generation === refreshGeneration) loading.value = false
   }
 }
 
@@ -124,7 +154,21 @@ watch(
 )
 
 function onRowMenu(e: MouseEvent, box: ContainerInfo): void {
-  menu.value = { x: e.clientX, y: e.clientY, box }
+  const sessionId = parentSessionId.value
+  if (!sessionId || !displayedResult.value) return
+  const chain = nestedChain.value ? [...nestedChain.value] : undefined
+  menu.value = {
+    x: e.clientX,
+    y: e.clientY,
+    box,
+    target: {
+      sessionId,
+      chain,
+      originSavedId: containerOrigin.value.originSavedId,
+      originDeviceKey: containerOrigin.value.originDeviceKey,
+      key: containerTargetKey(sessionId, chain)
+    }
+  }
 }
 
 /**
@@ -169,14 +213,15 @@ const CONFIRMS: Record<string, (name: string) => string> = {
 }
 
 async function onMenuSelect(id: string): Promise<void> {
-  const target = menu.value?.box
-  const sessionId = parentSessionId.value
+  const action = menu.value
   menu.value = null
-  if (!target || !sessionId) return
+  if (!action || action.target.key !== targetKey.value) return
+  const target = action.box
+  const { sessionId, chain, originSavedId, originDeviceKey } = action.target
 
   if (id === 'logs') {
     try {
-      await store.viewContainerLogs(sessionId, target, undefined, nestedChain.value)
+      await store.viewContainerLogs(sessionId, target, originSavedId, chain, originDeviceKey)
     } catch (err) {
       pushToast(`查看日志失败：${errorText(err)}`)
     }
@@ -188,7 +233,7 @@ async function onMenuSelect(id: string): Promise<void> {
     try {
       // 失败原因（容器已停止 / 没有可用 shell / 被 seccomp 拒绝）由主进程写好，
       // 这里如实抛出来给用户看，不要吞成一句「失败了」
-      await store.enterContainer(sessionId, target, undefined, nestedChain.value)
+      await store.enterContainer(sessionId, target, originSavedId, chain, originDeviceKey)
     } catch (err) {
       pushToast(`进入容器失败：${errorText(err)}`)
     } finally {
@@ -200,9 +245,11 @@ async function onMenuSelect(id: string): Promise<void> {
   // start / stop / unpause / remove
   const ask = CONFIRMS[id]
   if (ask && !(await useConfirmStore().ask(ask(target.name)))) return
+  // 确认期间用户可能已切到另一台主机；旧列表项绝不能作用到新目标。
+  if (action.target.key !== targetKey.value) return
   controlling.value = target.name
   try {
-    await api.controlContainer(sessionId, target.name, id as 'start' | 'stop' | 'unpause' | 'remove', nestedChain.value)
+    await api.controlContainer(sessionId, target.name, id as 'start' | 'stop' | 'unpause' | 'remove', chain)
     // 状态变化是异步体现在 docker ps 里的，稍等再刷，否则列表可能还是旧状态
     await new Promise((r) => setTimeout(r, 600))
     await refresh()
@@ -240,17 +287,17 @@ async function onMenuSelect(id: string): Promise<void> {
   </div>
 
   <!-- 没装运行时 = 正常状态不是错误：淡色提示，不带重试 -->
-  <div v-else-if="result && !result.ok && result.reason === 'no-binary'" class="empty-hint">
-    {{ result.message }}
+  <div v-else-if="displayedResult && !displayedResult.ok && displayedResult.reason === 'no-binary'" class="empty-hint">
+    {{ displayedResult.message }}
   </div>
 
   <!-- 真错误：一句话人话 + 原始报错折叠进「详细信息」 -->
-  <div v-else-if="result && !result.ok" class="empty-hint error">
-    {{ result.message }}
+  <div v-else-if="displayedResult && !displayedResult.ok" class="empty-hint error">
+    {{ displayedResult.message }}
     <button class="retry" @click="refresh">重试</button>
-    <details v-if="result.detail" class="err-detail">
+    <details v-if="displayedResult.detail" class="err-detail">
       <summary>详细信息</summary>
-      <pre>{{ result.detail }}</pre>
+      <pre>{{ displayedResult.detail }}</pre>
     </details>
   </div>
 
@@ -259,7 +306,7 @@ async function onMenuSelect(id: string): Promise<void> {
   </div>
 
   <template v-else>
-    <div v-if="result?.ok && result.list.formatDowngraded" class="empty-hint">
+    <div v-if="displayedResult?.ok && displayedResult.list.formatDowngraded" class="empty-hint">
       远端 {{ runtimeLabel }} 版本较旧，状态信息不可用
     </div>
     <!-- 父会话断开时列表变灰不可点：还能看见有什么，但不能假装进得去 -->

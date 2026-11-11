@@ -31,7 +31,6 @@ import type {
   SearchEvent,
   SearchStartParams,
   SessionStatusEvent,
-  SshAuth,
   SshSessionConfig,
   TermSize,
   TransferTask,
@@ -51,6 +50,8 @@ export interface DoxApi {
     term: TermSize,
     opts?: { savedSessionId?: string }
   ): Promise<string>
+  /** 已保存设备只传 id；认证信息由主进程解密并直接用于连接 */
+  connectSavedSession(savedSessionId: string, term: TermSize): Promise<string>
   /** 取消本窗口进行中的连接尝试（连接中的弹窗「取消」按钮用；send 不等回执） */
   connectCancel(): void
   /**
@@ -92,8 +93,6 @@ export interface DoxApi {
   listSessions(): Promise<SavedSession[]>
   saveSession(input: SaveSessionInput): Promise<SavedSession>
   deleteSession(id: string): Promise<void>
-  /** 取出某条已保存会话的解密后认证信息，用于发起连接 */
-  getSessionAuth(id: string): Promise<SshAuth>
 
   // ---- SFTP 文件操作 ----
   // containerName 给了就是容器内文件操作（经容器里的 dox-agent，Dev Containers 式）
@@ -273,6 +272,11 @@ export interface DoxApi {
     fresh?: boolean
   ): Promise<{ installed: boolean; version?: string; osArch?: string }>
   agentInstall(
+    sessionId: string,
+    containerName?: string
+  ): Promise<{ installed: boolean; version?: string; osArch?: string }>
+  /** 显式卸载目标助手；渲染层必须先取得用户二次确认 */
+  agentUninstall(
     sessionId: string,
     containerName?: string
   ): Promise<{ installed: boolean; version?: string; osArch?: string }>

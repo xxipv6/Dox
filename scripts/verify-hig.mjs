@@ -14,8 +14,7 @@
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-
-process.on('unhandledRejection', () => {})
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
 let failed = false
 const check = (name, cond, extra = '') => {
@@ -181,22 +180,7 @@ check(
 // ---------------------------------------------------------------- 阶段 2
 if (process.argv.includes('--e2e')) {
   console.log('阶段 2：端到端（隔离实例）')
-  const { _electron } = await import('playwright')
-  const { mkdtempSync, rmSync } = await import('node:fs')
-  const { execFileSync } = await import('node:child_process')
-  const { tmpdir } = await import('node:os')
-
-  const userData = mkdtempSync(join(tmpdir(), 'dox-hig-'))
-  const app = await _electron.launch({
-    args: ['.', `--user-data-dir=${userData}`],
-    cwd: process.cwd(),
-    env: { ...process.env, ELECTRON_RENDERER_URL: 'http://localhost:5173/' }
-  })
-
-  try {
-    const win = await app.firstWindow()
-    win.on('pageerror', (e) => console.log(`  [渲染层报错] ${e.message}`))
-    await win.waitForLoadState('domcontentloaded')
+  await withIsolatedElectron(async ({ app, win }) => {
     await win.waitForTimeout(1500)
     await win.evaluate(() => window.api.setLayout({ tabs: [] })).catch(() => {})
     await win.reload()
@@ -557,20 +541,10 @@ if (process.argv.includes('--e2e')) {
       await win.locator('.sidebar .theme-toggle').click()
       await win.waitForTimeout(600)
     }
-  } catch (err) {
-    check('探测过程未抛错', false, err instanceof Error ? err.message : String(err))
-  } finally {
-    await app.close().catch(() => {})
-    try {
-      execFileSync('pkill', ['-f', 'dox-hig-'], { stdio: 'ignore' })
-    } catch {
-      /* 没有正好 */
-    }
-    rmSync(userData, { recursive: true, force: true })
-  }
+  }, { env: { ELECTRON_RENDERER_URL: 'http://localhost:5173/' }, prefix: 'dox-hig-' })
 } else {
   console.log('（阶段 2 需要 dev 在跑：加 --e2e 参数）')
 }
 
-console.log(failed ? '\n结论: 存在失败项' : '\n结论: 全部通过')
-process.exit(failed ? 1 : 0)
+console.log(failed || process.exitCode ? '\n结论: 存在失败项' : '\n结论: 全部通过')
+process.exit(failed || process.exitCode ? 1 : 0)

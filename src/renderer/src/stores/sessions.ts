@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
 import { AUTH_DECRYPT_FAILED } from '@shared/types'
+import { LOCAL_CONTAINER_TARGET } from '@shared/sessionId'
 import type {
   ContainerInfo,
   CliCommandPayload,
@@ -10,11 +11,15 @@ import type {
   SearchEngine,
   SearchMatch,
   SessionStatus,
-  SshSessionConfig
+  SshSessionConfig,
+  TermSize
 } from '@shared/types'
 import { useSettingsStore } from './settings'
 import { errorText } from '../utils/errors'
 import { seedTermSize } from '../utils/termSize'
+import { resolveTransportConnection } from '../utils/transportLifecycle'
+import { planSshConnection, presentSshConnectionError } from '../utils/sshConnection'
+import { containerDeviceBase, usesContainerTransport } from '../utils/containerTarget'
 
 /** 搜索面板跨重挂载要保住的快照（FileExplorer 经 SearchPanel.snapshot() 采集） */
 export interface ExplorerSearchState {
@@ -85,10 +90,14 @@ export interface ContainerTabInfo {
    */
   chain?: string[]
   /**
-   * 直连容器才有：父会话是按需建的传输会话，这里记它的设备 id。
-   * 传输会话死掉后重连容器 pane 靠它重建承载（ensureTransport 换新父）。
+   * 容器宿主的已保存设备 id，用于稳定项目根身份。
+   * usesTransport=true 时还用于在传输会话死亡后重建承载。
    */
   originSavedId?: string
+  /** 未保存 SSH/嵌套容器继承的稳定项目根身份；本机才为 @local */
+  originDeviceKey?: string
+  /** true = 无宿主机终端标签的直连容器，父会话由 ensureTransport 建立/重建 */
+  usesTransport?: boolean
 }
 
 export interface SessionTab {
@@ -148,6 +157,14 @@ function toPlainConfig(config: SshSessionConfig): SshSessionConfig {
   }
 }
 
+async function connectSsh(tab: SessionTab, term: TermSize): Promise<string> {
+  const request = planSshConnection(tab, term)
+  if (request.kind === 'saved') {
+    return window.api.connectSavedSession(request.savedSessionId, request.term)
+  }
+  return window.api.connect(toPlainConfig(request.config), request.term)
+}
+
 export const useSessionStore = defineStore('sessions', () => {
   const tabs = ref<SessionTab[]>([])
   const activeTabId = ref<string | null>(null)
@@ -203,6 +220,8 @@ export const useSessionStore = defineStore('sessions', () => {
 
   /** savedSessionId → 传输会话 id（无 shell 的后台 SSH 连接，容器操作的承载） */
   const transports = reactive<Record<string, string>>({})
+  /** 容器管理抽屉、进入容器过渡态等显式占用；侧栏展开与容器标签另行计入消费者 */
+  const transportRetainers = new Map<string, number>()
   /** 连接去重：同一台设备并发 ensure 只连一次 */
   const transportPending = new Map<string, Promise<string>>()
   /** 侧栏正展开着容器列表的设备（展开本身也是传输会话的一种占用） */
@@ -211,6 +230,32 @@ export const useSessionStore = defineStore('sessions', () => {
   const deviceContainers = reactive<
     Record<string, { status: 'loading' | 'ok' | 'error'; list: ContainerInfo[]; error?: string }>
   >({})
+
+  function hasTransportConsumer(savedId: string, transportId?: string): boolean {
+    if (expandedDevices.has(savedId) || (transportRetainers.get(savedId) ?? 0) > 0) return true
+    return tabs.value.some(
+      (t) =>
+        t.kind === 'container' &&
+        !!t.container &&
+        usesContainerTransport(t.container) &&
+        (t.container.originSavedId === savedId ||
+          (!!transportId && t.container.parentSessionId === transportId))
+    )
+  }
+
+  /** 给尚未来得及建立容器标签/仍在挂载的管理抽屉一个可释放的占用句柄 */
+  function retainTransport(savedId: string): () => void {
+    transportRetainers.set(savedId, (transportRetainers.get(savedId) ?? 0) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const count = (transportRetainers.get(savedId) ?? 1) - 1
+      if (count > 0) transportRetainers.set(savedId, count)
+      else transportRetainers.delete(savedId)
+      releaseTransportIfIdle(savedId)
+    }
+  }
 
   /**
    * 取某台已保存设备的传输会话，没有就连一条。
@@ -225,9 +270,15 @@ export const useSessionStore = defineStore('sessions', () => {
     const p = window.api
       .connectTransport(savedId)
       .then((id) => {
-        transports[savedId] = id
-        // 首条 connected 事件到达时登记表还没建（invoke 未返回），已落进 pendingStatus，清掉
+        const buffered = pendingStatus.get(id)
         pendingStatus.delete(id)
+        const resolution = resolveTransportConnection(buffered, hasTransportConsumer(savedId, id))
+        if (resolution.action === 'disconnect') {
+          window.api.disconnect(id)
+          pendingStatus.delete(id)
+          throw new Error(resolution.error)
+        }
+        transports[savedId] = id
         return id
       })
       .finally(() => transportPending.delete(savedId))
@@ -241,11 +292,7 @@ export const useSessionStore = defineStore('sessions', () => {
    */
   function releaseTransportIfIdle(savedId: string): void {
     const tid = transports[savedId]
-    if (!tid || expandedDevices.has(savedId)) return
-    const inUse = tabs.value.some(
-      (t) => t.kind === 'container' && t.container?.parentSessionId === tid
-    )
-    if (inUse) return
+    if (!tid || hasTransportConsumer(savedId, tid)) return
     window.api.disconnect(tid)
     delete transports[savedId]
   }
@@ -287,9 +334,10 @@ export const useSessionStore = defineStore('sessions', () => {
     saved: SavedSession,
     box: Pick<ContainerInfo, 'name' | 'image'>
   ): Promise<void> {
+    const release = retainTransport(saved.id)
     try {
       const tid = await ensureTransport(saved.id)
-      await enterContainer(tid, box, saved.id)
+      await enterContainer(tid, box, saved.id, undefined, undefined, true)
     } catch (err) {
       const pane = newPane()
       pane.status = 'error'
@@ -299,13 +347,15 @@ export const useSessionStore = defineStore('sessions', () => {
         title: `容器 · ${box.name}`,
         kind: 'container',
         config: null,
-        container: { parentSessionId: '', containerName: box.name, image: box.image, originSavedId: saved.id },
+        container: { parentSessionId: '', containerName: box.name, image: box.image, originSavedId: saved.id, usesTransport: true },
         split: 'none',
         panes: [pane],
         activePaneId: pane.paneId
       })
       tabs.value.push(tab)
       activeTabId.value = tab.tabId
+    } finally {
+      release()
     }
   }
 
@@ -321,7 +371,7 @@ export const useSessionStore = defineStore('sessions', () => {
       pane.sessionId = null
     }
     // 直连容器：父传输会话可能已随标签死亡被回收，按原籍重建承载再换父
-    if (tab.kind === 'container' && tab.container?.originSavedId) {
+    if (tab.kind === 'container' && tab.container?.originSavedId && usesContainerTransport(tab.container)) {
       try {
         tab.container.parentSessionId = await ensureTransport(tab.container.originSavedId)
       } catch (err) {
@@ -479,9 +529,7 @@ export const useSessionStore = defineStore('sessions', () => {
                   size,
                   tab.container!.chain ? [...tab.container!.chain] : undefined
                 )
-            : await window.api.connect(toPlainConfig(tab.config!), size, {
-                savedSessionId: tab.savedSessionId
-              })
+            : await connectSsh(tab, size)
 
       // 连接在途时用户可能已经关掉了标签/窗格：此时会话已建立但无人认领，
       // 必须立刻断开，否则 ssh 连接（含整条跳板机链路）或本地 shell 进程
@@ -502,8 +550,14 @@ export const useSessionStore = defineStore('sessions', () => {
       // 终端 cwd，否则下一次自动保存会把快照里的目录抹掉。
       if (tab.kind === 'local' && cwd) setTermCwd(sessionId, cwd)
     } catch (err) {
+      const presented = presentSshConnectionError(errorText(err), !!tab.savedSessionId, AUTH_DECRYPT_FAILED)
       pane.status = 'error'
-      pane.error = errorText(err)
+      pane.error = presented.message
+      if (presented.decryptFailed && tab.savedSessionId) {
+        const saved = savedSessions.value.find((item) => item.id === tab.savedSessionId)
+        // 密文解不开（钥匙串身份变更）：重输密码并重存后，后续 saved 连接即自愈。
+        if (saved) requestEditSession(saved)
+      }
     }
   }
 
@@ -593,7 +647,9 @@ export const useSessionStore = defineStore('sessions', () => {
     parentSessionId: string,
     box: Pick<ContainerInfo, 'name' | 'image'>,
     originSavedId?: string,
-    chain?: string[]
+    chain?: string[],
+    originDeviceKey?: string,
+    usesTransport?: boolean
   ): Promise<void> {
     const chainKey = (t: SessionTab): string => (t.container?.chain ?? []).join('▸')
     /*
@@ -636,7 +692,7 @@ export const useSessionStore = defineStore('sessions', () => {
       title: chain?.length ? `容器 · ${[...chain, box.name].join(' ▸ ')}` : `容器 · ${box.name}`,
       kind: 'container',
       config: null,
-      container: { parentSessionId, containerName: box.name, image: box.image, originSavedId, chain },
+      container: { parentSessionId, containerName: box.name, image: box.image, originSavedId, originDeviceKey, usesTransport, chain },
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -655,7 +711,9 @@ export const useSessionStore = defineStore('sessions', () => {
     parentSessionId: string,
     box: Pick<ContainerInfo, 'name' | 'image'>,
     originSavedId?: string,
-    chain?: string[]
+    chain?: string[],
+    originDeviceKey?: string,
+    usesTransport?: boolean
   ): Promise<void> {
     const existing = tabs.value.find(
       (t) =>
@@ -679,7 +737,7 @@ export const useSessionStore = defineStore('sessions', () => {
       title: chain?.length ? `日志 · ${[...chain, box.name].join(' ▸ ')}` : `日志 · ${box.name}`,
       kind: 'container',
       config: null,
-      container: { parentSessionId, containerName: box.name, image: box.image, logs: true, originSavedId, chain },
+      container: { parentSessionId, containerName: box.name, image: box.image, logs: true, originSavedId, originDeviceKey, usesTransport, chain },
       split: 'none',
       panes: [pane],
       activePaneId: pane.paneId
@@ -691,7 +749,7 @@ export const useSessionStore = defineStore('sessions', () => {
 
   /**
    * 用已保存的会话发起连接（认证信息由主进程解密后直接用于连接）。
-   * 先建标签再取认证：这样取认证失败（如未保存密码）也能把错误显示在标签上，
+   * 先建标签再发起连接：主进程解密或连接失败也能把错误显示在标签上，
    * 不会变成一个静默的未处理 Promise rejection。
    */
   async function connectSaved(saved: SavedSession): Promise<void> {
@@ -709,24 +767,7 @@ export const useSessionStore = defineStore('sessions', () => {
     tabs.value.push(tab)
     activeTabId.value = tab.tabId
 
-    try {
-      const auth = await window.api.getSessionAuth(saved.id)
-      tab.config = {
-        host: saved.host,
-        port: saved.port,
-        username: saved.username,
-        auth,
-        jumpHostId: saved.jumpHostId
-      }
-      await connectPane(tab, pane)
-    } catch (err) {
-      pane.status = 'error'
-      const text = errorText(err)
-      pane.error = text.replace(AUTH_DECRYPT_FAILED, '').trim()
-      // 密文解不开（钥匙串身份变更）：自动弹编辑框让用户重输密码，
-      // 重存时用当前钥匙串重新加密，连上即自愈
-      if (text.includes(AUTH_DECRYPT_FAILED)) requestEditSession(saved)
-    }
+    await connectPane(tab, pane)
   }
 
   /** 当前标签页分屏：以同一份配置新建一条独立会话（每个 pane 一条 SSH 连接） */
@@ -1106,7 +1147,12 @@ export const useSessionStore = defineStore('sessions', () => {
       return shellId?.startsWith('wsl:') ? `@wsl:${shellId.slice(4)}` : '@local'
     }
     if (tab.kind === 'container') {
-      const base = tab.container?.originSavedId ? `saved:${tab.container.originSavedId}` : '@local'
+      const target = {
+        sessionId: tab.container?.parentSessionId ?? sessionId,
+        originSavedId: tab.container?.originSavedId,
+        originDeviceKey: tab.container?.originDeviceKey
+      }
+      const base = containerDeviceBase(target, target.sessionId === LOCAL_CONTAINER_TARGET)
       return `${base}#ctr:${tab.container?.containerName ?? ''}`
     }
     if (tab.savedSessionId) return `saved:${tab.savedSessionId}`
@@ -1177,6 +1223,7 @@ export const useSessionStore = defineStore('sessions', () => {
     deviceContainers,
     transports,
     ensureTransport,
+    retainTransport,
     releaseTransportIfIdle,
     toggleDeviceContainers,
     loadDeviceContainers,

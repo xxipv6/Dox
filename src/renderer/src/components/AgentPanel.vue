@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useSessionStore } from '../stores/sessions'
 import { BUNDLED_AGENT_VERSION, agentVersionOlder } from '@shared/agentVersion'
 import { errorText } from '../utils/errors'
+import { useConfirmStore } from '../stores/confirm'
 import Icon from './Icon.vue'
 import Spinner from './Spinner.vue'
 import SidebarSection from './SidebarSection.vue'
@@ -16,6 +17,7 @@ interface AgentStatus {
 const store = useSessionStore()
 const status = ref<AgentStatus | null>(null)
 const installing = ref(false)
+const uninstalling = ref(false)
 const errorMsg = ref('')
 /** 查询本身失败（连接问题）：和「未安装」是两回事，断线机器不该看到安装游说 */
 const probeFailed = ref(false)
@@ -49,33 +51,70 @@ const target = computed<{ sessionId: string; containerName?: string } | null>(()
   return { sessionId: id }
 })
 
+let refreshSeq = 0
+const targetIdentity = (value: typeof target.value): string =>
+  value ? `${value.sessionId}::${value.containerName ?? ''}` : ''
+
 async function refresh(): Promise<void> {
+  const seq = ++refreshSeq
+  const current = target.value
   status.value = null
   errorMsg.value = ''
   probeFailed.value = false
-  if (!target.value) return
+  if (!current) return
   try {
     // fresh=true 真探一次：外部手删了二进制 / 容器重建之后，主进程缓存的
     // 「已安装」不绕开就永远显示已安装，只能重启应用才能重装（踩过）
-    status.value = await window.api.agentStatus(target.value.sessionId, target.value.containerName, true)
+    const next = await window.api.agentStatus(current.sessionId, current.containerName, true)
+    if (seq === refreshSeq) status.value = next
   } catch (err) {
+    if (seq !== refreshSeq) return
     probeFailed.value = true
     errorMsg.value = errorText(err)
   }
 }
 
 async function install(): Promise<void> {
-  if (!target.value || installing.value) return
+  const current = target.value
+  if (!current || installing.value || uninstalling.value) return
   installing.value = true
   errorMsg.value = ''
   try {
-    status.value = await window.api.agentInstall(target.value.sessionId, target.value.containerName)
+    const next = await window.api.agentInstall(current.sessionId, current.containerName)
+    if (targetIdentity(current) === targetIdentity(target.value)) status.value = next
     // 通知开着的终端标签重试 agent 通道（mount 时还是「未安装」，已走轮询兜底）
     store.markAgentInstalled()
   } catch (err) {
-    errorMsg.value = errorText(err)
+    if (targetIdentity(current) === targetIdentity(target.value)) errorMsg.value = errorText(err)
   } finally {
     installing.value = false
+  }
+}
+
+async function uninstall(): Promise<void> {
+  const current = target.value
+  if (!current || installing.value || uninstalling.value) return
+  const destination = current.containerName
+    ? `容器「${current.containerName}」里的 /tmp/dox-agent`
+    : '这台机器上的 ~/.dox/dox-agent'
+  const confirmed = await useConfirmStore().ask(
+    `确认停止并卸载 ${destination}？依赖助手的文件操作、监控和端口转发会中断。`,
+    { danger: true, confirmText: '卸载' }
+  )
+  if (!confirmed) return
+  uninstalling.value = true
+  errorMsg.value = ''
+  try {
+    const next = await window.api.agentUninstall(current.sessionId, current.containerName)
+    if (targetIdentity(current) === targetIdentity(target.value)) status.value = next
+  } catch (err) {
+    if (targetIdentity(current) !== targetIdentity(target.value)) return
+    const message = errorText(err)
+    // 删除可能只完成了一半；以目标真实状态为准，同时保留本次失败原因。
+    await refresh()
+    if (!probeFailed.value) errorMsg.value = message
+  } finally {
+    uninstalling.value = false
   }
 }
 
@@ -85,7 +124,7 @@ const outdated = computed(
     agentVersionOlder(status.value.version, BUNDLED_AGENT_VERSION)
 )
 
-watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
+watch(() => targetIdentity(target.value), () => void refresh(), { immediate: true })
 </script>
 
 <template>
@@ -117,9 +156,15 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
         </div>
         <!-- 版本过旧：新应用 + 老助手，新能力（文件管理等）在老二进制上不存在 -->
         <div v-if="outdated" class="agent-upgrade">
-          <button class="btn primary" :disabled="installing" @click="install">
+          <button class="btn primary" :disabled="installing || uninstalling" @click="install">
             <Spinner v-if="installing" :size="12" />
             {{ installing ? '升级中…' : `升级到 v${BUNDLED_AGENT_VERSION}` }}
+          </button>
+        </div>
+        <div class="agent-actions">
+          <button class="btn danger" :disabled="installing || uninstalling" @click="uninstall">
+            <Spinner v-if="uninstalling" :size="12" />
+            {{ uninstalling ? '卸载中…' : '卸载助手' }}
           </button>
         </div>
       </template>
@@ -141,7 +186,7 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
             删除该目录即完全卸载。
           </p>
         </details>
-        <button class="btn primary" :disabled="installing" @click="install">
+        <button class="btn primary" :disabled="installing || uninstalling" @click="install">
           <Spinner v-if="installing" :size="12" />
           {{ installing ? '安装中…' : target.containerName ? `安装到容器 ${target.containerName}` : '安装到这台机器' }}
         </button>
@@ -162,8 +207,13 @@ watch(() => store.activeSessionId, () => void refresh(), { immediate: true })
   font-size: var(--fs-sm);
   color: var(--success-text);
 }
-.agent-upgrade {
+.agent-upgrade,
+.agent-actions {
   padding: 0 var(--sp-2) var(--sp-1) 26px;
+}
+.agent-actions {
+  display: flex;
+  gap: var(--sp-2);
 }
 .agent-desc {
   font-size: var(--fs-xs);

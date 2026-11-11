@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { ComposeRunEvent, ComposeVerb } from '@shared/types'
+import { RunEventClaimer } from '../utils/runEventClaimer'
 
 /** 一次 compose 动作（输出流式累积在 text 里，底部抽屉实时渲染） */
 export interface ComposeRun {
@@ -21,6 +22,7 @@ export const useComposeStore = defineStore('compose', () => {
   const runs = ref<ComposeRun[]>([])
   const visible = ref(false)
   let subscribed = false
+  const events = new RunEventClaimer<ComposeRunEvent>((ev) => ev.id)
 
   /*
    * 两条有界纪律（长时间运行的内存护栏）：
@@ -34,10 +36,10 @@ export const useComposeStore = defineStore('compose', () => {
   function init(): void {
     if (subscribed) return
     subscribed = true
-    window.api.onComposeEvent((ev) => onEvent(ev))
+    window.api.onComposeEvent((ev) => events.accept(ev, applyEvent))
   }
 
-  function onEvent(ev: ComposeRunEvent): void {
+  function applyEvent(ev: ComposeRunEvent): void {
     const run = runs.value.find((r) => r.id === ev.id)
     if (!run) return
     if (ev.type === 'data') {
@@ -58,13 +60,23 @@ export const useComposeStore = defineStore('compose', () => {
     containerName?: string
   }): Promise<void> {
     init()
-    const id = await window.api.composeRun(opts.sessionId, opts.filePath, opts.verb, opts.containerName)
+    const operation = events.begin()
+    let id: string
+    try {
+      id = await window.api.composeRun(opts.sessionId, opts.filePath, opts.verb, opts.containerName)
+    } catch (err) {
+      events.abort(operation)
+      throw err
+    }
     runs.value.push({ id, file: opts.fileName, verb: opts.verb, status: 'running', text: '' })
     while (runs.value.length > RUN_CAP) {
       const idx = runs.value.findIndex((r) => r.status !== 'running')
       if (idx < 0) break
+      events.release(runs.value[idx].id)
       runs.value.splice(idx, 1)
     }
+    // invoke 前早到的事件此时才交付；exit 可能已经在缓冲区里，不能先返回留下 running。
+    for (const ev of events.claim(operation, id)) applyEvent(ev)
     visible.value = true
   }
 
@@ -74,6 +86,8 @@ export const useComposeStore = defineStore('compose', () => {
 
   /** 清掉已了结的运行记录；全清完顺手把抽屉也合上 */
   function clearDone(): void {
+    const done = runs.value.filter((r) => r.status !== 'running')
+    for (const run of done) events.release(run.id)
     runs.value = runs.value.filter((r) => r.status === 'running')
     if (!runs.value.length) visible.value = false
   }
@@ -86,6 +100,7 @@ export const useComposeStore = defineStore('compose', () => {
     const run = runs.value.find((r) => r.id === id)
     if (!run) return
     if (run.status === 'running') cancel(id)
+    events.release(id)
     runs.value = runs.value.filter((r) => r.id !== id)
     if (!runs.value.length) visible.value = false
   }

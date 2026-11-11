@@ -28,6 +28,8 @@ const emit = defineEmits<{ close: [] }>()
 
 const api = window.api
 const store = useSessionStore()
+// 挂载期间占用传输会话；若 ensureTransport 尚未返回就关闭，返回结算会看到消费者已归零。
+const releaseTransport = store.retainTransport(props.saved.id)
 
 /** 设备的传输会话 id（一切 docker 命令的承载） */
 const tid = ref<string | null>(null)
@@ -100,7 +102,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   }
   if (id === 'logs') {
     try {
-      await store.viewContainerLogs(tid.value, box, props.saved.id)
+      await store.viewContainerLogs(tid.value, box, props.saved.id, undefined, undefined, true)
     } catch (err) {
       pushToast(`查看日志失败：${errorText(err)}`)
     }
@@ -354,7 +356,7 @@ onBeforeUnmount(() => {
   // 进行中的拉取随抽屉关闭取消（进度界面都没了，别让远端白跑）；
   // 然后按空闲口径回收传输会话（侧栏没展开/无容器标签挂着就断开）
   if (pulling.value) cancelPull()
-  store.releaseTransportIfIdle(props.saved.id)
+  releaseTransport()
 })
 </script>
 

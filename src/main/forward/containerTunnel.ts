@@ -3,6 +3,14 @@ import type { AgentManager, TunnelEventPayload } from '../agent/AgentManager'
 import { agentVersionOlder, TUNNEL_MIN_AGENT_VERSION } from '../../shared/agentVersion'
 import type { ForwardRule } from '../../shared/types'
 
+/** 每条 socket 最多允许的 tunnel_data RPC credit；满窗暂停读，确认后恢复。 */
+const TUNNEL_DATA_WINDOW = 4
+
+interface TunnelFlow {
+  inFlight: number
+  paused: boolean
+}
+
 /** 隧道规则的目标面：agent 目标（会话+容器）+ 要拨的地址 */
 interface TunnelTarget {
   sessionId: string
@@ -22,11 +30,14 @@ interface TunnelTarget {
  * 背压两个方向都是「堵到 TCP 缓冲为止」：
  *   容器→本机：agent 同步写 serve 通道，本机读得慢 agent 自然停读
  *   本机→容器：agent 侧每连接有界队列（溢出断流，见 agent/tunnel.go）
+ * 本机→容器另有每连接 4 RPC credit，满窗 pause、确认后 resume；
  * 本机侧 socket 写入不设队列上限，writableLength 爆表时断流兜底。
  */
 export class ContainerTunnelManager {
   /** connKey = `${ruleId}:${connId}` → 本机侧 socket（-R 是本机拨出去的，-L 是被连进来的） */
   private sockets = new Map<string, net.Socket>()
+  /** connKey → 主进程发送窗口；不让 slow RPC 变成无限 pending/base64。 */
+  private flows = new Map<string, TunnelFlow>()
   /** ruleId → 隧道目标（会话 + 容器 + 拨号地址） */
   private targets = new Map<string, TunnelTarget>()
   /** agent 目标 key（sessionId::container）→ 该目标下的规则 id 集合 */
@@ -113,16 +124,9 @@ export class ContainerTunnelManager {
     const connId = this.nextConn
     const connKey = `${rule.id}:${connId}`
     this.sockets.set(connKey, socket)
-    socket.on('data', (chunk) => {
-      void this.agent
-        .call(target.sessionId, target.containerName, 'tunnel_data', {
-          id: rule.id,
-          conn: connId,
-          data: chunk.toString('base64')
-        })
-        .catch(() => undefined)
-    })
+    this.pipeSocketData(connKey, target, rule.id, connId, socket)
     const bye = (): void => {
+      this.flows.delete(connKey)
       if (!this.sockets.delete(connKey)) return
       socket.destroy()
       void this.agent
@@ -141,6 +145,40 @@ export class ContainerTunnelManager {
       .catch(bye)
   }
 
+  /** socket → agent 的每连接 credit：只暂停内核/流读侧，不另建无限应用队列。 */
+  private pipeSocketData(
+    connKey: string,
+    target: TunnelTarget,
+    ruleId: string,
+    connId: number,
+    socket: net.Socket
+  ): void {
+    const flow: TunnelFlow = { inFlight: 0, paused: false }
+    this.flows.set(connKey, flow)
+    socket.on('data', (chunk) => {
+      if (this.flows.get(connKey) !== flow) return
+      flow.inFlight++
+      if (flow.inFlight >= TUNNEL_DATA_WINDOW && !flow.paused) {
+        flow.paused = true
+        socket.pause()
+      }
+      void this.agent
+        .call(target.sessionId, target.containerName, 'tunnel_data', {
+          id: ruleId,
+          conn: connId,
+          data: chunk.toString('base64')
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          flow.inFlight--
+          if (flow.paused && flow.inFlight < TUNNEL_DATA_WINDOW && this.flows.get(connKey) === flow) {
+            flow.paused = false
+            socket.resume()
+          }
+        })
+    })
+  }
+
   /** 规则移除：关远端监听 + 断本机 socket + 摘意图（最后一个摘掉时连回调一起收） */
   async stop(rule: ForwardRule): Promise<void> {
     const target = this.targets.get(rule.id)
@@ -152,10 +190,11 @@ export class ContainerTunnelManager {
       this.byAgentKey.delete(akey)
       this.agent.setTunnelHandler(target.sessionId, target.containerName, null)
     }
-    this.agent.removeTunnelIntent(target.sessionId, target.containerName, rule.id)
     await this.agent
       .call(target.sessionId, target.containerName, 'tunnel_close', { id: rule.id })
       .catch(() => undefined)
+    // 持有意图保留到 close 之后：若 close 重建了通道，最后移除意图会负责 stop。
+    this.agent.removeTunnelIntent(target.sessionId, target.containerName, rule.id)
     // 容器 -L 的本机监听：先停接受新连接，再断存量
     const server = this.servers.get(rule.id)
     if (server) {
@@ -171,6 +210,7 @@ export class ContainerTunnelManager {
   private destroyRuleSockets(ruleId: string): void {
     for (const [key, sock] of [...this.sockets]) {
       if (key.startsWith(`${ruleId}:`)) {
+        this.flows.delete(key)
         sock.destroy()
         this.sockets.delete(key)
       }
@@ -197,17 +237,9 @@ export class ContainerTunnelManager {
       // -R 模式：容器里来了新连接 → 本机拨目标
       const sock = net.connect(target.targetPort, target.targetHost)
       this.sockets.set(connKey, sock)
-      sock.on('data', (chunk) => {
-        // fire-and-forget：顺序由 serve 通道单写点保证；通道死了数据帧本就该丢
-        void this.agent
-          .call(target.sessionId, target.containerName, 'tunnel_data', {
-            id: ev.id,
-            conn: ev.conn,
-            data: chunk.toString('base64')
-          })
-          .catch(() => undefined)
-      })
+      this.pipeSocketData(connKey, target, ev.id, ev.conn, sock)
       const bye = (): void => {
+        this.flows.delete(connKey)
         if (!this.sockets.delete(connKey)) return // 已收口过
         void this.agent
           .call(target.sessionId, target.containerName, 'tunnel_close', { id: ev.id, conn: ev.conn })
@@ -223,6 +255,7 @@ export class ContainerTunnelManager {
       if (!sock || !ev.data) return
       // 本机侧应用不读了（writableLength 爆表）→ 断流兜底，不无限积内存
       if (sock.writableLength > 16 * 1024 * 1024) {
+        this.flows.delete(connKey)
         sock.destroy()
         this.sockets.delete(connKey)
         return
@@ -234,6 +267,7 @@ export class ContainerTunnelManager {
     if (ev.op === 'close') {
       const sock = this.sockets.get(connKey)
       if (sock) {
+        this.flows.delete(connKey)
         this.sockets.delete(connKey)
         // 不能 destroy：拨号在途（pending）时 destroy 会把已缓冲的写整个丢掉 ——
         // 容器侧「一接一发即关」的短连接（printf|nc、健康检查）open→data→close

@@ -1,5 +1,5 @@
 /**
- * 容器传输的直通道：agent ≥0.4.0 的分块流式读写。
+ * 容器传输的直通道：agent ≥0.9.6 的连续区间分块流式读写。
  *
  * 取代「SFTP → 宿主机 /tmp 中转 → docker cp」两段接力：
  *  - 少一次宿主机落盘（中转目录、清理竞态全没了）
@@ -15,12 +15,14 @@
  */
 import fs from 'node:fs/promises'
 import type { AgentManager } from '../agent/AgentManager'
+import { createStreamCancellation, STREAM_CANCELED } from './streamCancellation.ts'
+
+export { STREAM_CANCELED } from './streamCancellation.ts'
 
 const CHUNK = 1024 * 1024
 /** 上传/下载各自的在途块数上限；内存 ≈ WINDOW × (1MB + base64 1.4MB) ≈ 15MB */
 const WINDOW = 6
 /** 与 TransferManager 的取消哨兵同文案（run() 按它判定「已取消」而不是「失败」） */
-export const STREAM_CANCELED = '__transfer_canceled__'
 
 export interface AgentStreamIO {
   upload(
@@ -129,28 +131,9 @@ export function createAgentStreamIO(
        * 探路请求（小文件会多发几个越界读，返回空+eof，无害有界）。响应乱序
        * 到达没关系：块带 offset，写本地也用 offset。
        */
-      let canceled = false
-      let rejectInterrupted!: (err: Error) => void
-      const interrupted = new Promise<never>((_resolve, reject) => {
-        rejectInterrupted = reject
-      })
-      void interrupted.catch(() => undefined)
-      const dispose = registerCancel?.(() => {
-        if (canceled) return
-        canceled = true
-        rejectInterrupted(new Error(STREAM_CANCELED))
-      })
-      const check = (): void => {
-        if (isCanceled() && !canceled) {
-          canceled = true
-          rejectInterrupted(new Error(STREAM_CANCELED))
-        }
-        if (canceled) throw new Error(STREAM_CANCELED)
-      }
-      const wait = <T>(pending: Promise<T>): Promise<T> => {
-        check()
-        return Promise.race([pending, interrupted])
-      }
+      const ctl = createStreamCancellation(isCanceled, registerCancel)
+      const check = ctl.check
+      const wait = ctl.wait
 
       try {
         check()
@@ -182,7 +165,7 @@ export function createAgentStreamIO(
                 // 取消不等多达 WINDOW 个在途 RPC 回包；迟到的响应由 race 吃掉。
                 r = await wait(call('fs_read_chunk', { path: remotePath, offset: pos, length: CHUNK }))
               } catch (err) {
-                if (canceled) throw err
+                if (ctl.cancelled()) throw err
                 if (!failure) failure = err as Error
                 return
               }
@@ -213,7 +196,7 @@ export function createAgentStreamIO(
           await fh.close()
         }
       } finally {
-        dispose?.()
+        ctl.dispose()
       }
     }
   }

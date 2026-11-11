@@ -5,10 +5,10 @@
  *
  * 用法：KIMI_TEST_KEY=sk-... node scripts/verify-ai-usage.mjs
  * 前置：npm run build
- * 注意：账号会留在真实配置里（用户自己的 key）；脚本结尾不删除，需要清理去设置里删
+ * 账号只写入本次隔离 userData，脚本结束后整个临时目录删除。
  */
-import { _electron as electron } from 'playwright'
 import { mkdirSync } from 'node:fs'
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
 mkdirSync('shots', { recursive: true })
 const KEY = process.env.KIMI_TEST_KEY
@@ -17,27 +17,7 @@ if (!KEY) {
   process.exit(1)
 }
 
-let failed = false
-const check = (name, cond, extra = '') => {
-  console.log(cond ? `  ok  ${name}` : `  FAIL ${name} ${extra}`)
-  if (!cond) failed = true
-}
-
-// 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try {
-  if (process.platform === 'win32') {
-    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
-    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    ], { stdio: 'ignore' })
-  } else {
-    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
-  }
-} catch { /* 没有正好 */ }
-const app = await electron.launch({ args: ['.'] })
-const win = await app.firstWindow()
-win.on('dialog', (d) => void d.accept())
-await win.waitForLoadState('domcontentloaded')
+await withIsolatedElectron(async ({ win, check }) => {
 await win.waitForTimeout(1500)
 
 // ---- 已有账号就直接用（可重复跑），没有走一遍 UI 添加 ----
@@ -95,7 +75,4 @@ await win.locator('.ai-pop').waitFor({ timeout: 3000 })
 const popText = await win.locator('.ai-pop').textContent()
 check('浮层含 5 小时窗与每周两行', (popText ?? '').includes('5 小时窗') && (popText ?? '').includes('每周'), (popText ?? '').slice(0, 120))
 await win.screenshot({ path: 'shots/90-ai-usage.png' })
-
-await app.close()
-console.log(failed ? '\n有失败项' : '\n全部通过')
-process.exit(failed ? 1 : 0)
+})

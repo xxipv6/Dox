@@ -3,13 +3,16 @@
 // 由应用侧拨真正的目标地址。
 //
 // 帧格式（agent → 应用）：
-//   {"event":"tunnel","data":{"id":"规则id","conn":7,"op":"open"}}
-//   {"event":"tunnel","data":{"id":"规则id","conn":7,"op":"data","data":"base64…"}}
-//   {"event":"tunnel","data":{"id":"规则id","conn":7,"op":"close","err":"…"}}
+//
+//	{"event":"tunnel","data":{"id":"规则id","conn":7,"op":"open"}}
+//	{"event":"tunnel","data":{"id":"规则id","conn":7,"op":"data","data":"base64…"}}
+//	{"event":"tunnel","data":{"id":"规则id","conn":7,"op":"close","err":"…"}}
+//
 // 应用 → agent（请求/响应）：
-//   tunnel_start  {id, listen_addr}            → {listening:true}（重复 id = 幂等重开）
-//   tunnel_data   {id, conn, data(base64)}     → {}（无响应语义，回包只是时序确认）
-//   tunnel_close  {id, conn?}                  → {}（conn 缺省 = 整条隧道停掉）
+//
+//	tunnel_start  {id, listen_addr}            → {listening:true}（重复 id = 幂等重开）
+//	tunnel_data   {id, conn, data(base64)}     → {}（无响应语义，回包只是时序确认）
+//	tunnel_close  {id, conn?}                  → {}（conn 缺省 = 整条隧道停掉）
 //
 // 背压：conn→应用方向靠「同步写 stdout」自然传导（应用读得慢，agent 写阻塞，
 // conn 读循环跟着停，内核缓冲顶回对端）。应用→conn 方向走每连接有界队列，
@@ -29,22 +32,23 @@ import (
 )
 
 const (
-	tunnelChunkSize   = 32 * 1024
-	tunnelSendBufCap  = 256 // 每连接待发队列上限（256 × 32KB = 8MB）
+	tunnelChunkSize  = 32 * 1024
+	tunnelSendBufCap = 256 // 每连接待发队列上限（256 × 32KB = 8MB）
 )
 
 type tunnelEventData struct {
 	ID   string `json:"id"`
 	Conn uint64 `json:"conn"`
-	Op   string `json:"op"`           // open | data | close
+	Op   string `json:"op"`             // open | data | close
 	Data string `json:"data,omitempty"` // base64
 	Err  string `json:"err,omitempty"`
 }
 
 type tunnelConn struct {
-	nc   net.Conn // 拨号模式下 dial 完成前是 nil（send 队列照常缓冲）
-	send chan []byte
-	done chan struct{} // closeOnce 收口信号（dial 在途时取消用）
+	mu     sync.Mutex
+	nc     net.Conn // publish 与 closeOnce 在 mu 下线性化；泵启动后不再改写
+	send   chan []byte
+	done   chan struct{} // closeOnce 收口信号（dial 在途时取消用）
 	once   sync.Once
 	hub    *tunnelHub
 	tunID  string
@@ -57,13 +61,30 @@ func (c *tunnelConn) emit(op, data, errStr string) {
 	}})
 }
 
+// publish 把 nc、open 事件与 close 线性化：open 先于任何后续 close，
+// 若 close 已发生则拒绝发布，由调用方关闭迟来的 socket。
+func (c *tunnelConn) publish(nc net.Conn) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	c.nc = nc
+	c.emit("open", "", "")
+	return true
+}
+
 // closeOnce：读循环/写循环/外部 tunnel_close 三路都可能来关，只真正关一次
 func (c *tunnelConn) closeOnce(op, errStr string) {
 	c.once.Do(func() {
-		close(c.send)
+		c.mu.Lock()
 		close(c.done)
-		if c.nc != nil {
-			_ = c.nc.Close()
+		nc := c.nc
+		c.mu.Unlock()
+		if nc != nil {
+			_ = nc.Close()
 		}
 		c.hub.removeConn(c.tunID, c.connID)
 		if op != "" {
@@ -78,20 +99,28 @@ type tunnel struct {
 }
 
 type tunnelHub struct {
-	enc      *safeEncoder
-	mu       sync.Mutex
-	tunnels  map[string]*tunnel
-	nextConn uint64
+	enc         *safeEncoder
+	listen      func(network, address string) (net.Listener, error)
+	dialTimeout func(network, address string, timeout time.Duration) (net.Conn, error)
+	mu          sync.Mutex
+	tunnels     map[string]*tunnel
+	nextConn    uint64
 	// 应用侧发起拨号的连接（容器版 -L：本机监听、容器内去拨）——
 	// 不挂在任何 listener 下，键为 "规则id:connId"
 	dials map[string]*tunnelConn
 }
 
 func newTunnelHub(enc *safeEncoder) *tunnelHub {
-	return &tunnelHub{enc: enc, tunnels: make(map[string]*tunnel), dials: make(map[string]*tunnelConn)}
+	return &tunnelHub{
+		enc: enc, listen: net.Listen, dialTimeout: net.DialTimeout,
+		tunnels: make(map[string]*tunnel), dials: make(map[string]*tunnelConn),
+	}
 }
 
-var errTunnelExists = errors.New("隧道 id 已存在（先 tunnel_close 再开）")
+var (
+	errTunnelExists     = errors.New("隧道 id 已存在（先 tunnel_close 再开）")
+	errTunnelConnExists = errors.New("隧道 conn 已存在")
+)
 
 // start：起监听 + accept 循环。监听本身在主循环里做（快），失败直接回错。
 func (h *tunnelHub) start(params json.RawMessage) (interface{}, error) {
@@ -102,7 +131,7 @@ func (h *tunnelHub) start(params json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(params, &p); err != nil || p.ID == "" || p.ListenAddr == "" {
 		return nil, errors.New("tunnel_start 需要 id 与 listen_addr")
 	}
-	ln, err := net.Listen("tcp", p.ListenAddr)
+	ln, err := h.listen("tcp", p.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("监听 %s 失败: %w", p.ListenAddr, err)
 	}
@@ -127,12 +156,20 @@ func (h *tunnelHub) acceptLoop(tunID string, t *tunnel) {
 			return // listener 被 close（tunnel_close / stop / 进程退出）
 		}
 		h.mu.Lock()
+		if h.tunnels[tunID] != t {
+			h.mu.Unlock()
+			_ = nc.Close() // Accept 返回前 listener 已被 close，不能注册成孤儿连接
+			return
+		}
 		h.nextConn++
 		connID := h.nextConn
-		c := &tunnelConn{nc: nc, send: make(chan []byte, tunnelSendBufCap), done: make(chan struct{}), hub: h, tunID: tunID, connID: connID}
+		c := &tunnelConn{send: make(chan []byte, tunnelSendBufCap), done: make(chan struct{}), hub: h, tunID: tunID, connID: connID}
 		t.conns[connID] = c
 		h.mu.Unlock()
-		c.emit("open", "", "")
+		if !c.publish(nc) {
+			_ = nc.Close()
+			continue
+		}
 		go h.readLoop(c)
 		go h.writeLoop(c)
 	}
@@ -158,12 +195,18 @@ func (h *tunnelHub) readLoop(c *tunnelConn) {
 	}
 }
 
-// 应用 → 容器：队列保证单连接内顺序；队列被关停（close 掉 chan）即退出
+// 应用 → 容器：队列保证单连接内顺序；done 关闭即退出，send 本身永不关闭，
+// 因此 findConn 与 close 并发时不会出现 send on closed channel。
 func (h *tunnelHub) writeLoop(c *tunnelConn) {
-	for chunk := range c.send {
-		if _, err := c.nc.Write(chunk); err != nil {
-			c.closeOnce("close", err.Error())
+	for {
+		select {
+		case <-c.done:
 			return
+		case chunk := <-c.send:
+			if _, err := c.nc.Write(chunk); err != nil {
+				c.closeOnce("close", err.Error())
+				return
+			}
 		}
 	}
 }
@@ -187,6 +230,8 @@ func (h *tunnelHub) data(params json.RawMessage) error {
 		return nil // 连接已经没了（对端先关/溢出断开）：晚到的数据帧直接丢
 	}
 	select {
+	case <-c.done:
+		return nil
 	case c.send <- raw:
 	default:
 		c.closeOnce("close", "发送队列溢出（对端不读了），连接断开")
@@ -251,24 +296,28 @@ func (h *tunnelHub) dial(params json.RawMessage) (interface{}, error) {
 	key := fmt.Sprintf("%s:%d", p.ID, p.Conn)
 	c := &tunnelConn{send: make(chan []byte, tunnelSendBufCap), done: make(chan struct{}), hub: h, tunID: p.ID, connID: p.Conn}
 	h.mu.Lock()
+	if t := h.tunnels[p.ID]; t != nil && t.conns[p.Conn] != nil {
+		h.mu.Unlock()
+		return nil, errTunnelConnExists
+	}
+	if h.dials[key] != nil {
+		h.mu.Unlock()
+		return nil, errTunnelConnExists
+	}
 	h.dials[key] = c
 	h.mu.Unlock()
 
 	go func() {
-		nc, err := net.DialTimeout("tcp", p.Target, 10*time.Second)
+		nc, err := h.dialTimeout("tcp", p.Target, 10*time.Second)
 		if err != nil {
 			c.closeOnce("close", fmt.Sprintf("容器内拨 %s 失败: %v", p.Target, err))
 			return
 		}
-		// 拨号期间应用侧可能已经关了这条连接：nc 直接关，不起泵
-		select {
-		case <-c.done:
+		// 拨号期间应用侧可能已经关了这条连接：publish 原子拒绝迟来的 nc。
+		if !c.publish(nc) {
 			_ = nc.Close()
 			return
-		default:
 		}
-		c.nc = nc
-		c.emit("open", "", "")
 		go h.readLoop(c)
 		go h.writeLoop(c)
 	}()

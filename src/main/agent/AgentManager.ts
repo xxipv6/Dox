@@ -11,6 +11,16 @@ import { execCapture } from '../ssh/remoteExec'
 import { mkdirRemoteRecursive } from '../sftp/sftpUtils'
 import { assertContainerTarget, parseDockerInfoPlatform } from '../container/runtime'
 import { runLocal } from '../container/localRun'
+import {
+  HOST_AGENT_UNINSTALL_COMMAND,
+  HOST_UNINSTALL_COMMAND,
+  assertAgentUninstallReceipt,
+  isAgentUninstallUnsupported,
+  localContainerAgentUninstallArgs,
+  localContainerUninstallArgs,
+  remoteContainerAgentUninstallCommand,
+  remoteContainerUninstallCommand
+} from './agentUninstall'
 import { mergeEnv, resolveShellEnv } from '../local/shellEnv'
 import { isLocalContainerTarget } from '../../shared/sessionId'
 import { BUNDLED_AGENT_VERSION } from '../../shared/agentVersion'
@@ -312,6 +322,7 @@ export class AgentManager {
 
   /** 升级安装后掐掉在跑的旧通道：serve 进程内存里还是旧二进制，重连才吃新版本 */
   private restartChannelAfterInstall(key: string): void {
+    this.uninstalled.delete(key)
     const ch = this.channels.get(key)
     if (ch) this.dropChannel(key, ch)
   }
@@ -324,6 +335,8 @@ export class AgentManager {
    * docker cp 保留权限位，容器里不需要 chmod（distroless 没有 chmod）。
    */
   async install(sessionId: string, containerName?: string): Promise<AgentStatus> {
+    const key = keyOf(sessionId, containerName)
+    if (this.uninstalling.has(key)) throw new Error('agent 正在卸载，请稍候')
     // 本机容器：本机文件系统直达，docker cp 直拷，不需要 SSH 中转
     if (isLocalContainerTarget(sessionId)) {
       if (!containerName) throw new Error('本机宿主机不在助手支持范围（只有 Linux 构建）')
@@ -403,6 +416,117 @@ export class AgentManager {
     return status
   }
 
+  /** 停止目标 serve 并清理主进程所有权；只在显式 uninstall 中调用。 */
+  private async closeForUninstall(key: string): Promise<void> {
+    // 建连在途时先等它落定，避免删除后迟到的握手又把通道塞回表里。
+    const establishing = this.connecting.get(key)
+    if (establishing) await establishing.catch(() => undefined)
+    const ch = this.channels.get(key)
+    if (ch) {
+      let timer: NodeJS.Timeout | undefined
+      await Promise.race([
+        this.callOn(ch, 'stop', {}).catch(() => undefined),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, 1500) })
+      ])
+      if (timer) clearTimeout(timer)
+      this.dropChannel(key, ch)
+    } else {
+      // 没有 serve 通道也要让隧道消费者收口，不能只删一张回调表。
+      this.tunnelHandlers.get(key)?.({ closed: true })
+    }
+    this.tunnelHandlers.delete(key)
+    this.watches.delete(key)
+    for (const [handlerKey, registration] of [...this.archiveHandlers]) {
+      if (!handlerKey.startsWith(`${key}::archive::`)) continue
+      this.archiveHandlers.delete(handlerKey)
+      registration.cb({ id: registration.id, type: 'done', error: 'agent 已卸载' })
+    }
+    this.cache.delete(key)
+  }
+
+  /**
+   * 用户显式卸载：先停 serve，再让 0.9.6+ agent 自删除；旧版仅在不认识
+   * uninstall 子命令时回退固定路径删除。任何其他错误都保留给调用方。
+   */
+  async uninstall(sessionId: string, containerName?: string): Promise<AgentStatus> {
+    const key = keyOf(sessionId, containerName)
+    if (this.uninstalling.has(key)) throw new Error('agent 正在卸载，请稍候')
+    if (this.uninstalled.has(key)) return { installed: false }
+    this.uninstalling.add(key)
+    this.uninstalled.add(key)
+    try {
+      return await this.performUninstall(sessionId, containerName)
+    } catch (err) {
+      // 删除结果未知时解除墓碑，让重探和显式重试恢复真实状态。
+      this.uninstalled.delete(key)
+      throw err
+    } finally {
+      this.uninstalling.delete(key)
+    }
+  }
+
+  private async performUninstall(sessionId: string, containerName?: string): Promise<AgentStatus> {
+    const key = keyOf(sessionId, containerName)
+    await this.closeForUninstall(key)
+    try {
+      if (isLocalContainerTarget(sessionId)) {
+        if (!containerName) throw new Error('本机宿主机不在助手支持范围')
+        assertContainerTarget(containerName)
+        const binary = await this.resolveRuntime(sessionId)
+        if (!binary) throw new Error('本机没有可用的容器运行时')
+        try {
+          const res = await runLocal(binary, localContainerAgentUninstallArgs(containerName), { timeoutMs: 10_000 })
+          assertAgentUninstallReceipt(res.stdout)
+        } catch (err) {
+          if (!isAgentUninstallUnsupported(err)) throw err
+          await runLocal(binary, localContainerUninstallArgs(containerName), { timeoutMs: 10_000 }).catch((fallbackErr) => {
+            if (/not found|no such file|executable file not found/i.test((fallbackErr as Error).message)) {
+              throw new Error('旧版容器助手不能直接自卸载，且容器没有可用 shell；请先升级助手再卸载')
+            }
+            throw fallbackErr
+          })
+        }
+      } else {
+        const client = this.sessions.getClient(sessionId)
+        if (!client) throw new Error('会话已断开，无法卸载')
+        if (containerName) {
+          assertContainerTarget(containerName)
+          const binary = await this.resolveRuntime(sessionId)
+          if (!binary) throw new Error('这台远端没有可用的容器运行时')
+          try {
+            const res = await execCapture(client, remoteContainerAgentUninstallCommand(binary, containerName), { timeoutMs: 10_000 })
+            assertAgentUninstallReceipt(res.stdout)
+          } catch (err) {
+            if (!isAgentUninstallUnsupported(err)) throw err
+            await execCapture(client, remoteContainerUninstallCommand(binary, containerName), { timeoutMs: 10_000 }).catch((fallbackErr) => {
+              if (/not found|no such file|executable file not found/i.test((fallbackErr as Error).message)) {
+                throw new Error('旧版容器助手不能直接自卸载，且容器没有可用 shell；请先升级助手再卸载')
+              }
+              throw fallbackErr
+            })
+          }
+        } else {
+          try {
+            const res = await execCapture(client, HOST_AGENT_UNINSTALL_COMMAND, { timeoutMs: 10_000 })
+            assertAgentUninstallReceipt(res.stdout)
+          } catch (err) {
+            if (!isAgentUninstallUnsupported(err)) throw err
+          }
+          // 自卸载只负责二进制；固定清掉当前用户 HOME 下其余 Dox 私有内容。
+          await execCapture(client, HOST_UNINSTALL_COMMAND, { timeoutMs: 10_000 })
+        }
+      }
+      const status: AgentStatus = { installed: false }
+      this.cache.set(key, status)
+      return status
+    } catch (err) {
+      // 删除可能只完成一半：不假装 installed=false，下次状态查询必须真探。
+      this.cache.delete(key)
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`卸载失败：${message}`)
+    }
+  }
+
   /** 会话断开时清掉它的全部目标（宿主机 + 各容器）的缓存与通道；订阅意图保留待重建 */
   invalidate(sessionId: string): void {
     for (const [key, ch] of [...this.channels]) {
@@ -417,6 +541,11 @@ export class AgentManager {
   // ---- serve 通道（长连接 NDJSON，端口推送等流式能力的承载）----
 
   private channels = new Map<string, Channel>()
+  /** key 级 single-flight：握手完成前所有调用共享同一个建立 Promise。 */
+  private connecting = new Map<string, Promise<Channel>>()
+  /** 删除期间及删除成功后阻止后台重建 serve；安装成功才解除墓碑。 */
+  private uninstalling = new Set<string>()
+  private uninstalled = new Set<string>()
 
   /**
    * 流式能力的**订阅意图**：谁订阅了、watch 是否在活通道上跑着。
@@ -427,6 +556,8 @@ export class AgentManager {
 
   private watchEntry(sessionId: string, containerName?: string): WatchEntry {
     const key = keyOf(sessionId, containerName)
+    if (this.uninstalling.has(key)) throw new Error('agent 正在卸载，请稍候')
+    if (this.uninstalled.has(key)) throw new Error('agent 已卸载，请先安装')
     let w = this.watches.get(key)
     if (!w) {
       w = {
@@ -525,7 +656,14 @@ export class AgentManager {
 
   /** 通道死的统一处理：摘表、清空 pending、标记意图待重建、通知渲染层降级 */
   private dropChannel(key: string, ch: Channel): void {
-    if (this.channels.get(key) === ch) this.channels.delete(key)
+    // 迟到的旧 close/error 只能收自己的流，绝不能清掉同 key 新通道的处理器。
+    if (this.channels.get(key) !== ch) {
+      for (const p of ch.pending.values()) p.reject(new Error('agent 通道已断开'))
+      ch.pending.clear()
+      try { ch.stream.close() } catch { /* 已死 */ }
+      return
+    }
+    this.channels.delete(key)
     for (const p of ch.pending.values()) p.reject(new Error('agent 通道已断开'))
     ch.pending.clear()
     try { ch.stream.close() } catch { /* 已死 */ }
@@ -605,11 +743,25 @@ export class AgentManager {
    * 建立（或复用）serve 通道：启动 agent 进程、完成 hello 握手。
    * 宿主机直接 exec；容器经 docker exec -i（不要 -t，pty 会把 NDJSON 搅脏）。
    */
-  private async connect(sessionId: string, containerName?: string): Promise<Channel> {
+  private connect(sessionId: string, containerName?: string): Promise<Channel> {
     const key = keyOf(sessionId, containerName)
+    if (this.uninstalling.has(key)) return Promise.reject(new Error('agent 正在卸载，请稍候'))
+    if (this.uninstalled.has(key)) return Promise.reject(new Error('agent 已卸载，请先安装'))
+    // connecting 优先于 channels：openChannel 在 hello 前先登记流，不能让后来者越过握手。
+    const pending = this.connecting.get(key)
+    if (pending) return pending
     const existing = this.channels.get(key)
-    if (existing) return existing
+    if (existing) return Promise.resolve(existing)
 
+    const establishing = this.openChannel(sessionId, containerName).finally(() => {
+      if (this.connecting.get(key) === establishing) this.connecting.delete(key)
+    })
+    this.connecting.set(key, establishing)
+    return establishing
+  }
+
+  private async openChannel(sessionId: string, containerName?: string): Promise<Channel> {
+    const key = keyOf(sessionId, containerName)
     let stream: ChannelStream
     if (isLocalContainerTarget(sessionId)) {
       // 本机容器：本机 spawn docker exec -i 承载 NDJSON（-i 不开 pty，pty 会把 NDJSON 搅脏）

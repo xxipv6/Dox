@@ -1,14 +1,11 @@
 /**
- * 用真实 UI 验证关键流程：保存设备 → 删除设备 → SSH 连接（含主机指纹确认）。
- * 通过 Playwright 捕获渲染进程的 dialog/alert 与 console 报错。
+ * 用真实 UI 验证关键流程：保存设备 → 删除设备 → SSH 错误认证必须可见。
  * 用法：node scripts/verify-ui-flows.mjs [host] [port] [user]
  */
-import { _electron as electron } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
-// 不再硬编码测试主机：公开仓库里写死自己的服务器地址，等于公开
-// 「这台机器开着 22 端口」，改用参数或环境变量传入。
 const host = process.argv[2] ?? process.env.DOX_TEST_HOST
 if (!host) {
   console.error('用法: node scripts/verify-ui-flows.mjs <host> [port] [user]，或设置 DOX_TEST_HOST')
@@ -18,118 +15,77 @@ const port = process.argv[3] ?? '22'
 const user = process.argv[4] ?? 'root'
 mkdirSync('shots', { recursive: true })
 
-// 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try {
-  if (process.platform === 'win32') {
-    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
-    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    ], { stdio: 'ignore' })
-  } else {
-    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
-  }
-} catch { /* 没有正好 */ }
-const app = await electron.launch({ args: ['.'] })
-const win = await app.firstWindow()
-
-// 捕获渲染进程报错与原生 confirm
-const consoleErrors = []
-win.on('console', (m) => {
-  if (m.type() === 'error') consoleErrors.push(m.text())
-})
-win.on('pageerror', (e) => consoleErrors.push(`PAGEERROR ${e.message}`))
-win.on('dialog', async (d) => {
-  console.log(`  [原生对话框] ${d.type()}: ${d.message().slice(0, 80)}`)
-  await d.accept()
-})
-
-await win.waitForLoadState('domcontentloaded')
-
-/*
- * 先清掉上次运行留下的布局快照再重新加载。
- *
- * 本脚本上一轮会留下「密码错、连不上」的 SSH 标签，重启后布局恢复把它恢复
- * 成活动标签 —— 那个标签没有终端，于是所有 .terminal-container 都是 v-show
- * 隐藏的、clientWidth 为 0，下面这个等待必然超时。表现是「第一次能跑通、
- * 第二次必挂」，与代码改动无关。
- */
-await win.waitForTimeout(1200)
-await win.evaluate(() => window.api.setLayout({ tabs: [] }))
-await win.reload()
-await win.waitForLoadState('domcontentloaded')
-await win.waitForFunction(
-  () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
-  // 签名是 (fn, arg, options)：漏掉 arg 会把 timeout 当成页面函数参数，
-  // 静默退回默认的 30 秒 —— 写在代码里的值从来没生效过。
-  undefined, { timeout: 15000 }
-)
-
-const devices = () =>
-  win.evaluate(() =>
-    [...document.querySelectorAll('.device .device-name')].map((e) => e.textContent.trim())
+await withIsolatedElectron(async ({ win, check }) => {
+  const consoleErrors = []
+  win.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text())
+  })
+  await win.waitForTimeout(1200)
+  await win.evaluate(() => window.api.setLayout({ tabs: [] }))
+  await win.reload()
+  await win.waitForLoadState('domcontentloaded')
+  await win.waitForFunction(
+    () => [...document.querySelectorAll('.terminal-container')].some((el) => el.clientWidth > 200),
+    undefined,
+    { timeout: 15000 }
   )
 
-console.log('初始设备:', JSON.stringify(await devices()))
+  const devices = () => win.evaluate(() =>
+    [...document.querySelectorAll('.device .device-name')].map((el) => el.textContent.trim())
+  )
+  const expectedName = `${user}@${host}`
+  console.log('初始设备:', JSON.stringify(await devices()))
 
-// ---------- 1. 保存一个设备 ----------
-await win.locator('button[title="添加设备"]').click()
-await win.waitForTimeout(400)
-await win.locator('input[placeholder^="192.168"]').fill(host)
-await win.locator('input[placeholder="root"]').fill(user)
-await win.locator('input[placeholder="登录密码"]').fill('test-password-for-ui-flow')
-await win.locator('button:has-text("保存")').first().click()
-await win.waitForTimeout(900)
-console.log('保存后设备:', JSON.stringify(await devices()))
+  // ---------- 1. 保存一个设备 ----------
+  await win.locator('button[title="添加设备"]').click()
+  await win.locator('input[placeholder^="192.168"]').fill(host)
+  await win.locator('input.port').fill(String(port))
+  await win.locator('input[placeholder="root"]').fill(user)
+  await win.locator('input[placeholder="登录密码"]').fill('test-password-for-ui-flow')
+  await win.locator('button:text-is("保存")').click()
+  await win.waitForFunction((name) =>
+    [...document.querySelectorAll('.device .device-name')].some((el) => el.textContent.trim() === name),
+  expectedName, { timeout: 5000 })
+  const afterSave = await devices()
+  check('保存设备后列表包含新设备', afterSave.includes(expectedName), JSON.stringify(afterSave))
 
-// ---------- 2. 删除刚保存的设备 ----------
-const before = await devices()
-if (before.length) {
-  await win.locator('.device').last().hover()
-  await win.locator('.device').last().locator('button[title="删除"]').click()
-  await win.locator('.confirm-dialog button', { hasText: '确定' }).click()
-  await win.waitForTimeout(1200)
-  const after = await devices()
-  console.log('删除后设备:', JSON.stringify(after))
-  console.log(after.length < before.length ? '  => 删除成功' : '  => 删除失败（设备仍在）')
-} else {
-  console.log('  => 没有设备可删，跳过')
-}
+  // ---------- 2. 删除刚保存的设备 ----------
+  const savedRow = win.locator('.device').filter({ has: win.locator(`.device-name:text-is("${expectedName}")`) })
+  await savedRow.hover()
+  await savedRow.locator('button[title="删除"]').click()
+  await win.locator('.confirm-dialog button:text-is("确定")').click()
+  await win.waitForFunction((name) =>
+    ![...document.querySelectorAll('.device .device-name')].some((el) => el.textContent.trim() === name),
+  expectedName, { timeout: 5000 })
+  const afterDelete = await devices()
+  check('删除后新设备不再出现', !afterDelete.includes(expectedName), JSON.stringify(afterDelete))
 
-// ---------- 3. SSH 连接（假密码，验证错误可见） ----------
-await win.locator('button[title="添加设备"]').click()
-await win.waitForTimeout(400)
-await win.locator('input[placeholder^="192.168"]').fill(host)
-await win.locator('input[placeholder="root"]').fill(user)
-await win.locator('input[placeholder="登录密码"]').fill('__wrong_password__')
-await win.locator('button:has-text("仅连接")').click()
+  // ---------- 3. SSH 连接（假密码，必须出现可见错误，不能变成成功终端） ----------
+  await win.locator('button[title="添加设备"]').click()
+  await win.locator('input[placeholder^="192.168"]').fill(host)
+  await win.locator('input.port').fill(String(port))
+  await win.locator('input[placeholder="root"]').fill(user)
+  await win.locator('input[placeholder="登录密码"]').fill('__wrong_password__')
+  await win.locator('button:has-text("仅连接")').click()
 
-// 跑满全程不做提前退出：早期退出条件容易被「正在连接」或本地标签的终端误判
-for (let i = 0; i < 6; i++) {
-  await win.waitForTimeout(1500)
-  const state = await win.evaluate(() => {
-    const hk = [...document.querySelectorAll('.dialog-header')]
-      .map((e) => e.textContent.trim())
-      .find((t) => t.includes('主机'))
-    return {
-      hostKey: hk ?? null,
-      tabCount: document.querySelectorAll('.tab').length,
-      placeholder: document.querySelector('.tab-placeholder')?.textContent?.trim() ?? null,
-      // 终端面板挂载 = shell 通道已建立（认证成功）
-      hasTerminal: !!document.querySelector('.terminal-container'),
-      dialogOpen: !!document.querySelector('.overlay')
+  const deadline = Date.now() + 30000
+  let authError = ''
+  while (Date.now() < deadline && !authError) {
+    const hostKey = win.locator('.overlay .dialog-header', { hasText: '主机' })
+    if (await hostKey.count()) {
+      await win.screenshot({ path: join('shots', '20-hostkey.png') })
+      await win.locator('button:has-text("信任并保存")').click()
     }
-  })
-  console.log(`[${(i + 1) * 1.5}s] ${JSON.stringify(state)}`)
-  if (state.hostKey) {
-    await win.screenshot({ path: join('shots', '20-hostkey.png') })
-    await win.locator('button:has-text("信任并保存")').click()
-    console.log('  → 已点「信任并保存」')
+    authError = await win.evaluate(() =>
+      [...document.querySelectorAll('.tab-placeholder')]
+        .map((el) => el.textContent?.trim() ?? '')
+        .find((text) => text.includes('连接失败')) ?? ''
+    )
+    if (!authError) await win.waitForTimeout(250)
   }
-}
-
-await win.screenshot({ path: join('shots', '21-ssh-result.png') })
-console.log('\n渲染进程报错:', consoleErrors.length ? consoleErrors.slice(0, 5) : '无')
-
-// 收尾：本脚本会留下一个连不上的 SSH 标签，别让它变成用户下次开机的布局
-await win.evaluate(() => window.api.setLayout({ tabs: [] }))
-await app.close()
+  check('错误密码产生可见的连接失败', authError.includes('连接失败'), authError || '30 秒内无失败状态')
+  check('错误认证没有建立可见 SSH shell',
+    (await win.locator('.tab-content:visible .terminal-container').count()) === 0)
+  await win.screenshot({ path: join('shots', '21-ssh-result.png') })
+  console.log('\n渲染进程 console error:', consoleErrors.length ? consoleErrors.slice(0, 5) : '无')
+}, { prefix: 'dox-ui-flows-' })

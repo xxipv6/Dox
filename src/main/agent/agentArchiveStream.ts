@@ -11,6 +11,8 @@ import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { AgentArchiveEvent, AgentManager } from './AgentManager'
 import { STREAM_CANCELED } from './agentStream.ts'
+import { createStreamCancellation } from './streamCancellation.ts'
+import { materializeHardlink } from '../sftp/tarDisk.ts'
 import {
   TarParser,
   safeLocalJoin,
@@ -60,42 +62,11 @@ export function createAgentArchiveIO(
   const call = <T>(method: string, params: unknown): Promise<T> =>
     agents.call(sessionId, containerName, method, params) as Promise<T>
 
-  /** 取消先结束本地等待；远端 abort 只发一次且绝不阻塞 UI/队列收尾。 */
-  const cancellation = (
-    isCanceled: () => boolean,
-    registerCancel: (cancel: () => void) => () => void,
-    remoteAbort: () => Promise<unknown>
-  ) => {
-    let canceled = false
-    let reject!: (err: Error) => void
-    const interrupted = new Promise<never>((_resolve, rej) => {
-      reject = rej
-    })
-    // 任务正常完成时这个 Promise 永远不会进入 race，也不能留下未处理拒绝。
-    void interrupted.catch(() => undefined)
-    const cancel = (): void => {
-      if (canceled) return
-      canceled = true
-      reject(new Error(STREAM_CANCELED))
-      void remoteAbort().catch(() => undefined)
-    }
-    const dispose = registerCancel(cancel)
-    const check = (): void => {
-      if (isCanceled()) cancel()
-      if (canceled) throw new Error(STREAM_CANCELED)
-    }
-    const wait = <T>(pending: Promise<T>): Promise<T> => {
-      check()
-      return Promise.race([pending, interrupted])
-    }
-    return { check, wait, dispose }
-  }
-
   return {
     async upload(entries, remoteDir, onProgress, isCanceled, registerCancel) {
       const id = randomUUID()
       const total = entries.reduce((n, entry) => n + tarEntryBytes(entry), 0) + tarTrailer().length
-      const ctl = cancellation(isCanceled, registerCancel, () => call('fs_extract_abort', { id }))
+      const ctl = createStreamCancellation(isCanceled, registerCancel, () => call('fs_extract_abort', { id }))
       const inFlight = new Set<Promise<void>>()
       let nextOffset = 0
       let confirmed = 0
@@ -195,7 +166,7 @@ export function createAgentArchiveIO(
 
     async download(remotePath, localDir, onProgress, isCanceled, registerCancel) {
       const id = randomUUID()
-      const ctl = cancellation(isCanceled, registerCancel, () => call('fs_archive_cancel', { id }))
+      const ctl = createStreamCancellation(isCanceled, registerCancel, () => call('fs_archive_cancel', { id }))
       const parser = new TarParser()
       let writer: FileHandle | null = null
       let currentFile: string | null = null
@@ -232,17 +203,7 @@ export function createAgentArchiveIO(
           currentFile = null
         },
         async onHardlink(entry) {
-          const targetPath = safeLocalJoin(localDir, entry.name)
-          if (!targetPath) return
-          const sourcePath = entry.linkName ? safeLocalJoin(localDir, entry.linkName) : null
-          if (!sourcePath) throw new Error(`硬链接目标越界或缺失：${entry.linkName ?? entry.name}`)
-          await fs.promises.mkdir(dirname(targetPath), { recursive: true })
-          try {
-            await fs.promises.copyFile(sourcePath, targetPath)
-          } catch (err) {
-            await fs.promises.unlink(targetPath).catch(() => undefined)
-            throw err
-          }
+          await materializeHardlink(localDir, entry)
         }
       }
 

@@ -179,8 +179,7 @@ Seti —— 那里的十六进制值是移植过来的原值，不走令牌层�
 `syntaxHighlighting()` 加 `fallback: true` 会被 basicSetup 的默认高亮全面压过；
 markdown 围栏代码要内嵌解析得取 `LanguageSupport.language`（直接塞 LanguageSupport 运行时会挂）。
 
-`verify-theme.mjs` 会切界面主题、并把它持久化 —— 所以脚本**开头记原值、收尾还回去**
-（本机主人选的深色不该被测试悄悄改写）。
+`verify-theme.mjs` 会在隔离 userData 中切界面主题并验证跨重启持久化；真实用户主题不会被测试改写。
 
 ### 3.4 主题不闪
 
@@ -263,8 +262,9 @@ HKCU。旧版若当年是 per-machine 装的（HKLM），覆盖安装会把它�
 两份 Dox 并存，任务栏固定图标 / 旧快捷方式启动的永远是旧版，表现为
 「装了新版，界面和内置 agent 还是老的，也没有升级按钮；卸载重装才好」。
 
-`build/installer.nsh` 的 `customInit` 补了这个盲区：per-user 安装时把 HKLM 里的
-旧安装也静默卸掉（保留 `%APPDATA%/dox`）。**改这个文件后必须跑一次
+`build/installer.nsh` 的 `customInstall` 补了这个盲区：per-user 安装时把 HKLM 里的
+旧安装也静默卸掉（保留 `%APPDATA%/dox`）。卸载器只启动一次，等待其进程退出，
+总预算 120 秒；超时或卸载注册项残留会中止安装，避免新旧并存。**改这个文件后必须跑一次
 `npm run pack:win`**（macOS 可交叉编译 NSIS，要挂镜像）—— makensis 语法错
 只有编译时才暴露，且 include 没接上是静默的（验证接线的方法：临时加一行
 `!error probe`，看构建是否炸）。文件展开点在 installUtil.nsh 之前，
@@ -307,7 +307,9 @@ node scripts/verify-search.mjs      # 项目搜索本机路径：纯函数 + e2e
 # …以及传输、编辑器、拖拽、rz/sz 等
 ```
 
-需要远端会话的脚本前置：`npm run build`，且已保存一个可连接的设备。
+需要远端会话的脚本前置：`npm run build`，连接参数通过命令行或环境变量显式提供。
+已迁移的高风险 Electron 脚本使用 `scripts/lib/electronHarness.mjs` 的唯一 userData/临时目录；
+迁移其它脚本时也必须复用它，不得再读取或清空真实配置。
 **这些脚本会对远端建临时文件并自己删掉，不装任何东西。**
 
 搜索的远端两条路要真机（密码走 `DOX_TEST_PASS` 环境变量，不进仓库）：
@@ -375,12 +377,11 @@ opt-in 入口，脚本走同一条路。容器一律起在 SSH 可达的测试�
   基线到达**之前**起的监听会被收进基线、永远不弹 —— 表现为偶发的「气泡没出现」。
   脚本里先订阅事件流、确认首帧到了再 start nc。同理 nc 经 exec 通道绑定可能错过
   1-2 个扫描周期，「秒推」断言的宽限要给到 ≥2 个周期。
-- **改了真实配置就必须还原。** 验证脚本跑的是真实应用、读写的是真实
-  `%APPDATA%/dox/`——在一次设备/指纹/布局之外，**设置项**也是共享状态。
-  脚本里拨了一个开关测「关掉会怎样」，测完没拨回去，用户下次开应用功能就是关的，
-  而且毫无线索可查（实测踩过：监控条「没出现」，查到最后是上一轮测试留下的
-  `false`）。凡是会落盘的改动，脚本收尾一律恢复原状——与「远端临时文件自己删掉」
-  是同一类卫生要求，只不过这份垃圾留在本机配置里。
+- **改了真实配置就必须还原；优先根本别碰。** 已迁移的验证脚本通过共享 Electron
+  harness 使用唯一 `--user-data-dir`，设置、布局、账号和 localStorage 都随临时目录清理。
+  尚未迁移的旧脚本仍可能读写真实 `%APPDATA%/dox/`，在迁移前必须保存并恢复所有设置项。
+  真实 CLI 安装验证例外：HOME/LOCALAPPDATA 隔离，Windows 用户 PATH 和已有 CLI 文件
+  在最外层 finally 恢复；恢复失败必须判失败，不能静默清理成空值。
 - **任务/载荷对象里带函数字段 = IPC 序列化炸弹。** TransferManager 的容器传输
   给任务挂了 `_prepare/_finalize/_cleanupStage` 钩子函数，而 `list()`/`snapshot()`
   当初只剥 `_cancel` —— 函数过不了结构化克隆，广播与 invoke 返回值全线
@@ -535,8 +536,8 @@ node scripts/generate-icon.mjs --preview   # 另出 shots/icon-sizes.png（16/32
 - **macOS 未签名构建不支持自动更新**（Squirrel.Mac 要比对签名证书），
   启动时 `codesign -dv` 探一次 Developer ID 决定 supported。但「有没有新版」
   照样查：轻量检查只拉 `latest-mac.yml` 比版本号（不下载不安装，签名管不着），
-  发现新版在标题栏冒提示点、引导去镜像手动下载 dmg。将来接上签名公证后
-  不用改代码，探到证书自动解锁完整自动更新。
+  发现新版在标题栏冒提示点、引导去镜像手动下载 dmg。将来接签名公证时需在
+  `electron-builder.yml` 移除 `identity: null` 并提供证书；运行时探到证书后会自动解锁完整自动更新。
 - 真机验证只能在 Windows：装旧版 → 设置 → 检查更新 → 下载 → 重启安装。
   mac 本机（未签名）永远是 supported=false，验不了链路。
 

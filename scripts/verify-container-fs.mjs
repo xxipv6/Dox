@@ -240,7 +240,7 @@ check('容器目录下载保留硬链接内容', dlDirHard === 'key=value1\n', d
 const stageLeft = await remoteExec(`ls -d /tmp/.dox-stage-* 2>/dev/null || echo CLEAN`)
 check('宿主机中转目录已清理', stageLeft.includes('CLEAN'), stageLeft)
 
-// ---- 大文件直传（agent ≥0.4.0 分块流式，不经宿主中转/docker cp）----
+// ---- 大文件直传（agent ≥0.9.6 连续区间分块流式，不经宿主中转/docker cp）----
 /** 等队列清空（所有任务到终态），返回任务列表 */
 async function waitTransfers() {
   for (let i = 0; i < 90; i++) {

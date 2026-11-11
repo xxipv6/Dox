@@ -9,9 +9,9 @@
  * 用法：node scripts/verify-direct-container.mjs [host] [port] [user] [password]
  * 前置：npm run build；dox-sshd-test dind + inner 在跑
  */
-import { _electron as electron } from 'playwright'
 import { Client } from 'ssh2'
 import { mkdirSync } from 'node:fs'
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
 const host = process.argv[2] ?? 'localhost'
 const port = Number(process.argv[3] ?? 2222)
@@ -55,21 +55,7 @@ const connCount = async () => {
 await remoteExec(`docker start ${INNER} 2>/dev/null || docker run -d --name ${INNER} alpine sleep 3600`)
 console.log('  夹具就绪：inner 运行中')
 
-// 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try {
-  if (process.platform === 'win32') {
-    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
-    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    ], { stdio: 'ignore' })
-  } else {
-    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
-  }
-} catch { /* 没有正好 */ }
-const app = await electron.launch({ args: ['.'] })
-const win = await app.firstWindow()
-win.on('dialog', (d) => void d.accept())
-await win.waitForLoadState('domcontentloaded')
+await withIsolatedElectron(async ({ win }) => {
 await win.waitForTimeout(1200)
 // DOM 渲染器（读 .xterm-rows 需要）。设置存主进程、渲染层 store 只在启动时
 // load 一次，所以 ligatures 必须在 reload **之前**写，收尾恢复
@@ -126,6 +112,7 @@ check('设备已保存并出现在侧栏', (await deviceRow.count()) === 1)
 
 const baseline = await connCount()
 console.log(`  基线 sshd 连接数：${baseline}`)
+check('连接数基线可测量（不可测量属于 environment-limited，不放行后续断言）', baseline >= 0, `baseline=${baseline}`)
 
 // ---- 展开设备行 → 传输会话列容器 ----
 await deviceRow.hover()
@@ -186,7 +173,7 @@ check('直连容器终端可交互（echo 回显）', echoed)
 // 连接数：基线 + 1（传输会话；docker exec 通道骑在同一条 TCP 上）
 await win.waitForTimeout(1000)
 const duringUse = await connCount()
-check('使用期间连接数 = 基线+1（只有传输会话）', baseline < 0 || duringUse === baseline + 1, `baseline=${baseline} during=${duringUse}`)
+check('使用期间连接数 = 基线+1（只有传输会话）', baseline >= 0 && duringUse === baseline + 1, `baseline=${baseline} during=${duringUse}`)
 
 // ---- 关容器标签 + 收起设备行 → 传输会话回收 ----
 await ctrTab.hover()
@@ -196,7 +183,7 @@ await deviceRow.hover()
 await deviceRow.locator('.device-expand').click() // 收起
 await win.waitForTimeout(2500)
 const afterRelease = await connCount()
-check('关标签+收起后传输会话被回收（连接数回落）', baseline < 0 || afterRelease === baseline, `baseline=${baseline} after=${afterRelease}`)
+check('关标签+收起后传输会话被回收（连接数回落）', baseline >= 0 && afterRelease === baseline, `baseline=${baseline} after=${afterRelease}`)
 
 // ---- 再展开：传输会话按需重连 ----
 await deviceRow.hover()
@@ -264,13 +251,13 @@ for (let i = 0; i < 20 && !orphanEcho; i++) {
 }
 check('孤儿保活：宿主标签没了容器终端仍可交互', orphanEcho)
 const orphanConn = await connCount()
-check('孤儿保活期间连接数 = 基线+1', baseline < 0 || orphanConn === baseline + 1, `baseline=${baseline} orphan=${orphanConn}`)
+check('孤儿保活期间连接数 = 基线+1', baseline >= 0 && orphanConn === baseline + 1, `baseline=${baseline} orphan=${orphanConn}`)
 
 // 关掉最后的容器标签 → 孤儿连接应被回收
 await win.locator('.tab', { hasText: `容器 · ${INNER}` }).locator('.tab-close').click()
 await win.waitForTimeout(2500)
 const drainedConn = await connCount()
-check('最后的容器标签关闭后孤儿连接回收', baseline < 0 || drainedConn === baseline, `baseline=${baseline} drained=${drainedConn}`)
+check('最后的容器标签关闭后孤儿连接回收', baseline >= 0 && drainedConn === baseline, `baseline=${baseline} drained=${drainedConn}`)
 
 // ---- 清理：删除测试设备 ----
 await deviceRow.hover()
@@ -282,7 +269,7 @@ hostKeyClicks.catch(() => {})
 ssh.end()
 await win.evaluate(() => window.api.setLayout({ tabs: [] }))
 if (origSettings) await win.evaluate((s) => window.api.setSettings(s), origSettings)
-await app.close()
+}, { prefix: 'dox-direct-container-' })
 
-console.log(failed ? '\n有失败项' : '\n全部通过')
-process.exit(failed ? 1 : 0)
+console.log(failed || process.exitCode ? '\n有失败项' : '\n全部通过')
+process.exit(failed || process.exitCode ? 1 : 0)

@@ -13,18 +13,19 @@
 import type { EditorState } from '@codemirror/state'
 import { reactive } from 'vue'
 
-const states = new Map<string, EditorState>()
+const states = new Map<string, { state: EditorState; reloadSeq: number }>()
 /** CSV/TSV 的「表格/文本」视图偏好（true = 表格；缺省按表格）。模块级 reactive，跨重挂载存活 */
 const csvPrefs = reactive<Record<string, boolean>>({})
 
 const keyOf = (sessionId: string, path: string): string => `${sessionId}\n${path}`
 
-export function getEditorState(sessionId: string, path: string): EditorState | undefined {
-  return states.get(keyOf(sessionId, path))
+export function getEditorState(sessionId: string, path: string, reloadSeq = 0): EditorState | undefined {
+  const cached = states.get(keyOf(sessionId, path))
+  return cached?.reloadSeq === reloadSeq ? cached.state : undefined
 }
 
-export function setEditorState(sessionId: string, path: string, state: EditorState): void {
-  states.set(keyOf(sessionId, path), state)
+export function setEditorState(sessionId: string, path: string, state: EditorState, reloadSeq = 0): void {
+  states.set(keyOf(sessionId, path), { state, reloadSeq })
 }
 
 export function deleteEditorState(sessionId: string, path: string): void {

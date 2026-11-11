@@ -13,10 +13,9 @@
  * 前置：npm run build
  * 不连任何远端，不改任何远端状态。
  */
-import { _electron as electron } from 'playwright'
-import { readFileSync } from 'node:fs'
-import { readdirSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
 const check = (label, ok, detail = '') => {
   console.log(`  ${ok ? '✓' : '✗'} ${label}${detail ? ` — ${detail}` : ''}`)
@@ -52,20 +51,7 @@ const toRgb = (hex) => {
 }
 const LEGACY_RGB = LEGACY.map(toRgb)
 
-// 单实例锁（CLI 伴侣）下，上次的僵尸实例会让本实例启动即退；只能杀本仓库的 electron
-try {
-  if (process.platform === 'win32') {
-    // Windows 没有 pkill：按可执行路径匹配本仓库的 electron（taskkill /IM 会误杀别的 Electron 应用）
-    (await import('node:child_process')).execFileSync('powershell', ['-NoProfile', '-Command',
-      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Where-Object { $_.ExecutablePath -like '*Dox\\node_modules\\electron*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    ], { stdio: 'ignore' })
-  } else {
-    (await import('node:child_process')).execFileSync('pkill', ['-f', 'Dox/node_modules/electron'], { stdio: 'ignore' })
-  }
-} catch { /* 没有正好 */ }
-const app = await electron.launch({ args: ['.'] })
-const win = await app.firstWindow()
-win.on('dialog', (d) => d.accept())
+await withIsolatedElectron(async ({ app, win, restart }) => {
 
 const themeNow = () => win.evaluate(() => document.documentElement.dataset.theme)
 const bodyBg = () =>
@@ -91,20 +77,7 @@ async function ensureTheme(target) {
 await win.waitForLoadState('domcontentloaded')
 await win.waitForTimeout(1200)
 
-/*
- * 阶段 1 断言「默认是亮色」，读的是**当前生效**的界面主题 —— 而设置是持久化的：
- * 本机主人把 Dox 切成深色之后，这条就会红（跟被测代码半点关系没有，纯环境）。
- * 所以先记下原值、把主题钉到亮色当基线，收尾再还回去。
- */
-const origTheme = await win.evaluate(async () => (await window.api.getSettings()).uiTheme)
-async function restoreTheme(page = win) {
-  try {
-    await page.evaluate(async (t) => {
-      const s = await window.api.getSettings()
-      await window.api.setSettings({ ...s, uiTheme: t })
-    }, origTheme ?? 'light')
-  } catch { /* 实例可能已经关掉了 */ }
-}
+/* 隔离 userData 默认是亮色；仍显式钉住基线，让本阶段不依赖默认值变化。 */
 
 // 清布局 + reload 必须在同一次 evaluate 里：布局 store 有 400ms 防抖自动保存，
 // 留出间隙它就会把当前标签重新写回快照
@@ -364,9 +337,7 @@ console.log('\n阶段 6：持久化跨重启')
 await ensureTheme('dark')
 await win.waitForTimeout(900)
 await app.close()
-
-const app2 = await electron.launch({ args: ['.'] })
-const win2 = await app2.firstWindow()
+const { app: app2, win: win2 } = await restart()
 // 尽早读：这里同时验了「启动即正确」——若不成立，用户会看到先闪一下亮色
 await win2.waitForLoadState('domcontentloaded')
 const earlyTheme = await win2.evaluate(() => document.documentElement.dataset.theme)
@@ -379,11 +350,7 @@ check(
   winBg.toLowerCase() === '#0b1220',
   winBg
 )
-// 收尾：把界面主题还回本机原值 —— 这个脚本自己会把主题切来切去，
-// 不还的话「本机主人选的深色」就被它悄悄改写成深色/亮色并持久化下去，
-// 下一次跑阶段 1 又会因为环境而红（吃过三次，见 memory: verify-needs-app-quit）
-await restoreTheme(win2)
-await app2.close()
+})
 
 // ---------- 阶段 7：静态守卫 ----------
 console.log('\n阶段 7：静态守卫（硬编码色不许再出现）')

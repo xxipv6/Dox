@@ -16,6 +16,9 @@ import type { AgentArchiveIO } from '../agent/agentArchiveStream'
 import { mkdirRemoteRecursive, posix, readdirP, statP, toPosixRel, unlinkP } from './sftpUtils.ts'
 import { execCapture, execStream } from '../ssh/remoteExec.ts'
 import { firstLine } from '../execError.ts'
+import type { RawTarIO } from '../container/containerTransfer.ts'
+import { materializeHardlink } from './tarDisk.ts'
+import { shQuote } from './shQuote.ts'
 import {
   TarParser,
   safeLocalJoin,
@@ -55,7 +58,7 @@ interface InternalTask extends TransferTask {
   _finalize?: () => Promise<void>
   _cleanupStage?: () => void
   /**
-   * 容器直传（agent ≥0.4.0 分块流式）：给了它就不走 SFTP pipe，
+   * 容器直传（agent ≥0.9.6 分块流式）：给了它就不走 SFTP pipe，
    * prepare/finalize/stage 全不需要 —— 没有宿主机中转这回事了。
    */
   _stream?: (task: InternalTask) => Promise<void>
@@ -94,10 +97,7 @@ export interface ContainerIO {
   /** agent ≥0.9.0 的目录归档流：整个文件夹一条任务 */
   archive?: AgentArchiveIO
   /** 容器有 sh+tar 时绕过 NDJSON/Base64 的原始 exec 整流 */
-  rawTar?: {
-    supportsTar(): Promise<boolean>
-    command(remotePath: string): string
-  }
+  rawTar?: RawTarIO
 }
 
 interface LocalFileItem {
@@ -105,11 +105,6 @@ interface LocalFileItem {
   size: number
   /** 相对被拖入根目录的 posix 相对路径，如 sub/a.txt */
   rel: string
-}
-
-/** shell 单引号转义（远端 exec 命令拼路径用） */
-function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
 /** tar 上传要走的本地条目（目录 + 文件，按遍历序） */
@@ -1190,7 +1185,7 @@ export class TransferManager {
 
     const makeTask = (lPath: string, rel: string, size: number, displayName?: string): InternalTask => {
       const ctrPath = posix.join(remoteDir, rel)
-      // agent ≥0.4.0：分块直传，无中转、真进度、distroless 可传
+      // agent ≥0.9.6：分块直传，无中转、真进度、distroless 可传
       const stream = io.stream
       if (stream) {
         const task = this.createTask(sessionId, 'upload', lPath, ctrPath, size, displayName, containerName)
@@ -1294,7 +1289,7 @@ export class TransferManager {
     return []
   }
 
-  /** 从容器下载文件：agent ≥0.4.0 分块直传；老 agent 回退 docker cp 中转 */
+  /** 从容器下载文件：agent ≥0.9.6 分块直传；老 agent 回退 docker cp 中转 */
   async enqueueDownloadContainer(
     sessionId: string,
     containerName: string,
@@ -2246,19 +2241,7 @@ export class TransferManager {
             currentFile = null
           },
           async onHardlink(entry) {
-            const p = safeLocalJoin(localDir, entry.name)
-            if (!p) return
-            const target = entry.linkName ? safeLocalJoin(localDir, entry.linkName) : null
-            if (!target) throw new Error(`硬链接目标越界或缺失：${entry.linkName ?? entry.name}`)
-            await fs.promises.mkdir(dirname(p), { recursive: true })
-            // 与 agent 归档的材料化口径一致：复制已解出的内容，不依赖本机
-            // 硬链接权限；目标通常已由 tar 放在前面，失败要显式报错而非少文件。
-            try {
-              await fs.promises.copyFile(target, p)
-            } catch (err) {
-              await fs.promises.unlink(p).catch(() => undefined)
-              throw err
-            }
+            await materializeHardlink(localDir, entry)
           }
         }
 

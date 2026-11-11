@@ -34,6 +34,7 @@ const active = computed(() => store.activeFile(props.sessionId))
 const hostEl = ref<HTMLDivElement | null>(null)
 let view: EditorView | null = null
 let mountedPath: string | null = null
+let mountedReloadSeq = 0
 
 /**
  * 每个文件保留自己的 EditorState，切换文件标签时来回 setState。
@@ -331,11 +332,12 @@ function teardown(): void {
   // 只给仍然开着的文件留 state：刚关闭的文件（列表里已没有）缓存下来，
   // 重开时会从缓存复活成关闭前的旧内容 —— 关掉再打开还是老内容就是这么来的
   if (view && mountedPath && store.filesOf(props.sessionId).some((f) => f.path === mountedPath)) {
-    setEditorState(props.sessionId, mountedPath, view.state)
+    setEditorState(props.sessionId, mountedPath, view.state, mountedReloadSeq)
   }
   view?.destroy()
   view = null
   mountedPath = null
+  mountedReloadSeq = 0
 }
 
 function sync(): void {
@@ -352,9 +354,10 @@ function sync(): void {
 
   teardown()
   const state =
-    getEditorState(props.sessionId, file.path) ??
+    getEditorState(props.sessionId, file.path, file.reloadSeq) ??
     EditorState.create({ doc: file.content, extensions: buildExtensions(file.path) })
   view = new EditorView({ state, parent: hostEl.value })
+  mountedReloadSeq = file.reloadSeq
   // 缓存下来的 state 里冻着**当时**的语法主题，用户中途切过深浅色的话已经过期了，
   // 这里按当前主题就地重配一次（新 state 走 buildExtensions，本来就是对的不受影响）
   view.dispatch({ effects: themeCompartment.reconfigure(syntaxTheme()) })

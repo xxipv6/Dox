@@ -4,7 +4,7 @@ import type { SearchEngine, SearchEvent, SearchMatch, SearchStartParams } from '
 import { isLocalId } from '../../shared/sessionId'
 import { agentVersionOlder, FS_SEARCH_MIN_AGENT_VERSION } from '../../shared/agentVersion'
 import { execCapture, execStream } from '../ssh/remoteExec'
-import { runLocalStream } from '../container/localRun'
+import { runLocalStream } from '../local/localRun'
 import { resolveExecutable } from '../local/which'
 import type { AgentStatus } from '../agent/AgentManager'
 import {

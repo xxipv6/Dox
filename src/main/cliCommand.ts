@@ -1,4 +1,6 @@
 import { app, BrowserWindow } from 'electron'
+import { IpcChannels } from '../shared/ipc'
+import type { CliCommandPayload } from '../shared/types'
 
 /**
  * CLI 伴侣（dox 命令）的参数通道。
@@ -16,13 +18,7 @@ import { app, BrowserWindow } from 'electron'
  * 跟随开关不位移（实测踩过）。
  */
 
-export interface CliCommand {
-  kind: 'focus' | 'local' | 'connect'
-  cwd?: string
-  target?: string
-}
-
-export function parseCliArgv(argv: string[]): CliCommand | null {
+export function parseCliArgv(argv: string[]): CliCommandPayload | null {
   const raw = argv.find((a) => a === '--cli' || a.startsWith('--cli='))
   if (!raw) return null
   // `=` 形式值在开关里；空格形式取下一个裸参数（冷启动 argv 未重排时可兼容）
@@ -52,12 +48,12 @@ export function parseCliArgv(argv: string[]): CliCommand | null {
 }
 
 /** 窗口还没建好/没加载完时收到的命令先排队（second-instance 会早于第一帧） */
-let pending: CliCommand[] = []
+let pending: CliCommandPayload[] = []
 let rendererReady = false
 /** 冷启动参数只投递一次：渲染层每次 HMR 重载都会报 ready，不能重复开标签 */
 let bootDelivered = false
 
-function deliver(cmd: CliCommand): void {
+function deliver(cmd: CliCommandPayload): void {
   if (!rendererReady) {
     pending.push(cmd)
     return
@@ -70,7 +66,7 @@ function deliver(cmd: CliCommand): void {
   if (win.isMinimized()) win.restore()
   win.show()
   win.focus()
-  win.webContents.send('cli:command', cmd)
+  win.webContents.send(IpcChannels.cliCommand, cmd)
 }
 
 /**

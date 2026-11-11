@@ -469,7 +469,7 @@ async function onCtrMenuSelect(id: string): Promise<void> {
   }
   if (id === 'logs') {
     try {
-      await store.viewContainerLogs(tid, box, saved.id)
+      await store.viewContainerLogs(tid, box, saved.id, undefined, undefined, true)
     } catch (err) {
       pushToast(`查看日志失败：${errorText(err)}`)
     }

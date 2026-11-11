@@ -132,6 +132,11 @@ const NAVIGATION_ERROR: Record<FailureKind, string> = {
  * TerminalPanel 在挂载时就把 sessionId 捕获进各个闭包，换 id 会让输出被
  * 静默丢弃、输入打到已死的连接上。稳定 id 让重连对渲染进程几乎透明。
  */
+export interface SessionManagerOptions {
+  /** 断开前判断容器等后台消费者是否仍需借用该 SSH 连接。 */
+  shouldKeepAlive?: (id: string) => boolean
+}
+
 export class SessionManager {
   private sessions = new Map<string, ActiveSession>()
   /** requestId → 等待用户决策的 hostVerifier Promise resolve */
@@ -139,10 +144,15 @@ export class SessionManager {
   /** owner → 进行中的连接尝试（取消用：密码输错撞上慢服务器时用户能立刻收手） */
   private pendingConnects = new Map<WebContents, Set<{ abort: () => void }>>()
 
+  private readonly shouldKeepAlive?: (id: string) => boolean
+
   constructor(
     private readonly resolveSavedSession?: SavedSessionResolver,
-    private readonly knownHosts?: KnownHostsStore
-  ) {}
+    private readonly knownHosts?: KnownHostsStore,
+    options: SessionManagerOptions = {}
+  ) {
+    this.shouldKeepAlive = options.shouldKeepAlive
+  }
 
   /** 取消某个窗口名下全部进行中的连接（添加设备弹窗的「取消」在连接中也可点） */
   cancelConnect(owner: WebContents): number {
@@ -165,6 +175,12 @@ export class SessionManager {
       set.delete(entry)
       if (!set.size) this.pendingConnects.delete(owner)
     }
+  }
+
+  /** 只接收持久化会话 id；完整配置与解密认证在主进程内解析，不经过 IPC。 */
+  async connectSaved(savedSessionId: string, owner: WebContents, term: TermSize): Promise<string> {
+    if (!this.resolveSavedSession) throw new Error('当前环境无法解析已保存的会话')
+    return this.connect(this.resolveSavedSession(savedSessionId), owner, term, { savedSessionId })
   }
 
   /**
@@ -367,17 +383,20 @@ export class SessionManager {
     }
   }
 
-  /** 会话结束回调（ForwardManager 借此停止关联规则）；每次断开都会触发 */
-  onClosed: ((id: string) => void) | null = null
+  private closedListeners = new Set<(id: string) => void>()
+  private reconnectedListeners = new Set<(id: string) => void>()
 
-  /**
-   * 断开前问询：该会话是否还有容器通道骑在上面（ContainerManager 提供）。
-   * 返回 true 时 disconnect 不掐连接，只把它转成孤儿会话继续保活。
-   */
-  shouldKeepAlive: ((id: string) => boolean) | null = null
+  /** 会话结束订阅；每个监听者独立退订，后注册者不会覆盖既有清理链。 */
+  onClosed(cb: (id: string) => void): () => void {
+    this.closedListeners.add(cb)
+    return () => this.closedListeners.delete(cb)
+  }
 
-  /** 重连成功回调（ForwardManager 借此把转发规则重新建立起来） */
-  onReconnected: ((id: string) => void) | null = null
+  /** 重连成功订阅；返回退订函数。 */
+  onReconnected(cb: (id: string) => void): () => void {
+    this.reconnectedListeners.add(cb)
+    return () => this.reconnectedListeners.delete(cb)
+  }
 
   /**
    * 获取（或按需建立）该会话的 SFTP 通道。
@@ -628,8 +647,9 @@ export class SessionManager {
 
     if (shellExited) {
       // 用户自己敲了 exit —— 会话是他主动结束的。
-      // 这里若也去重连，用户就永远退不出这个终端了。
+      // shell channel 关闭不会关闭 SSH transport；这里必须主动 end，不能等 client close。
       this.sessions.delete(id)
+      source?.end()
       this.notifyStatus(session, 'closed')
       return
     }
@@ -709,7 +729,7 @@ export class SessionManager {
       else this.wireSession(session, opened.client, opened.shell!)
 
       this.notifyStatus(session, 'connected', undefined, { reconnected: true })
-      this.onReconnected?.(session.id)
+      for (const cb of [...this.reconnectedListeners]) cb(session.id)
       // 同 connect：后台预热 sftp 通道，重连后的首次列目录少一次往返
       void this.sftp(session.id).catch(() => undefined)
     } catch (err) {
@@ -745,7 +765,7 @@ export class SessionManager {
   private finalize(session: ActiveSession): void {
     for (const jump of session.jumps) jump.end()
     session.jumps = []
-    this.onClosed?.(session.id)
+    for (const cb of [...this.closedListeners]) cb(session.id)
   }
 
   /**

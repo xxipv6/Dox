@@ -784,7 +784,7 @@ const sftpTarget = computed<{ sessionId: string; container?: { parentSessionId: 
                         <p>连接失败：{{ pane.error }}</p>
                         <!-- 未保存的恢复标签没有凭证，重试无意义 —— 它有自己的重新认证入口 -->
                         <button
-                          v-if="tab.kind !== 'ssh' || tab.config"
+                          v-if="tab.kind !== 'ssh' || tab.savedSessionId || tab.config"
                           class="btn primary"
                           @click="store.reconnectPane(tab, pane)"
                         >重试</button>

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -74,7 +75,7 @@ func readLineWithDeadline(r *bufio.Reader, deadline time.Time) ([]byte, error) {
 
 func startTestTunnel(t *testing.T, hub *tunnelHub, id string) string {
 	t.Helper()
-	res, err := hub.start(json.RawMessage(`{"id":"`+id+`","listen_addr":"127.0.0.1:0"}`))
+	res, err := hub.start(json.RawMessage(`{"id":"` + id + `","listen_addr":"127.0.0.1:0"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +248,29 @@ func TestTunnelDial(t *testing.T) {
 	}
 }
 
+func TestTunnelSendAfterCloseDoesNotPanic(t *testing.T) {
+	hub := newTunnelHub(&safeEncoder{enc: json.NewEncoder(io.Discard)})
+	c := &tunnelConn{send: make(chan []byte, 1), done: make(chan struct{}), hub: hub, tunID: "d1", connID: 9}
+	hub.dials["d1:9"] = c
+
+	// 保留 findConn 返回的连接，在 data 入队前让另一路完成关闭。
+	found := hub.findConn("d1", 9)
+	found.closeOnce("", "")
+	found.send <- []byte("late")
+}
+
+func TestTunnelDialDuplicateConn(t *testing.T) {
+	hub, _ := newPipeHub(t)
+	defer hub.closeAll()
+	raw, _ := json.Marshal(map[string]interface{}{"id": "d1", "conn": 42, "target_addr": "127.0.0.1:1"})
+	if _, err := hub.dial(raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.dial(raw); err == nil {
+		t.Fatal("重复 (id, conn) 必须拒绝，不能覆盖原拨号状态")
+	}
+}
+
 // 拨号失败：不是协议错误，回 close+err 帧让应用侧关连接
 func TestTunnelDialFail(t *testing.T) {
 	hub, events := newPipeHub(t)
@@ -264,6 +288,102 @@ func TestTunnelDialFail(t *testing.T) {
 	if cls.Conn != 7 || cls.Err == "" {
 		t.Fatalf("close 帧应带 err: %+v", cls)
 	}
+}
+
+type trackedTunnelConn struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newTrackedTunnelConn() (*trackedTunnelConn, net.Conn) {
+	left, right := net.Pipe()
+	return &trackedTunnelConn{Conn: left, closed: make(chan struct{})}, right
+}
+
+func (c *trackedTunnelConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { close(c.closed) })
+	return err
+}
+
+func TestTunnelDialReturnCloseRace(t *testing.T) {
+	for round := 0; round < 100; round++ {
+		hub := newTunnelHub(&safeEncoder{enc: json.NewEncoder(io.Discard)})
+		nc, peer := newTrackedTunnelConn()
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		hub.dialTimeout = func(string, string, time.Duration) (net.Conn, error) {
+			close(entered)
+			<-release
+			return nc, nil
+		}
+		connect, _ := json.Marshal(map[string]interface{}{"id": "d1", "conn": 1, "target_addr": "injected"})
+		if _, err := hub.dial(connect); err != nil {
+			t.Fatal(err)
+		}
+		<-entered
+		closed := make(chan struct{})
+		go func() {
+			<-release
+			raw, _ := json.Marshal(map[string]interface{}{"id": "d1", "conn": 1})
+			_ = hub.closeTunnel(raw)
+			close(closed)
+		}()
+		close(release)
+		<-closed
+		select {
+		case <-nc.closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("拨号返回与关闭竞争后连接未被收口")
+		}
+		_ = peer.Close()
+		hub.closeAll()
+	}
+}
+
+type acceptCloseListener struct {
+	hub    *tunnelHub
+	nc     net.Conn
+	closed chan struct{}
+	once   sync.Once
+	first  bool
+}
+
+func (l *acceptCloseListener) Accept() (net.Conn, error) {
+	if !l.first {
+		l.first = true
+		// 模拟 Accept 已成功取出连接，但 close 在它返回 acceptLoop 前完成。
+		raw, _ := json.Marshal(map[string]interface{}{"id": "a1"})
+		if err := l.hub.closeTunnel(raw); err != nil {
+			return nil, err
+		}
+		return l.nc, nil
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+func (l *acceptCloseListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+func (l *acceptCloseListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func TestTunnelAcceptReturnAfterClose(t *testing.T) {
+	hub := newTunnelHub(&safeEncoder{enc: json.NewEncoder(io.Discard)})
+	nc, peer := newTrackedTunnelConn()
+	ln := &acceptCloseListener{hub: hub, nc: nc, closed: make(chan struct{})}
+	hub.listen = func(string, string) (net.Listener, error) { return ln, nil }
+	if _, err := hub.start(json.RawMessage(`{"id":"a1","listen_addr":"injected"}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-nc.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept 在隧道关闭后返回的连接必须直接关闭")
+	}
+	_ = peer.Close()
+	hub.closeAll()
 }
 
 // 发送队列溢出：对端不读还继续灌 → 这条连接被断开（保护 serve 主循环不被堵死）
@@ -306,7 +426,7 @@ func TestTunnelSendOverflow(t *testing.T) {
 	}
 	select {
 	case ev := <-closed:
-		if !strings.Contains(ev.Err, "溢出") && ev.Err == "" {
+		if ev.Err == "" || !strings.Contains(ev.Err, "溢出") {
 			t.Fatalf("溢出断开的 err 应说明原因: %+v", ev)
 		}
 	case <-time.After(10 * time.Second):

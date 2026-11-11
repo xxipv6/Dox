@@ -12,7 +12,7 @@ export type SshAuth =
  */
 export const AUTH_DECRYPT_FAILED = '[AUTH_DECRYPT_FAILED]'
 
-/** 建立一条 SSH 会话所需的完整配置（含明文敏感信息，只在主进程内存中流转） */
+/** 完整连接配置：仅用于用户主动提交的临时连接；已保存凭证不得由主进程回传渲染层 */
 export interface SshSessionConfig {
   host: string
   port: number
@@ -75,7 +75,7 @@ export interface NetConnsResult {
   truncated: boolean
 }
 
-/** 持久化到本地的会话配置（敏感字段经 safeStorage 加密，base64 存储） */
+/** 可返回渲染层的设备摘要；密文与解密认证都只保留在主进程存储层 */
 export interface SavedSession {
   id: string
   name: string
@@ -83,10 +83,7 @@ export interface SavedSession {
   port: number
   username: string
   authType: 'password' | 'key'
-  /** safeStorage.encryptString 后的 base64 */
-  encryptedPassword?: string
   privateKeyPath?: string
-  encryptedPassphrase?: string
   group?: string
   /** 跳板机：另一条已保存会话的 id */
   jumpHostId?: string

@@ -11,22 +11,7 @@ import type { Client } from 'ssh2'
 import { execCapture } from '../ssh/remoteExec'
 import type { AgentManager } from '../agent/AgentManager'
 import { agentVersionOlder } from '../../shared/agentVersion'
-
-export interface ProcInfo {
-  pid: number
-  ppid: number
-  user: string
-  rssBytes: number
-  cpuPercent: number
-  memPercent: number
-  command: string
-}
-
-export interface ProcListResult {
-  /** agent = 完整能力（瞬时 CPU 差分）；fallback-ps = ps 命令退化（CPU 为累计均值） */
-  via: 'agent' | 'fallback-ps'
-  processes: ProcInfo[]
-}
+import type { ProcInfo, ProcListResult } from '../../shared/types'
 
 /** 目标能不能用 agent 的 ps_*（装了且 ≥0.4.0） */
 async function agentCapable(

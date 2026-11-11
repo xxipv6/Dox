@@ -12,6 +12,12 @@ import { posix } from 'node:path'
 import type { Client } from 'ssh2'
 import { execCapture } from '../ssh/remoteExec.ts'
 import { assertContainerTarget } from './runtime.ts'
+import { shQuote } from '../sftp/shQuote.ts'
+
+export interface RawTarIO {
+  supportsTar(): Promise<boolean>
+  command(remotePath: string): string
+}
 
 export interface ContainerTransferIO {
   /** docker cp：from/to 中带 `容器名:` 前缀的一侧是容器路径 */
@@ -19,21 +25,13 @@ export interface ContainerTransferIO {
   /** 删宿主机上的中转文件/目录（尽力而为，不抛错） */
   rmHostStage(path: string): Promise<void>
   /** 远端容器的原始 tar 快路径；本机容器探测会返回 false */
-  rawTar: {
-    supportsTar(): Promise<boolean>
-    command(remotePath: string): string
-  }
+  rawTar: RawTarIO
 }
 
 /** 校验并转义容器路径（容器路径进 shell 命令，双引号包裹 + 转义） */
 function dq(s: string): string {
   if (s.includes('\n')) throw new Error('路径不允许换行')
   return s.replace(/(["\\$`])/g, '\\$1')
-}
-
-/** shell 单引号转义（runtime 与容器路径进远端 exec 命令用） */
-function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
 export function createContainerTransferIO(

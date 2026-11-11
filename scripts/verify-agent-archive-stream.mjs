@@ -250,7 +250,7 @@ try {
     archiveHandlers.clear()
   })
   const hello = await call('hello', {})
-  check('agent 版本为 0.9.5', hello?.version === '0.9.5', hello?.version)
+  check('agent 版本为 0.9.6', hello?.version === '0.9.6', hello?.version)
 
   tm = new TransferManager(() => Promise.resolve(sftp), () => {}, () => ssh)
   const io = {

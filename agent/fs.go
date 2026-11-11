@@ -15,10 +15,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -128,6 +130,8 @@ func fsRead(params json.RawMessage) (interface{}, error) {
 	}, nil
 }
 
+var fsWriteRenameMu sync.Mutex
+
 func fsWrite(params json.RawMessage) (interface{}, error) {
 	var p struct {
 		Path          string `json:"path"`
@@ -147,13 +151,36 @@ func fsWrite(params json.RawMessage) (interface{}, error) {
 	if err != nil {
 		return nil, errors.New("data 不是合法 base64")
 	}
-	// 先写临时文件再改名：写一半崩了不留下半截内容
-	tmp := p.Path + ".dox-tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// 同目录随机临时文件避免同目标并发写共享 inode；rename 前继承原权限，
+	// 否则可执行文件经编辑器保存后会丢掉执行位。
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(p.Path); statErr == nil {
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(statErr) {
+		return nil, statErr
+	}
+	f, err := os.CreateTemp(filepath.Dir(p.Path), "."+filepath.Base(p.Path)+doxTmpMarker+"*")
+	if err != nil {
 		return nil, err
 	}
-	if err := os.Rename(tmp, p.Path); err != nil {
-		_ = os.Remove(tmp)
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	// Windows 不允许两个 MoveFileEx 同时替换同一目标；只把最终 rename 串行化。
+	fsWriteRenameMu.Lock()
+	err = os.Rename(tmp, p.Path)
+	fsWriteRenameMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	info, err := os.Stat(p.Path)
@@ -239,59 +266,36 @@ func fsDelete(params json.RawMessage) (interface{}, error) {
 	return map[string]bool{"ok": true}, nil
 }
 
+type fsHandler func(json.RawMessage) (interface{}, error)
+
+// fsHandlers 是 FS 协议唯一事实源：异步分类与执行都查询这张表。
+var fsHandlers = map[string]fsHandler{
+	"fs_list":         fsList,
+	"fs_stat":         fsStat,
+	"fs_read":         fsRead,
+	"fs_write":        fsWrite,
+	"fs_mkdir":        fsMkdir,
+	"fs_rename":       fsRename,
+	"fs_delete":       fsDelete,
+	"fs_archive":      fsArchive,
+	"fs_usage":        fsUsage,
+	"fs_du":           fsDu,
+	"fs_search":       fsSearch,
+	"fs_read_chunk":   fsReadChunk,
+	"fs_write_begin":  fsWriteBegin,
+	"fs_write_chunk":  fsWriteChunk,
+	"fs_write_commit": fsWriteCommit,
+	"fs_write_abort":  fsWriteAbort,
+}
+
 // dispatchFS：fs_* 方法的统一分发（serve 主循环调用）
 func dispatchFS(method string, params json.RawMessage) (interface{}, bool, error) {
-	switch method {
-	case "fs_list":
-		r, err := fsList(params)
-		return r, true, err
-	case "fs_stat":
-		r, err := fsStat(params)
-		return r, true, err
-	case "fs_read":
-		r, err := fsRead(params)
-		return r, true, err
-	case "fs_write":
-		r, err := fsWrite(params)
-		return r, true, err
-	case "fs_mkdir":
-		r, err := fsMkdir(params)
-		return r, true, err
-	case "fs_rename":
-		r, err := fsRename(params)
-		return r, true, err
-	case "fs_delete":
-		r, err := fsDelete(params)
-		return r, true, err
-	case "fs_archive":
-		r, err := fsArchive(params)
-		return r, true, err
-	case "fs_usage":
-		r, err := fsUsage(params)
-		return r, true, err
-	case "fs_du":
-		r, err := fsDu(params)
-		return r, true, err
-	case "fs_search":
-		r, err := fsSearch(params)
-		return r, true, err
-	case "fs_read_chunk":
-		r, err := fsReadChunk(params)
-		return r, true, err
-	case "fs_write_begin":
-		r, err := fsWriteBegin(params)
-		return r, true, err
-	case "fs_write_chunk":
-		r, err := fsWriteChunk(params)
-		return r, true, err
-	case "fs_write_commit":
-		r, err := fsWriteCommit(params)
-		return r, true, err
-	case "fs_write_abort":
-		r, err := fsWriteAbort(params)
-		return r, true, err
+	handler, ok := fsHandlers[method]
+	if !ok {
+		return nil, false, nil
 	}
-	return nil, false, nil
+	result, err := handler(params)
+	return result, true, err
 }
 
 // ---- fs_usage：statfs 某路径所在文件系统的容量 ----
@@ -471,6 +475,16 @@ func fsDu(params json.RawMessage) (interface{}, error) {
 
 const fsChunkMaxLen = 4 << 20 // 单块 4MB 上限
 
+type fsReadChunkFile interface {
+	io.ReaderAt
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
+var openFSReadChunkFile = func(path string) (fsReadChunkFile, error) {
+	return os.Open(path)
+}
+
 func fsReadChunk(params json.RawMessage) (interface{}, error) {
 	var p struct {
 		Path   string `json:"path"`
@@ -483,7 +497,7 @@ func fsReadChunk(params json.RawMessage) (interface{}, error) {
 	if p.Offset < 0 || p.Length <= 0 || p.Length > fsChunkMaxLen {
 		return nil, fmt.Errorf("offset/length 越界（单块上限 %d 字节）", fsChunkMaxLen)
 	}
-	f, err := os.Open(p.Path)
+	f, err := openFSReadChunkFile(p.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +510,10 @@ func fsReadChunk(params json.RawMessage) (interface{}, error) {
 		return nil, errors.New("是目录，不是文件")
 	}
 	buf := make([]byte, p.Length)
-	n, _ := f.ReadAt(buf, p.Offset)
+	n, err := f.ReadAt(buf, p.Offset)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
 	buf = buf[:n]
 	return map[string]interface{}{
 		"data":  base64.StdEncoding.EncodeToString(buf),
@@ -532,6 +549,106 @@ func tmpPathFor(path string) string {
 	return path + doxTmpMarker + hex.EncodeToString(sum[:4])
 }
 
+// 分块元数据记录已成功落盘的区间。物理文件 Size 只能说明最远写到了哪里，
+// 不能证明前面的块都成功；续传和 commit 都以连续前缀为准。
+type fsChunkRange struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end"`
+}
+
+type fsChunkMetadata struct {
+	Ranges []fsChunkRange `json:"ranges"`
+}
+
+var fsChunkMetadataMu sync.Mutex
+
+func fsChunkMetadataPath(tmp string) string { return tmp + ".ranges.json" }
+
+func loadFSChunkMetadata(tmp string) (fsChunkMetadata, error) {
+	raw, err := os.ReadFile(fsChunkMetadataPath(tmp))
+	if os.IsNotExist(err) {
+		return fsChunkMetadata{}, nil
+	}
+	if err != nil {
+		return fsChunkMetadata{}, err
+	}
+	var meta fsChunkMetadata
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return fsChunkMetadata{}, fmt.Errorf("分块元数据损坏: %w", err)
+	}
+	return meta, nil
+}
+
+func saveFSChunkMetadata(tmp string, meta fsChunkMetadata) error {
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	path := fsChunkMetadataPath(tmp)
+	f, err := os.CreateTemp(filepath.Dir(path), ".dox-ranges-")
+	if err != nil {
+		return err
+	}
+	staging := f.Name()
+	defer os.Remove(staging)
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// 同目录替换，避免 Agent 退出时把唯一的 sidecar 截成半截 JSON。
+	return os.Rename(staging, path)
+}
+
+func (m *fsChunkMetadata) addRange(start, end int64) {
+	if start == end {
+		return
+	}
+	m.Ranges = append(m.Ranges, fsChunkRange{Start: start, End: end})
+	sort.Slice(m.Ranges, func(i, j int) bool { return m.Ranges[i].Start < m.Ranges[j].Start })
+	merged := m.Ranges[:0]
+	for _, r := range m.Ranges {
+		if len(merged) == 0 || r.Start > merged[len(merged)-1].End {
+			merged = append(merged, r)
+			continue
+		}
+		if r.End > merged[len(merged)-1].End {
+			merged[len(merged)-1].End = r.End
+		}
+	}
+	m.Ranges = merged
+}
+
+func (m fsChunkMetadata) continuousPrefix() int64 {
+	var offset int64
+	for _, r := range m.Ranges {
+		if r.End <= offset {
+			continue
+		}
+		if r.Start > offset {
+			break
+		}
+		offset = r.End
+	}
+	return offset
+}
+
+func resetFSChunkState(tmp string) error {
+	for _, path := range []string{tmp, fsChunkMetadataPath(tmp)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeFSChunkState(tmp string) {
+	_ = os.Remove(tmp)
+	_ = os.Remove(fsChunkMetadataPath(tmp))
+}
+
 func fsWriteBegin(params json.RawMessage) (interface{}, error) {
 	var p struct {
 		Path string `json:"path"`
@@ -540,16 +657,39 @@ func fsWriteBegin(params json.RawMessage) (interface{}, error) {
 		return nil, errors.New("fs_write_begin 需要绝对路径 path")
 	}
 	tmp := tmpPathFor(p.Path)
-	var existing int64
-	if info, err := os.Stat(tmp); err == nil {
-		existing = info.Size()
-	}
-	// 没有 O_EXCL：续传就是「已存在就接着写」
+	fsChunkMetadataMu.Lock()
+	defer fsChunkMetadataMu.Unlock()
+	// 没有 O_EXCL：续传就是「已存在就接着写」。
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	_ = f.Close()
+	info, err := f.Stat()
+	closeErr := f.Close()
+	if err != nil {
+		return nil, err
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	meta, metaErr := loadFSChunkMetadata(tmp)
+	existing := meta.continuousPrefix()
+	// 损坏 sidecar、旧版只有物理长度的 tmp、以及尚未记录任何区间的
+	// 崩溃残留都不能安全续传；清掉后从零开始，而不是永久卡在 begin。
+	if metaErr != nil || (info.Size() > 0 && len(meta.Ranges) == 0) || existing > info.Size() {
+		if err := resetFSChunkState(tmp); err != nil {
+			return nil, err
+		}
+		meta = fsChunkMetadata{}
+		existing = 0
+		f, err = os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE, 0o644)
+		if err != nil {
+			return nil, err
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+	}
 	return map[string]interface{}{"tmp": tmp, "existing_size": existing}, nil
 }
 
@@ -572,12 +712,29 @@ func fsWriteChunk(params json.RawMessage) (interface{}, error) {
 	if len(data) > fsChunkMaxLen {
 		return nil, fmt.Errorf("单块超过 %d 字节上限", fsChunkMaxLen)
 	}
+	if p.Offset < 0 || p.Offset > math.MaxInt64-int64(len(data)) {
+		return nil, errors.New("chunk offset 越界")
+	}
 	f, err := os.OpenFile(p.Tmp, os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 	if _, err := f.WriteAt(data, p.Offset); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+
+	fsChunkMetadataMu.Lock()
+	defer fsChunkMetadataMu.Unlock()
+	meta, err := loadFSChunkMetadata(p.Tmp)
+	if err != nil {
+		return nil, err
+	}
+	meta.addRange(p.Offset, p.Offset+int64(len(data)))
+	if err := saveFSChunkMetadata(p.Tmp, meta); err != nil {
 		return nil, err
 	}
 	return map[string]int{"written": len(data)}, nil
@@ -600,15 +757,34 @@ func fsWriteCommit(params json.RawMessage) (interface{}, error) {
 	// 留着只会随失败传输堆积
 	if p.ExpectedMtime != nil {
 		if info, err := os.Stat(p.Path); err == nil && info.ModTime().Unix() != *p.ExpectedMtime {
-			_ = os.Remove(p.Tmp)
+			removeFSChunkState(p.Tmp)
 			return nil, errors.New("文件已被他人修改，拒绝覆盖（重新打开后再试）")
 		}
 	}
-	if err := os.Rename(p.Tmp, p.Path); err != nil {
-		_ = os.Remove(p.Tmp)
+	fsChunkMetadataMu.Lock()
+	meta, err := loadFSChunkMetadata(p.Tmp)
+	if err != nil {
+		fsChunkMetadataMu.Unlock()
 		return nil, err
 	}
-	info, err := os.Stat(p.Path)
+	info, err := os.Stat(p.Tmp)
+	if err != nil {
+		fsChunkMetadataMu.Unlock()
+		return nil, err
+	}
+	continuous := meta.continuousPrefix()
+	if continuous != info.Size() {
+		fsChunkMetadataMu.Unlock()
+		return nil, fmt.Errorf("临时文件分块不连续（连续 %d 字节，文件 %d 字节），请从 existing_size 续传", continuous, info.Size())
+	}
+	err = os.Rename(p.Tmp, p.Path)
+	fsChunkMetadataMu.Unlock()
+	if err != nil {
+		removeFSChunkState(p.Tmp)
+		return nil, err
+	}
+	_ = os.Remove(fsChunkMetadataPath(p.Tmp))
+	info, err = os.Stat(p.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -625,6 +801,6 @@ func fsWriteAbort(params json.RawMessage) (interface{}, error) {
 	if err := guardTmpPath(p.Tmp); err != nil {
 		return nil, err
 	}
-	_ = os.Remove(p.Tmp)
+	removeFSChunkState(p.Tmp)
 	return map[string]bool{"ok": true}, nil
 }

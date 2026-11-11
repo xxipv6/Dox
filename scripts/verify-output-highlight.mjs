@@ -19,6 +19,7 @@ import {
   mixHex,
   scanText
 } from '../src/renderer/src/utils/outputHighlight.ts'
+import { withIsolatedElectron } from './lib/electronHarness.mjs'
 
 let failed = false
 const check = (name, cond, extra = '') => {
@@ -146,15 +147,7 @@ check('混色：解析不出背景就退回前景色', mixHex('rgb(1,2,3)', '#00
 
 if (process.argv.includes('--e2e')) {
   console.log('阶段 2：端到端（隔离实例）')
-  const { _electron } = await import('playwright')
-  const { default: os } = await import('node:os')
-  const app = await _electron.launch({
-    args: ['.', `--user-data-dir=${os.tmpdir()}/dox-hl-e2e`],
-    cwd: process.cwd(),
-    env: { ...process.env, ELECTRON_RENDERER_URL: 'http://localhost:5173/' }
-  })
-  await app.firstWindow().then((w) => w.waitForLoadState('domcontentloaded'))
-  const win = await app.firstWindow()
+  await withIsolatedElectron(async ({ win }) => {
   await win.waitForTimeout(3000)
   await win
     .waitForFunction(() => document.querySelector('.terminal-container')?.clientWidth > 200, undefined, {
@@ -194,10 +187,10 @@ if (process.argv.includes('--e2e')) {
   check('端到端：装饰挂在容器里', found.inContainer)
   await win.screenshot({ path: 'shots/highlight-e2e.png' })
   console.log('  截图：shots/highlight-e2e.png（颜色需人工核对：IP 青、ERROR 红）')
-  await app.close()
+  }, { env: { ELECTRON_RENDERER_URL: 'http://localhost:5173/' }, prefix: 'dox-highlight-' })
 } else {
   console.log('（阶段 2 需要 dev 在跑：加 --e2e 参数）')
 }
 
-console.log(failed ? '\n结论: 存在失败项' : '\n结论: 全部通过')
-process.exit(failed ? 1 : 0)
+console.log(failed || process.exitCode ? '\n结论: 存在失败项' : '\n结论: 全部通过')
+process.exit(failed || process.exitCode ? 1 : 0)
